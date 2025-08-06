@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "re-searcher"
+version = "0.1.0"
+description = "Local semantic + keyword search with Zotero integration"
+authors = ["<you>"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+faiss-cpu = "*"
+pymupdf = "*"
+python-docx = "*"
+html2text = "*"
+fastapi = "*"
+uvicorn = {extras = ["standard"], version = "*"}
+tqdm = "*"
+rich = "*"
+pydantic = "^2"

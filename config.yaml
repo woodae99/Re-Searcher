@@ -1,0 +1,16 @@
+# config.yaml
+
+input_folder: /home/colin/Documents/SearchFiles
+output_folder: /home/colin/Documents/semantic-output
+
+file_types:
+  - .pdf
+  - .md
+  - .epub
+
+chunk_size: 300       # characters or tokens (used later)
+overlap: 50           # overlap between chunks
+encoding: utf-8
+
+log_progress: true
+save_raw_text: false   # can turn on later
