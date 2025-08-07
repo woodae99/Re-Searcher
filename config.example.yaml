@@ -7,6 +7,9 @@ file_types:
   - .pdf
   - .md
   - .epub
+  - .docx
+  - .html
+  - .htm
 
 chunk_size: 300       # characters or tokens (used later)
 overlap: 50           # overlap between chunks
@@ -14,3 +17,11 @@ encoding: utf-8
 
 log_progress: true
 save_raw_text: false   # can turn on later
+
+zotero:
+  enabled: false
+  # Path to your Zotero data directory.
+  # On Windows, this is typically in C:\\Users\\<YourUser>\\Zotero
+  # On macOS, this is typically in /Users/<YourUser>/Zotero
+  # On Linux, this is typically in /home/<YourUser>/Zotero
+  data_directory: ""
