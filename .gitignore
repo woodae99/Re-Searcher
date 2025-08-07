@@ -143,6 +143,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+config.yaml
 
 # Spyder project settings
 .spyderproject
@@ -205,5 +206,3 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-"config.yaml" 
-config.yaml 

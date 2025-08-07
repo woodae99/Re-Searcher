@@ -8,6 +8,8 @@ import pdfminer.high_level
 import markdown
 from ebooklib import epub
 from bs4 import BeautifulSoup
+import docx
+import html2text
 
 
 def load_config(config_path: Path) -> Dict:
@@ -46,6 +48,24 @@ def extract_epub_text(file_path: Path) -> str:
         return ""
 
 
+def extract_docx_text(file_path: Path) -> str:
+    try:
+        doc = docx.Document(file_path)
+        return "\n".join([p.text for p in doc.paragraphs])
+    except Exception as e:
+        print(f"[DOCX error] {file_path.name}: {e}")
+        return ""
+
+
+def extract_html_text(file_path: Path) -> str:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return html2text.html2text(f.read())
+    except Exception as e:
+        print(f"[HTML error] {file_path.name}: {e}")
+        return ""
+
+
 def extract_text(file_path: Path) -> str:
     suffix = file_path.suffix.lower()
     if suffix == ".pdf":
@@ -54,6 +74,10 @@ def extract_text(file_path: Path) -> str:
         return extract_md_text(file_path)
     elif suffix == ".epub":
         return extract_epub_text(file_path)
+    elif suffix == ".docx":
+        return extract_docx_text(file_path)
+    elif suffix in [".html", ".htm"]:
+        return extract_html_text(file_path)
     else:
         return ""
 
