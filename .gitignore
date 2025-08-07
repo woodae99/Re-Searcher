@@ -210,3 +210,4 @@ __marimo__/
 # Data folders for test files
 TestFiles/
 ZotDBTest/
+OutputFiles/
