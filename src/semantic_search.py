@@ -114,7 +114,11 @@ def process_zotero_library(library: List[Dict[str, Any]]) -> Dict[str, str]:
 
 if __name__ == "__main__":
     # --- Config and Path Setup ---
-    config_path = Path(__file__).parent.parent / "config.example.yaml"
+    # Prefer a user‑specific config.yaml; fall back to the example if not present
+    config_dir = Path(__file__).parent.parent
+    config_path = config_dir / "config.yaml"
+    if not config_path.exists():
+        config_path = config_dir / "config.example.yaml"
     cfg = load_config(config_path)
     output_dir = Path(cfg.get('output_folder', 'output'))
     os.makedirs(output_dir, exist_ok=True)

@@ -14,6 +14,7 @@ Re-Searcher is a tool designed to help researchers perform semantic and keyword 
 - **Faceted Filtering**: Filter search results by tags, collections, and year.
 - **API and UI**: A FastAPI backend provides a powerful API, and a Streamlit app provides a user-friendly interface.
 - **LLM-friendly**: Includes an API endpoint for summarizing text, making it easy to integrate with large language models.
+- **Ontology Expansion**: (Optional) Define your own conceptual framework in a YAML file; Re‑Searcher can expand your queries with related terms and synonyms defined in that ontology.
 
 ## Project Structure
 
@@ -34,7 +35,7 @@ Re-Searcher is a tool designed to help researchers perform semantic and keyword 
 2.  **Set up your environment**:
 
     - Rename `.env.example` to `.env` and add a secret API key.
-    - Update `config.example.yaml` with the paths to your input documents and Zotero data directory. Rename it to `config.yaml`.
+    - Update `config.example.yaml` with the paths to your input documents and Zotero data directory.  If you wish to enable ontology support, set the `ontology_file` field to point at a YAML file that defines your concepts (see `ontology.example.yaml` for a template).  Rename the file to `config.yaml`.
 
 3.  **Build the search index**:
 

@@ -74,7 +74,11 @@ def query_index(conn, query: str, max_results: int = 10):
 
 
 if __name__ == "__main__":
-    config_path = Path(__file__).parent / "config.yaml"
+    # Prefer a user‑specific config.yaml; fall back to the example if not present
+    config_dir = Path(__file__).parent.parent
+    config_path = config_dir / "config.yaml"
+    if not config_path.exists():
+        config_path = config_dir / "config.example.yaml"
     cfg = load_config(config_path)
     docs = walk_and_extract(cfg)
     print(f"\n✅ Extracted {len(docs)} documents.")

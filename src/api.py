@@ -13,8 +13,10 @@ from .semantic_search import (
     load_metadata,
     semantic_search as perform_semantic_search,
 )
+from .ontology import load_ontology, expand_terms
 from .main import query_index as perform_keyword_search
 from .extract_text import load_config
+from .zotero import get_db_connection
 from sentence_transformers import SentenceTransformer
 import sqlite3
 from langchain.chains.summarize import load_summarize_chain
@@ -67,14 +69,26 @@ app.add_middleware(
 # In a real-world app, you might use a more robust dependency injection system.
 def load_resources():
     """Load all necessary models and data indexes."""
-    global cfg, model, faiss_index, refs, chunks, db_conn
+    global cfg, model, faiss_index, refs, chunks, db_conn, ontology
 
-    config_path = Path(__file__).parent.parent / "config.example.yaml"
+    # Prefer a user‑specific config.yaml; fall back to the example if not present
+    config_dir = Path(__file__).parent.parent
+    config_path = config_dir / "config.yaml"
+    if not config_path.exists():
+        config_path = config_dir / "config.example.yaml"
     if not config_path.exists():
         raise RuntimeError(f"Configuration file not found at {config_path}")
 
     cfg = load_config(config_path)
     output_dir = Path(cfg.get('output_folder', 'output'))
+
+    # Load ontology if configured.  The ontology is optional; if the path
+    # is empty or the file does not exist the dictionary will be empty.
+    ont_path = cfg.get('ontology_file', '') or ''
+    try:
+        ontology = load_ontology(Path(ont_path).expanduser()) if ont_path else {}
+    except Exception:
+        ontology = {}
 
     # Load Semantic Search resources
     faiss_index_path = output_dir / "semantic_index.faiss"
@@ -150,12 +164,22 @@ class SearchResult(BaseModel):
 def search(query: SearchQuery):
     """Performs a search based on the query, mode, and top_k parameters."""
 
-    semantic_results = []
-    keyword_results = []
+    semantic_results: List[SearchResult] = []
+    keyword_results: List[SearchResult] = []
+
+    # Expand the query using the ontology if one is loaded.  The expansion
+    # yields a list of terms (concept names and synonyms); we then join
+    # them back into a single string for searching.  If no ontology is
+    # configured this is just the original query string.
+    try:
+        expanded_terms = expand_terms(query.query, ontology) if 'ontology' in globals() and ontology else query.query.split()
+        expanded_query = " ".join(expanded_terms)
+    except Exception:
+        expanded_query = query.query
 
     # Perform semantic search
     if query.mode in ["semantic", "hybrid"]:
-        raw_sem_results = perform_semantic_search(faiss_index, query.query, model, chunks, refs, k=query.top_k * 5) # Fetch more to filter
+        raw_sem_results = perform_semantic_search(faiss_index, expanded_query, model, chunks, refs, k=query.top_k * 5) # Fetch more to filter
 
         # This is post-filtering. For large datasets, pre-filtering or filtering during search is better.
         # This requires a more advanced setup (e.g., FAISS with metadata, or a different vector DB).
@@ -194,7 +218,7 @@ def search(query: SearchQuery):
 
     # Perform keyword search
     if query.mode in ["keyword", "hybrid"]:
-        raw_key_results = perform_keyword_search(db_conn, query.query, max_results=query.top_k * 5) # Fetch more to find matches
+        raw_key_results = perform_keyword_search(db_conn, expanded_query, max_results=query.top_k * 5) # Fetch more to find matches
         # Simple combination: just append keyword results to semantic
         # A real implementation would use a more sophisticated ranking fusion (like RRF)
         for path, snippet in raw_key_results:
