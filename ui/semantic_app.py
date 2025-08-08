@@ -1,14 +1,19 @@
 # ui/semantic_app.py
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 
-# --- Configuration ---
+# --- Configuration and API Key ---
+load_dotenv()
 API_URL = "http://127.0.0.1:8000"
+API_KEY = os.getenv("API_KEY")
+HEADERS = {"X-API-Key": API_KEY}
 
 
 # --- Utility Functions ---
@@ -32,7 +37,7 @@ def search_api(query: str, mode: str, top_k: int, filters: Dict[str, Any]):
     """Calls the backend search API with filters."""
     payload = {"query": query, "mode": mode.lower(), "top_k": top_k, **filters}
     try:
-        response = requests.post(f"{API_URL}/api/search", json=payload)
+        response = requests.post(f"{API_URL}/api/search", json=payload, headers=HEADERS)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -51,6 +56,7 @@ def get_filter_options():
         response = requests.post(
             f"{API_URL}/api/search",
             json={"query": "e", "mode": "keyword", "top_k": 1000},
+            headers=HEADERS,
         )
         response.raise_for_status()
         items = response.json()
@@ -62,7 +68,9 @@ def get_filter_options():
         for item in items:
             if item["path"].startswith("zotero-"):
                 doc_id = item["path"]
-                doc_response = requests.get(f"{API_URL}/api/doc/{doc_id}")
+                doc_response = requests.get(
+                    f"{API_URL}/api/doc/{doc_id}", headers=HEADERS
+                )
                 if doc_response.ok:
                     doc_data = doc_response.json()
                     all_tags.update(doc_data.get("tags", []))
@@ -136,7 +144,9 @@ with main_tab:
                 with st.expander("View Full Text"):
                     doc_id = res.get("path")
                     if doc_id:
-                        doc_response = requests.get(f"{API_URL}/api/doc/{doc_id}")
+                        doc_response = requests.get(
+                            f"{API_URL}/api/doc/{doc_id}", headers=HEADERS
+                        )
                         if doc_response.ok:
                             doc_data = doc_response.json()
                             full_text = ""
@@ -184,7 +194,9 @@ with advanced_tab:
                 with st.expander("View Full Text"):
                     doc_id = res.get("path")
                     if doc_id:
-                        doc_response = requests.get(f"{API_URL}/api/doc/{doc_id}")
+                        doc_response = requests.get(
+                            f"{API_URL}/api/doc/{doc_id}", headers=HEADERS
+                        )
                         if doc_response.ok:
                             doc_data = doc_response.json()
                             full_text = ""
