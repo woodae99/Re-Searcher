@@ -1,14 +1,15 @@
-import yaml
 import os
 import re
+import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
 import streamlit as st
-import sqlite3
+import yaml
 from sentence_transformers import SentenceTransformer
-from semantic_search import load_index, load_metadata, semantic_search
+
 from main import query_index
+from semantic_search import load_index, load_metadata, semantic_search
 
 # -----------------------------------------------------------------------------
 # CONFIG & PATHS
@@ -21,11 +22,13 @@ INDEX_FILE = OUTPUT_FOLDER / "semantic_index.faiss"
 DB_FILE = OUTPUT_FOLDER / "search_index.sqlite"
 CHUNK_META = OUTPUT_FOLDER / "semantic_chunks.json"
 
+
 # -----------------------------------------------------------------------------
 # UTILS
 # -----------------------------------------------------------------------------
 def clean(text: str) -> str:
     return " ".join(text.replace("\n", " ").split())
+
 
 def highlight(text: str, terms: list[str]) -> str:
     if not terms:
@@ -34,12 +37,14 @@ def highlight(text: str, terms: list[str]) -> str:
     pattern = re.compile("(" + "|".join(escaped) + ")", re.IGNORECASE)
     return pattern.sub(r"<mark>\1</mark>", text)
 
+
 def group_results(flat_results):
     grouped: dict[str, list[str]] = {}
     for ref, snippet in flat_results:
         fname = Path(ref).name
         grouped.setdefault(fname, []).append(snippet)
     return grouped
+
 
 # -----------------------------------------------------------------------------
 # LOAD
@@ -51,6 +56,7 @@ def load_all():
     model = SentenceTransformer("all-MiniLM-L6-v2")
     return index, refs, chunks, model
 
+
 index, refs, chunks, model = load_all()
 st.set_page_config(page_title="Semantic Search Advanced", layout="wide")
 
@@ -59,7 +65,9 @@ st.set_page_config(page_title="Semantic Search Advanced", layout="wide")
 # -----------------------------------------------------------------------------
 st.title("Advanced Search - Boolean & Fuzzy")
 
-query = st.text_input("Enter boolean query (+ must, - must not, quotes for exact) or fuzzy~").strip()
+query = st.text_input(
+    "Enter boolean query (+ must, - must not, quotes for exact) or fuzzy~"
+).strip()
 
 if query:
     # Use the raw SQLite connection for advanced queries
@@ -72,9 +80,9 @@ if query:
         # -term -> NOT
         # term~ -> fuzzy (edit distance) using Unicode61 tokenizer settings
         sql = (
-    "SELECT ref, snippet(chunks, 1, '<b>', '</b>', '...', 64) AS snip "
-    "FROM chunks WHERE chunk_text MATCH ? LIMIT 50;"
-)
+            "SELECT ref, snippet(chunks, 1, '<b>', '</b>', '...', 64) AS snip "
+            "FROM chunks WHERE chunk_text MATCH ? LIMIT 50;"
+        )
 
         matched = conn.execute(sql, (query,)).fetchall()
     finally:
@@ -86,7 +94,9 @@ if query:
         st.markdown(f"## {fname}")
         for snip in snippets[:3]:
             snip_cln = clean(snip)
-            terms = [t.strip('+-"~') for t in re.findall(r'[+\-]?"[^"]+"|[+\-]?\w+~?', query)]
+            terms = [
+                t.strip('+-"~') for t in re.findall(r'[+\-]?"[^"]+"|[+\-]?\w+~?', query)
+            ]
             snip_high = highlight(snip_cln, terms)
             st.markdown(f"- {snip_high}", unsafe_allow_html=True)
         if len(snippets) > 3:

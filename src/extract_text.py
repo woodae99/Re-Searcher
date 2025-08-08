@@ -1,19 +1,19 @@
 # extract_text.py
 
-import yaml
 from pathlib import Path
 from typing import Dict
 
-import pdfminer.high_level
-import markdown
-from ebooklib import epub
-from bs4 import BeautifulSoup
 import docx
 import html2text
+import markdown
+import pdfminer.high_level
+import yaml
+from bs4 import BeautifulSoup
+from ebooklib import epub
 
 
 def load_config(config_path: Path) -> Dict:
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
 
@@ -27,7 +27,7 @@ def extract_pdf_text(file_path: Path) -> str:
 
 def extract_md_text(file_path: Path) -> str:
     try:
-        with open(file_path, encoding='utf-8') as f:
+        with open(file_path, encoding="utf-8") as f:
             return markdown.markdown(f.read())
     except Exception as e:
         print(f"[MD error] {file_path.name}: {e}")
@@ -40,7 +40,7 @@ def extract_epub_text(file_path: Path) -> str:
         text = []
         for item in book.get_items():
             if item.get_type() == epub.ITEM_DOCUMENT:
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
+                soup = BeautifulSoup(item.get_content(), "html.parser")
                 text.append(soup.get_text())
         return "\n".join(text)
     except Exception as e:
@@ -59,7 +59,7 @@ def extract_docx_text(file_path: Path) -> str:
 
 def extract_html_text(file_path: Path) -> str:
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, "r", encoding="utf-8") as f:
             return html2text.html2text(f.read())
     except Exception as e:
         print(f"[HTML error] {file_path.name}: {e}")

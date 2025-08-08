@@ -1,9 +1,10 @@
 # zotero.py
 
+import json
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Any, Optional
-import json
+from typing import Any, Dict, List, Optional
+
 
 def get_db_connection(zotero_db: Path) -> Optional[sqlite3.Connection]:
     """Establishes a read-only connection to the Zotero SQLite database."""
@@ -20,11 +21,15 @@ def get_db_connection(zotero_db: Path) -> Optional[sqlite3.Connection]:
         print(f"Database connection error: {e}")
         return None
 
+
 def get_all_items(conn: sqlite3.Connection) -> List[sqlite3.Row]:
     """Retrieves all non-deleted items from the database."""
     cursor = conn.cursor()
-    cursor.execute("SELECT itemID, itemTypeID, dateAdded, dateModified FROM items WHERE itemID NOT IN (SELECT itemID FROM deletedItems)")
+    cursor.execute(
+        "SELECT itemID, itemTypeID, dateAdded, dateModified FROM items WHERE itemID NOT IN (SELECT itemID FROM deletedItems)"
+    )
     return cursor.fetchall()
+
 
 def get_item_data_values(conn: sqlite3.Connection, item_id: int) -> Dict[str, Any]:
     """Retrieves all metadata for a single item."""
@@ -37,7 +42,8 @@ def get_item_data_values(conn: sqlite3.Connection, item_id: int) -> Dict[str, An
     WHERE id.itemID = ?
     """
     cursor.execute(query, (item_id,))
-    return {row['fieldName']: row['value'] for row in cursor.fetchall()}
+    return {row["fieldName"]: row["value"] for row in cursor.fetchall()}
+
 
 def get_item_creators(conn: sqlite3.Connection, item_id: int) -> List[str]:
     """Retrieves all creators for a single item."""
@@ -50,23 +56,30 @@ def get_item_creators(conn: sqlite3.Connection, item_id: int) -> List[str]:
     ORDER BY ic.orderIndex
     """
     cursor.execute(query, (item_id,))
-    return [f"{row['firstName']} {row['lastName']}".strip() for row in cursor.fetchall()]
+    return [
+        f"{row['firstName']} {row['lastName']}".strip() for row in cursor.fetchall()
+    ]
+
 
 def get_item_tags(conn: sqlite3.Connection, item_id: int) -> List[str]:
     """Retrieves all tags for a single item."""
     cursor = conn.cursor()
     query = "SELECT t.name FROM itemTags it JOIN tags t ON it.tagID = t.tagID WHERE it.itemID = ?"
     cursor.execute(query, (item_id,))
-    return [row['name'] for row in cursor.fetchall()]
+    return [row["name"] for row in cursor.fetchall()]
+
 
 def get_item_collections(conn: sqlite3.Connection, item_id: int) -> List[str]:
     """Retrieves all collections for a single item."""
     cursor = conn.cursor()
     query = "SELECT c.collectionName FROM collectionItems ci JOIN collections c ON ci.collectionID = c.collectionID WHERE ci.itemID = ?"
     cursor.execute(query, (item_id,))
-    return [row['collectionName'] for row in cursor.fetchall()]
+    return [row["collectionName"] for row in cursor.fetchall()]
 
-def get_item_attachments(conn: sqlite3.Connection, item_id: int, zotero_storage_dir: Path) -> List[Dict[str, Any]]:
+
+def get_item_attachments(
+    conn: sqlite3.Connection, item_id: int, zotero_storage_dir: Path
+) -> List[Dict[str, Any]]:
     """Retrieves all attachments for a single item."""
     cursor = conn.cursor()
     query = "SELECT path, contentType FROM itemAttachments WHERE sourceItemID = ? AND path IS NOT NULL"
@@ -74,19 +87,21 @@ def get_item_attachments(conn: sqlite3.Connection, item_id: int, zotero_storage_
     attachments = []
     for row in cursor.fetchall():
         # Path is relative to the storage directory, e.g., 'storage:FILENAME.pdf'
-        if row['path'] and row['path'].startswith('storage:'):
-            filename = row['path'].split(':')[1]
+        if row["path"] and row["path"].startswith("storage:"):
+            filename = row["path"].split(":")[1]
             # The actual files are in subdirectories named with the item's key.
             # This requires another lookup to get the item key.
             key_cursor = conn.cursor()
             key_cursor.execute("SELECT key FROM items WHERE itemID = ?", (item_id,))
             item_key_row = key_cursor.fetchone()
             if item_key_row:
-                item_key = item_key_row['key']
-                attachments.append({
-                    "path": zotero_storage_dir / item_key / filename,
-                    "contentType": row['contentType']
-                })
+                item_key = item_key_row["key"]
+                attachments.append(
+                    {
+                        "path": zotero_storage_dir / item_key / filename,
+                        "contentType": row["contentType"],
+                    }
+                )
     return attachments
 
 
@@ -95,12 +110,18 @@ def get_item_notes(conn: sqlite3.Connection, item_id: int) -> List[str]:
     cursor = conn.cursor()
     query = "SELECT note FROM itemNotes WHERE parentItemID = ?"
     cursor.execute(query, (item_id,))
-    return [row['note'] for row in cursor.fetchall()]
+    return [row["note"] for row in cursor.fetchall()]
 
-def get_single_zotero_item(conn: sqlite3.Connection, item_id: int, zotero_storage_dir: Path) -> Optional[Dict[str, Any]]:
+
+def get_single_zotero_item(
+    conn: sqlite3.Connection, item_id: int, zotero_storage_dir: Path
+) -> Optional[Dict[str, Any]]:
     """Retrieves structured data for a single Zotero item."""
     cursor = conn.cursor()
-    cursor.execute("SELECT itemID, itemTypeID, dateAdded, dateModified FROM items WHERE itemID = ? AND itemID NOT IN (SELECT itemID FROM deletedItems)", (item_id,))
+    cursor.execute(
+        "SELECT itemID, itemTypeID, dateAdded, dateModified FROM items WHERE itemID = ? AND itemID NOT IN (SELECT itemID FROM deletedItems)",
+        (item_id,),
+    )
     item_row = cursor.fetchone()
 
     if not item_row:
@@ -109,9 +130,9 @@ def get_single_zotero_item(conn: sqlite3.Connection, item_id: int, zotero_storag
     return {
         "id": f"zotero-{item_id}",
         "zotero_id": item_id,
-        "item_type_id": item_row['itemTypeID'],
-        "date_added": item_row['dateAdded'],
-        "date_modified": item_row['dateModified'],
+        "item_type_id": item_row["itemTypeID"],
+        "date_added": item_row["dateAdded"],
+        "date_modified": item_row["dateModified"],
         "metadata": get_item_data_values(conn, item_id),
         "creators": get_item_creators(conn, item_id),
         "tags": get_item_tags(conn, item_id),
@@ -119,6 +140,7 @@ def get_single_zotero_item(conn: sqlite3.Connection, item_id: int, zotero_storag
         "attachments": get_item_attachments(conn, item_id, zotero_storage_dir),
         "notes": get_item_notes(conn, item_id),
     }
+
 
 def get_zotero_data(zotero_db: Path, zotero_storage_dir: Path) -> List[Dict[str, Any]]:
     """
@@ -132,7 +154,7 @@ def get_zotero_data(zotero_db: Path, zotero_storage_dir: Path) -> List[Dict[str,
     items = get_all_items(conn)
 
     for item_row in items:
-        item_id = item_row['itemID']
+        item_id = item_row["itemID"]
         item_data = get_single_zotero_item(conn, item_id, zotero_storage_dir)
         if item_data:
             all_items_data.append(item_data)
@@ -140,7 +162,8 @@ def get_zotero_data(zotero_db: Path, zotero_storage_dir: Path) -> List[Dict[str,
     conn.close()
     return all_items_data
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # --- Configuration ---
     # IMPORTANT: Update these paths to match your Zotero installation.
     # On Windows, this is typically in C:\\Users\\<YourUser>\\Zotero
@@ -159,8 +182,10 @@ if __name__ == '__main__':
         print(f"Successfully extracted data for {len(zotero_library)} items.")
 
         # Save the extracted data to a JSON file for inspection
-        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-            json.dump(zotero_library, f, indent=2, default=str) # Use default=str for Path objects
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                zotero_library, f, indent=2, default=str
+            )  # Use default=str for Path objects
         print(f"Full library data saved to: {OUTPUT_FILE}")
 
         # Print a summary of the first 5 items

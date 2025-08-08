@@ -1,18 +1,21 @@
 # ui/semantic_app.py
 
-import streamlit as st
-import requests
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+
+import requests
+import streamlit as st
 
 # --- Configuration ---
 API_URL = "http://127.0.0.1:8000"
+
 
 # --- Utility Functions ---
 def clean(text: str) -> str:
     """Collapse excess whitespace & line-breaks for a tidy snippet."""
     return " ".join(text.replace("\n", " ").split())
+
 
 def highlight(text: str, terms: list[str]) -> str:
     """Return *text* with every TERM wrapped in <mark>."""
@@ -21,6 +24,7 @@ def highlight(text: str, terms: list[str]) -> str:
     escaped = [re.escape(t) for t in terms if t]
     pattern = re.compile("(" + "|".join(escaped) + ")", re.IGNORECASE)
     return pattern.sub(r"<mark>\\1</mark>", text)
+
 
 # --- API Communication ---
 @st.cache_data(show_spinner="Searching...")
@@ -35,6 +39,7 @@ def search_api(query: str, mode: str, top_k: int, filters: Dict[str, Any]):
         st.error(f"API request failed: {e}")
         return None
 
+
 @st.cache_data(show_spinner="Loading filter options...")
 def get_filter_options():
     """Fetches all Zotero items to populate filter options."""
@@ -43,7 +48,10 @@ def get_filter_options():
     try:
         # This is a hack. The search endpoint should ideally provide filter options.
         # We search for a common term to get all documents.
-        response = requests.post(f"{API_URL}/api/search", json={"query": "e", "mode": "keyword", "top_k": 1000})
+        response = requests.post(
+            f"{API_URL}/api/search",
+            json={"query": "e", "mode": "keyword", "top_k": 1000},
+        )
         response.raise_for_status()
         items = response.json()
 
@@ -52,17 +60,17 @@ def get_filter_options():
         years = []
 
         for item in items:
-            if item['path'].startswith('zotero-'):
-                doc_id = item['path']
+            if item["path"].startswith("zotero-"):
+                doc_id = item["path"]
                 doc_response = requests.get(f"{API_URL}/api/doc/{doc_id}")
                 if doc_response.ok:
                     doc_data = doc_response.json()
-                    all_tags.update(doc_data.get('tags', []))
-                    all_collections.update(doc_data.get('collections', []))
-                    year_str = doc_data.get('metadata', {}).get('date', '')
+                    all_tags.update(doc_data.get("tags", []))
+                    all_collections.update(doc_data.get("collections", []))
+                    year_str = doc_data.get("metadata", {}).get("date", "")
                     if year_str:
                         try:
-                            years.append(int(year_str.split('-')[0]))
+                            years.append(int(year_str.split("-")[0]))
                         except (ValueError, IndexError):
                             pass
 
@@ -72,6 +80,7 @@ def get_filter_options():
 
     except requests.exceptions.RequestException:
         return [], [], 2000, 2024
+
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Re-Searcher", layout="wide")
@@ -84,7 +93,9 @@ with st.sidebar:
 
     selected_tags = st.multiselect("Tags", tags)
     selected_collections = st.multiselect("Collections", collections)
-    selected_year_range = st.slider("Year Range", min_year, max_year, (min_year, max_year))
+    selected_year_range = st.slider(
+        "Year Range", min_year, max_year, (min_year, max_year)
+    )
 
     filters = {
         "tags": selected_tags,
@@ -109,9 +120,9 @@ with main_tab:
         if results:
             st.subheader(f"Found {len(results)} results:")
             for i, res in enumerate(results):
-                path = res.get('path', 'Unknown Path')
-                snippet = res.get('snippet', 'No snippet available.')
-                score = res.get('score', 0.0)
+                path = res.get("path", "Unknown Path")
+                snippet = res.get("snippet", "No snippet available.")
+                score = res.get("score", 0.0)
 
                 fname = Path(path).name
                 st.markdown(f"**{i+1}. {fname}**")
@@ -123,13 +134,16 @@ with main_tab:
                 st.markdown(f"> {highlighted_snippet}...", unsafe_allow_html=True)
 
                 with st.expander("View Full Text"):
-                    doc_id = res.get('path')
+                    doc_id = res.get("path")
                     if doc_id:
                         doc_response = requests.get(f"{API_URL}/api/doc/{doc_id}")
                         if doc_response.ok:
                             doc_data = doc_response.json()
                             full_text = ""
-                            if "metadata" in doc_data and "fulltext" in doc_data["metadata"]:
+                            if (
+                                "metadata" in doc_data
+                                and "fulltext" in doc_data["metadata"]
+                            ):
                                 full_text = doc_data["metadata"]["fulltext"]
                             elif "notes" in doc_data:
                                 full_text += "\n\n".join(doc_data["notes"])
@@ -147,7 +161,7 @@ with main_tab:
 
 with advanced_tab:
     st.header("Advanced Keyword Search (SQLite FTS5)")
-    st.info("Example: `(semantic OR vector) AND NOT \"exact phrase\"`")
+    st.info('Example: `(semantic OR vector) AND NOT "exact phrase"`')
 
     advanced_query = st.text_input("Enter advanced keyword query", key="advanced_query")
 
@@ -157,24 +171,27 @@ with advanced_tab:
         if adv_results:
             st.subheader(f"Found {len(adv_results)} results:")
             for i, res in enumerate(adv_results):
-                path = res.get('path', 'Unknown Path')
-                snippet = res.get('snippet', 'No snippet available.')
+                path = res.get("path", "Unknown Path")
+                snippet = res.get("snippet", "No snippet available.")
 
                 fname = Path(path).name
                 st.markdown(f"**{i+1}. {fname}**")
 
-                terms = re.findall(r'[\\w\"]+', advanced_query)
+                terms = re.findall(r"[\\w\"]+", advanced_query)
                 highlighted_snippet = highlight(clean(snippet), terms)
                 st.markdown(f"> ...{highlighted_snippet}...", unsafe_allow_html=True)
 
                 with st.expander("View Full Text"):
-                    doc_id = res.get('path')
+                    doc_id = res.get("path")
                     if doc_id:
                         doc_response = requests.get(f"{API_URL}/api/doc/{doc_id}")
                         if doc_response.ok:
                             doc_data = doc_response.json()
                             full_text = ""
-                            if "metadata" in doc_data and "fulltext" in doc_data["metadata"]:
+                            if (
+                                "metadata" in doc_data
+                                and "fulltext" in doc_data["metadata"]
+                            ):
                                 full_text = doc_data["metadata"]["fulltext"]
                             elif "notes" in doc_data:
                                 full_text += "\n\n".join(doc_data["notes"])

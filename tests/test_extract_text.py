@@ -1,13 +1,14 @@
 # tests/test_extract_text.py
 
-from pathlib import Path
-import sys
 import os
+import sys
+from pathlib import Path
 
 # Add the src directory to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 from extract_text import extract_docx_text, extract_html_text, extract_text
+
 
 def test_extract_html_text():
     """Tests extracting text from an HTML file."""
@@ -15,6 +16,7 @@ def test_extract_html_text():
     text = extract_html_text(test_file)
     assert "This is a heading" in text
     assert "This is a paragraph." in text
+
 
 def test_extract_text_dispatcher_html():
     """Tests that the main extract_text function dispatches to the correct extractor for HTML."""

@@ -24,8 +24,10 @@ hierarchies.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Dict, List, Iterable
+from typing import Dict, Iterable, List
+
 import yaml
 
 
@@ -49,9 +51,9 @@ def load_ontology(path: Path | str) -> Dict[str, List[str]]:
     if not path.exists():
         return {}
     try:
-        with path.open('r', encoding='utf-8') as f:
+        with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-        concepts = data.get('concepts', {})
+        concepts = data.get("concepts", {})
         # ensure all values are lists of strings
         ontology: Dict[str, List[str]] = {}
         for key, value in concepts.items():
@@ -70,11 +72,11 @@ def load_ontology(path: Path | str) -> Dict[str, List[str]]:
 def expand_terms(query: str, ontology: Dict[str, List[str]]) -> List[str]:
     """Expand the terms in a query using an ontology.
 
-    This helper splits the incoming query on whitespace, then for each token
-    searches the ontology for matching concepts or synonyms.  Matching is
-    case‑insensitive.  When a match is found the corresponding concept and all
-    synonyms are added to the result set.  Otherwise the original token is
-    retained.
+    This helper searches the query for any terms (concepts or synonyms) defined
+    in the ontology. The matching is case-insensitive and respects word boundaries.
+    When a match is found, the corresponding concept and all its synonyms are
+    added to the result set, which also includes the original tokens from the
+    query.
 
     Parameters
     ----------
@@ -90,22 +92,23 @@ def expand_terms(query: str, ontology: Dict[str, List[str]]) -> List[str]:
     """
     if not query:
         return []
-    # normalise the ontology mapping for case‑insensitive lookup
-    normalized: Dict[str, str] = {}
+
+    # Start with the original tokens
+    expanded: set[str] = set(query.split())
+    query_lower = query.lower()
+
     for concept, synonyms in ontology.items():
-        normalized[concept.lower()] = concept
-        for syn in synonyms:
-            normalized[str(syn).lower()] = concept
-    tokens = query.split()
-    expanded: set[str] = set()
-    for token in tokens:
-        key = token.lower()
-        if key in normalized:
-            concept = normalized[key]
-            expanded.add(concept)
-            expanded.update([syn for syn in ontology.get(concept, [])])
-        else:
-            expanded.add(token)
+        # Create a list of all terms for a concept, including the concept name itself
+        all_terms = [concept] + synonyms
+        for term in all_terms:
+            # Use word boundaries to match whole words or phrases.
+            # This prevents matching "cat" in "caterpillar", for example.
+            if re.search(r"\b" + re.escape(term.lower()) + r"\b", query_lower):
+                # If a match is found, add the concept and all its synonyms
+                expanded.add(concept)
+                expanded.update(synonyms)
+                # Once one term for a concept matches, we can stop checking other terms for the same concept
+                break
     return list(expanded)
 
 
