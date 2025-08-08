@@ -1,0 +1,12 @@
+- Auditability from god to ground
+- Pragmatic razor (tool)
+- Non obsolescence (of extant knowledge, and this work) retention and reconstruction through regeneration / rederivation
+- Non exclusion
+- Pragmatic
+	- Accessibility
+	- Scalability
+	- Precision and speed on poles
+	- Intercontextual
+	- Nonprescriptive
+	- Pervasive application across all the areas of coaching. Teaching and learning, coach identity and practise development, specialism and practise contextualisation, skill and development inventory, unified conceptual model and language from which theory is emergent, supervision. Engagement - contracting, assessment, design, baselining, interventions, review, measurement, reporting. Clients - needs assessment and mapping, coach selection. Research design methodologies, metrics and evidence. Exception management - what to do when something happens outside of what we understand - feedback loops and formative intervention at all levels from philosophy to technique.
+- Compile at runtime

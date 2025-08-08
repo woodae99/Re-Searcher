@@ -1,0 +1,3 @@
+Unfolds eternally in concrescent actual occasions. 
+Cosmology, curtailed by the pragmatic razor (there is limited value in this context of exploring a complete cosmology, focus is on its pragmatic value to coaching in the modern context) is represented by involution - the deconstruction towards ultimate simplicity of God. The process that serves involution is entropy.
+Involution is a brute fact and entropy is its process [[involution]]
