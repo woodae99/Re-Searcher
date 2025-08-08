@@ -5,7 +5,7 @@ import json
 import os
 import textwrap
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import faiss
 import numpy as np
