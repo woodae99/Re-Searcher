@@ -12,9 +12,9 @@ import numpy as np
 import yaml
 from sentence_transformers import SentenceTransformer
 
-from extract_text import extract_text, load_config, walk_and_extract
-from main import chunk_documents
-from zotero import get_zotero_data
+from .extract_text import extract_text, load_config, walk_and_extract
+from .main import chunk_documents
+from .zotero import get_zotero_data
 
 INDEX_FILE = "semantic_index.faiss"
 CHUNK_META = "semantic_chunks.json"

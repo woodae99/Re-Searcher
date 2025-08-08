@@ -12,7 +12,7 @@ from typing import Dict, List
 
 import yaml
 
-from extract_text import load_config, walk_and_extract
+from .extract_text import load_config, walk_and_extract
 
 
 def chunk_text(text: str, size: int = 300, overlap: int = 50) -> List[str]:
