@@ -82,7 +82,7 @@ def get_item_attachments(
 ) -> List[Dict[str, Any]]:
     """Retrieves all attachments for a single item."""
     cursor = conn.cursor()
-    query = "SELECT path, contentType FROM itemAttachments WHERE sourceItemID = ? AND path IS NOT NULL"
+    query = "SELECT path, contentType FROM itemAttachments WHERE parentItemID = ? AND path IS NOT NULL"
     cursor.execute(query, (item_id,))
     attachments = []
     for row in cursor.fetchall():
