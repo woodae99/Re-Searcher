@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from langchain.chains.summarize import load_summarize_chain
-from langchain.llms import HuggingFacePipeline
+from langchain_community.llms import HuggingFacePipeline
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -24,43 +25,6 @@ from .ontology import expand_terms, load_ontology
 from .semantic_search import load_index, load_metadata
 from .semantic_search import semantic_search as perform_semantic_search
 from .zotero import get_db_connection
-
-# --- Environment and Rate Limiting ---
-load_dotenv()
-limiter = Limiter(key_func=get_remote_address)
-
-# --- FastAPI App Initialization ---
-app = FastAPI(
-    title="Re-Searcher API",
-    description="API for semantic and keyword search over a local document library.",
-    version="0.1.0",
-)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# --- Security ---
-API_KEY = os.getenv("API_KEY")
-API_KEY_NAME = "X-API-Key"
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
-
-
-async def get_api_key(api_key: str = Security(api_key_header)):
-    if api_key == API_KEY:
-        return api_key
-    else:
-        raise HTTPException(
-            status_code=403,
-            detail="Could not validate credentials",
-        )
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Or specify origins: ["http://localhost:8501"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # --- Configuration and Global Resources ---
@@ -117,20 +81,56 @@ def load_resources():
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Load resources on app startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load resources on app startup and clean up on shutdown."""
     print("Loading API resources...")
     load_resources()
     print("Resources loaded successfully.")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Clean up resources on app shutdown."""
+    yield
+    # Clean up resources
     if "db_conn" in globals():
         db_conn.close()
     print("API resources cleaned up.")
+
+
+# --- Environment and Rate Limiting ---
+load_dotenv()
+limiter = Limiter(key_func=get_remote_address)
+
+# --- FastAPI App Initialization ---
+app = FastAPI(
+    title="Re-Searcher API",
+    description="API for semantic and keyword search over a local document library.",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --- Security ---
+API_KEY = os.getenv("API_KEY")
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+
+
+async def get_api_key(api_key: str = Security(api_key_header)):
+    if api_key == API_KEY:
+        return api_key
+    else:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not validate credentials",
+        )
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Or specify origins: ["http://localhost:8501"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --- API Endpoints ---

@@ -13,7 +13,7 @@ import yaml
 from sentence_transformers import SentenceTransformer
 
 from .extract_text import extract_text, load_config, walk_and_extract
-from .main import chunk_documents
+from .main import chunk_documents, create_search_index, index_chunks
 from .zotero import get_zotero_data
 
 INDEX_FILE = "semantic_index.faiss"
@@ -165,6 +165,13 @@ if __name__ == "__main__":
         # 3. Chunk, Embed, Index
         chunked = chunk_documents(docs, cfg)
         print(f"✅ Chunked into {sum(len(v) for v in chunked.values())} total chunks.")
+
+        # 4. Build Keyword Index
+        db_path = output_dir / "search_index.sqlite"
+        conn = create_search_index(db_path)
+        index_chunks(conn, chunked)
+        conn.close()
+        print(f"✅ Indexed chunks in SQLite FTS5 at {db_path}\n")
 
         refs, chunks, embeddings = embed_chunks(
             chunked, cfg.get("embedding_model", "all-MiniLM-L6-v2")
