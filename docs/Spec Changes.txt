@@ -1,0 +1,56 @@
+Things to add to re-searcher
+
+Read with your proposed architectural changes:
+
+
+# Indexing
+## Setting up the index / sources
+have a settings page in the UI where index sources can be configured
+2.1 should be able to add multiple sources to the index - folders, web, etc.
+2.2 add/remove a file or folder to the index. Folder sources should be able to scan child folders, too
+2.3 add/remove a web source, such as a web page or site (Wikipedia, or some entry in https://plato.stanford.edu/ for example)
+
+## Managing the index
+some pdf's are readable to the eye, but for some reason, copying and pasting text from them results in garbage characters - so where the content of an import looks dodgy, put it in a log for the user to review
+be able to delete items from the index
+be able to manually add an item to the index -e.g. a file, web site (crawl)
+periodically scan or changes and update the index
+be able to manually initiate a source scan and index update
+be able to flush the index and "factory reset", clear caches and so on - return to a squeaky clean environment
+
+# System
+detect os, hardware and install appropriate, e.g. NVidia dependencies (my use case is Windows, but maintaining an Ubuntu variant would be good, too)
+streamline installation (env set up, configuration choices, and app start-up) (this might be something to consider at the end of development)
+
+# UI
+1. update the date handling feature - presets: "Past 12 months", "Past 5 years", "Custom", with "From and "To" date picker
+2. sort search results by:
+2.1 score (relevance)
+2.2 date
+2.3 file/source 
+2.4 file name
+2.5 author surname (if possible. Zotero should be easy, other doc types may not be obvious. some md files have an author field defined in the yaml header or else "unknown"
+3. filter search results by:
+- source type - e.g. pdf/epub, md file, other (that might be added later)
+4. Save searches
+- have a button that saves current search and list saved searches in the left panel, have the ability to support a hierarchy, like Topic - subtopic - sub-subtopic these are not necessarily related or dependent e.g. 
+- "Coaching Efficacy" 
+-- "Conceptualisation of Efficacy"
+-- "Evidence For..."
+-- "Critiques of"
+
+# Dream Functions
+- Be able to make analytics tables? e.g. where are conceptual efficacy AND evidence for, found. Or - put these into a visual data graph with clickable links
+- Be able to drill down into a search or document, a kind of "search within a search"
+
+# Ontologies
+- a visual ontology designer/editor 
+- a way to show searches (if possible) like a visual graph display
+
+# Housekeeping
+- remove the builds for previous versions of python.
+- Policy - use latest versions of components wherever possible
+
+Questions
+- how to quit the UI terminal?
+
