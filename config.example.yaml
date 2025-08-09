@@ -11,6 +11,12 @@ file_types:
   - .html
   - .htm
 
+# Optional: path to an ontology definition file.  When set, Re‑Searcher will
+# expand search queries with related terms defined in this ontology.  See
+# ``ontology.example.yaml`` for a sample structure.  Leave blank to disable
+# ontology support.
+ontology_file: ""
+
 chunk_size: 300       # characters or tokens (used later)
 overlap: 50           # overlap between chunks
 encoding: utf-8

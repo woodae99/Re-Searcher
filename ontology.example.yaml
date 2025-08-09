@@ -1,0 +1,23 @@
+# Example ontology for Re‑Searcher
+#
+# This file illustrates how to define a simple conceptual framework for use
+# with Re‑Searcher.  Each top‑level key under ``concepts`` represents a
+# concept name; the value is a list of related terms or synonyms.  When a
+# user submits a query containing either the concept name or any of its
+# synonyms, the system will expand the query to include all of the listed
+# terms.  For example, searching for ``emergence`` or ``self‑organization``
+# will search for both terms.
+
+concepts:
+  emergence:
+    - emergentism
+    - self‑organization
+    - self organization
+  complexity:
+    - complex systems
+    - systems theory
+    - complexity science
+  ontology:
+    - being
+    - existence
+    - ontological
