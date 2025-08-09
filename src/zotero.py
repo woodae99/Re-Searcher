@@ -5,6 +5,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import html2text
+
+from .extract_text import extract_text
+
 
 def get_db_connection(zotero_db: Path) -> Optional[sqlite3.Connection]:
     """Establishes a read-only connection to the Zotero SQLite database."""
@@ -127,6 +131,23 @@ def get_single_zotero_item(
     if not item_row:
         return None
 
+    notes = get_item_notes(conn, item_id)
+    attachments = get_item_attachments(conn, item_id, zotero_storage_dir)
+
+    # Assemble full text from notes and attachments
+    full_text = ""
+    h = html2text.HTML2Text()
+    h.ignore_links = True
+    if notes:
+        plain_text_notes = [h.handle(note) for note in notes]
+        full_text += "\n\n".join(plain_text_notes)
+
+    if attachments:
+        for attachment in attachments:
+            path = Path(attachment["path"])
+            if path.exists():
+                full_text += "\n\n" + extract_text(path)
+
     return {
         "id": f"zotero-{item_id}",
         "zotero_id": item_id,
@@ -137,8 +158,9 @@ def get_single_zotero_item(
         "creators": get_item_creators(conn, item_id),
         "tags": get_item_tags(conn, item_id),
         "collections": get_item_collections(conn, item_id),
-        "attachments": get_item_attachments(conn, item_id, zotero_storage_dir),
-        "notes": get_item_notes(conn, item_id),
+        "attachments": attachments,
+        "notes": notes,
+        "full_text": full_text.strip(),
     }
 
 

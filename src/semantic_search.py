@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import faiss
+import html2text
 import numpy as np
 import yaml
 from sentence_transformers import SentenceTransformer
@@ -95,11 +96,15 @@ def hash_sources(cfg: Dict) -> str:
 def process_zotero_library(library: List[Dict[str, Any]]) -> Dict[str, str]:
     """Processes Zotero library data to extract text from notes and attachments."""
     docs = {}
+    h = html2text.HTML2Text()
+    h.ignore_links = True
+
     for item in library:
         # 1. Add text from notes
         full_text = ""
         if item.get("notes"):
-            full_text += "\n\n".join(item["notes"])
+            plain_text_notes = [h.handle(note) for note in item["notes"]]
+            full_text += "\n\n".join(plain_text_notes)
 
         # 2. Extract text from attachments
         if item.get("attachments"):

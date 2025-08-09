@@ -31,6 +31,18 @@ def highlight(text: str, terms: list[str]) -> str:
     return pattern.sub(r"<mark>\1</mark>", text)
 
 
+def group_results_by_path(
+    results: List[Dict[str, Any]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Groups a flat list of search results by their 'path'."""
+    grouped = {}
+    for res in results:
+        path = res.get("path")
+        if path:
+            grouped.setdefault(path, []).append(res)
+    return grouped
+
+
 # --- API Communication ---
 @st.cache_data(show_spinner="Searching...")
 def search_api(query: str, mode: str, top_k: int, filters: Dict[str, Any]):
@@ -126,38 +138,37 @@ with main_tab:
         results = search_api(query, mode, k, filters)
 
         if results:
-            st.subheader(f"Found {len(results)} results:")
-            for i, res in enumerate(results):
-                path = res.get("path", "Unknown Path")
-                snippet = res.get("snippet", "No snippet available.")
-                score = res.get("score", 0.0)
+            grouped_results = group_results_by_path(results)
+            st.subheader(f"Found {len(grouped_results)} matching documents:")
 
+            for i, (path, doc_results) in enumerate(grouped_results.items()):
                 fname = Path(path).name
                 st.markdown(f"**{i+1}. {fname}**")
 
-                if mode in ["Semantic", "Hybrid"] and score > 0:
-                    st.caption(f"Similarity Score: {score:.4f}")
+                # Show average score for semantic/hybrid results
+                if mode in ["Semantic", "Hybrid"]:
+                    scores = [res.get("score", 0.0) for res in doc_results]
+                    avg_score = sum(scores) / len(scores) if scores else 0.0
+                    if avg_score > 0:
+                        st.caption(f"Average Similarity Score: {avg_score:.4f}")
 
-                highlighted_snippet = highlight(clean(snippet), query.split())
-                st.markdown(f"> {highlighted_snippet}...", unsafe_allow_html=True)
+                # Display up to 5 snippets
+                for res in doc_results[:5]:
+                    snippet = res.get("snippet", "No snippet available.")
+                    highlighted_snippet = highlight(clean(snippet), query.split())
+                    st.markdown(
+                        f"> ...{highlighted_snippet}...", unsafe_allow_html=True
+                    )
 
                 with st.expander("View Full Text"):
-                    doc_id = res.get("path")
+                    doc_id = path  # Use the path from the grouped results
                     if doc_id:
                         doc_response = requests.get(
                             f"{API_URL}/api/doc/{doc_id}", headers=HEADERS
                         )
                         if doc_response.ok:
                             doc_data = doc_response.json()
-                            full_text = ""
-                            if (
-                                "metadata" in doc_data
-                                and "fulltext" in doc_data["metadata"]
-                            ):
-                                full_text = doc_data["metadata"]["fulltext"]
-                            elif "notes" in doc_data:
-                                full_text += "\n\n".join(doc_data["notes"])
-
+                            full_text = doc_data.get("full_text", "")
                             if full_text:
                                 st.text(full_text)
                             else:
@@ -199,15 +210,7 @@ with advanced_tab:
                         )
                         if doc_response.ok:
                             doc_data = doc_response.json()
-                            full_text = ""
-                            if (
-                                "metadata" in doc_data
-                                and "fulltext" in doc_data["metadata"]
-                            ):
-                                full_text = doc_data["metadata"]["fulltext"]
-                            elif "notes" in doc_data:
-                                full_text += "\n\n".join(doc_data["notes"])
-
+                            full_text = doc_data.get("full_text", "")
                             if full_text:
                                 st.text(full_text)
                             else:

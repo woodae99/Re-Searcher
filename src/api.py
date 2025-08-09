@@ -19,7 +19,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from transformers import pipeline
 
-from .extract_text import load_config
+from .extract_text import extract_text, load_config
 from .main import query_index as perform_keyword_search
 from .ontology import expand_terms, load_ontology
 from .semantic_search import load_index, load_metadata
@@ -323,13 +323,16 @@ def get_document(doc_id: str):
             )
         return item_data
     else:
-        # For file-based documents, we don't have rich metadata stored yet.
-        # A future implementation could store file metadata in the SQLite DB.
-        if Path(doc_id).exists():
+        # For file-based documents, we extract the text on the fly.
+        # This could be slow for large files and might be better to cache.
+        doc_path = Path(doc_id)
+        if doc_path.exists():
+            full_text = extract_text(doc_path)
             return {
                 "id": doc_id,
                 "path": doc_id,
-                "metadata": {"title": Path(doc_id).name},
+                "metadata": {"title": doc_path.name},
+                "full_text": full_text,
             }
         else:
             raise HTTPException(
