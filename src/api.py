@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 from langchain.chains.summarize import load_summarize_chain
@@ -32,7 +32,7 @@ from .zotero import get_db_connection
 # In a real-world app, you might use a more robust dependency injection system.
 def load_resources():
     """Load all necessary models and data indexes."""
-    global cfg, model, faiss_index, refs, chunks, db_conn, ontology
+    global cfg, model, faiss_index, refs, chunks, ontology, summarizer
 
     # Prefer a user‑specific config.yaml; fall back to the example if not present
     config_dir = Path(__file__).parent.parent
@@ -73,11 +73,7 @@ def load_resources():
             "Keyword search database not found. Please run the indexing script."
         )
 
-    # Use a single, read-only connection for the app's lifetime
-    db_conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-
     # Load Summarization pipeline
-    global summarizer
     summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
 
 
@@ -88,9 +84,7 @@ async def lifespan(app: FastAPI):
     load_resources()
     print("Resources loaded successfully.")
     yield
-    # Clean up resources
-    if "db_conn" in globals():
-        db_conn.close()
+    # No specific cleanup needed for global resources anymore
     print("API resources cleaned up.")
 
 
@@ -173,12 +167,30 @@ class SearchResult(BaseModel):
     score: float
 
 
+def get_db():
+    """FastAPI dependency to create a per-request SQLite connection."""
+    # This logic is repeated, consider refactoring config loading
+    config_dir = Path(__file__).parent.parent
+    config_path = config_dir / "config.yaml"
+    if not config_path.exists():
+        config_path = config_dir / "config.example.yaml"
+    cfg = load_config(config_path)
+    output_dir = Path(cfg.get("output_folder", "output"))
+    db_path = output_dir / "search_index.sqlite"
+
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 @app.post(
     "/api/search",
     response_model=List[SearchResult],
     dependencies=[Security(get_api_key)],
 )
-def search(query: SearchQuery):
+def search(query: SearchQuery, db: sqlite3.Connection = Depends(get_db)):
     """Performs a search based on the query, mode, and top_k parameters."""
 
     semantic_results: List[SearchResult] = []
@@ -249,7 +261,7 @@ def search(query: SearchQuery):
     # Perform keyword search
     if query.mode in ["keyword", "hybrid"]:
         raw_key_results = perform_keyword_search(
-            db_conn, expanded_query, max_results=query.top_k * 5
+            db, expanded_query, max_results=query.top_k * 5
         )  # Fetch more to find matches
         # Simple combination: just append keyword results to semantic
         # A real implementation would use a more sophisticated ranking fusion (like RRF)

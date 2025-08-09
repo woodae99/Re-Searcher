@@ -28,7 +28,7 @@ def highlight(text: str, terms: list[str]) -> str:
         return text
     escaped = [re.escape(t) for t in terms if t]
     pattern = re.compile("(" + "|".join(escaped) + ")", re.IGNORECASE)
-    return pattern.sub(r"<mark>\\1</mark>", text)
+    return pattern.sub(r"<mark>\1</mark>", text)
 
 
 # --- API Communication ---
