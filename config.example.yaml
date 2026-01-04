@@ -1,33 +1,90 @@
-# config.yaml
+# research-rag configuration
+# Copy this to config.yaml and update paths for your system
 
-input_folder: /home/colin/Documents/SearchFiles
-output_folder: /home/colin/Documents/semantic-output
-
-file_types:
-  - .pdf
-  - .md
-  - .epub
-  - .docx
-  - .html
-  - .htm
-
-# Optional: path to an ontology definition file.  When set, Re‑Searcher will
-# expand search queries with related terms defined in this ontology.  See
-# ``ontology.example.yaml`` for a sample structure.  Leave blank to disable
-# ontology support.
-ontology_file: ""
-
-chunk_size: 300       # characters or tokens (used later)
-overlap: 50           # overlap between chunks
-encoding: utf-8
-
-log_progress: true
-save_raw_text: false   # can turn on later
-
+# Zotero configuration
 zotero:
-  enabled: false
-  # Path to your Zotero data directory.
-  # On Windows, this is typically in C:\\Users\\<YourUser>\\Zotero
-  # On macOS, this is typically in /Users/<YourUser>/Zotero
-  # On Linux, this is typically in /home/<YourUser>/Zotero
+  enabled: true
+  # API type: 'local' for local SQLite access, 'web' for Zotero Web API
+  api_type: local
+  # Port for local Zotero connector (if using local API)
+  local_port: 23119
+  # Path to Zotero data directory
+  # Windows: C:\Users\<YourUser>\Zotero
+  # macOS: /Users/<YourUser>/Zotero
+  # Linux: /home/<YourUser>/Zotero
   data_directory: ""
+  # Whether to extract text from PDF attachments
+  extract_attachments: true
+  # Whether to include notes
+  include_notes: true
+  # Whether to include annotations
+  include_annotations: true
+
+# Obsidian vault configuration
+obsidian:
+  enabled: false
+  # Path to your Obsidian vault
+  # Windows: C:\Users\<YourUser>\Documents\ObsidianVault
+  # macOS: /Users/<YourUser>/Documents/ObsidianVault
+  # Linux: /home/<YourUser>/Documents/ObsidianVault
+  vault_path: ""
+  # Folders to include (leave empty for all)
+  include_folders:
+    - "LitNotes"
+    - "Concepts"
+  # Folders to exclude
+  exclude_folders:
+    - "Templates"
+    - ".obsidian"
+
+# Local file sources (for backward compatibility)
+local_files:
+  enabled: false
+  input_folder: ""
+  file_types:
+    - .pdf
+    - .md
+    - .epub
+    - .docx
+    - .html
+    - .htm
+
+# Embedding model configuration
+embedding:
+  # Provider: 'lmstudio' or 'sentence-transformers' (for backward compatibility)
+  provider: lmstudio
+  # LM Studio endpoint (OpenAI-compatible API)
+  endpoint: "http://localhost:1234/v1"
+  # Model name for LM Studio
+  model: "text-embedding-bge-m3"
+  # Batch size for embedding requests
+  batch_size: 32
+  # Timeout for API requests (seconds)
+  timeout: 30
+
+# Vector storage configuration
+storage:
+  # Provider: 'chroma' or 'faiss' (for backward compatibility)
+  provider: chroma
+  # ChromaDB endpoint
+  endpoint: "http://localhost:8000"
+  # Collection name for storing embeddings
+  collection_name: "research_library"
+  # Distance metric: 'cosine', 'l2', or 'ip' (inner product)
+  distance_metric: cosine
+
+# Text chunking configuration
+chunking:
+  # Chunk size in characters
+  chunk_size: 2048
+  # Overlap between chunks
+  chunk_overlap: 256
+  # Chunking strategy: 'character', 'token', or 'semantic'
+  strategy: character
+
+# Output configuration
+output_folder: ./output
+log_progress: true
+
+# Optional: Ontology expansion (from original Re-Searcher)
+ontology_file: ""
