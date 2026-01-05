@@ -63,21 +63,17 @@ class ChromaVectorStore(VectorStore):
 
     def _get_or_create_collection(self):
         """Get existing collection or create new one."""
-        try:
-            collection = self.client.get_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": self.chroma_distance},
-            )
-            print(f"✅ Connected to existing ChromaDB collection: {self.collection_name}")
-            return collection
-        except Exception:
-            # Collection doesn't exist, create it
-            collection = self.client.create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": self.chroma_distance},
-            )
-            print(f"✅ Created new ChromaDB collection: {self.collection_name}")
-            return collection
+        # Use get_or_create_collection which handles both cases
+        collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": self.chroma_distance},
+        )
+        count = collection.count()
+        if count > 0:
+            print(f"✅ Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)")
+        else:
+            print(f"✅ Created/connected to ChromaDB collection: {self.collection_name}")
+        return collection
 
     def add_documents(
         self,
