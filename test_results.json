@@ -1,0 +1,89 @@
+{
+  "timestamp": "2026-01-06T08:02:29.927475",
+  "test_collection": "test_pipeline_20260106_080225",
+  "execution_time_seconds": 5.699561,
+  "documents_processed": 5,
+  "chunks_created": 10,
+  "embeddings_generated": 10,
+  "chunks_stored": 10,
+  "queries_executed": 3,
+  "validation_checks": {
+    "passed": 5,
+    "total": 5,
+    "status": "PASSED"
+  },
+  "query_results": [
+    {
+      "query": "testing and indexing",
+      "rank": 1,
+      "source": "obsidian",
+      "title": "Obsidian Note 1: Test Document 1",
+      "similarity": 0.5584038499999999,
+      "doc_preview": "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore \neu fugiat nulla pariat"
+    },
+    {
+      "query": "testing and indexing",
+      "rank": 2,
+      "source": "zotero",
+      "title": "Research Paper 4: Test Document 4",
+      "similarity": 0.55833387,
+      "doc_preview": "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore \neu fugiat nulla pariat"
+    },
+    {
+      "query": "testing and indexing",
+      "rank": 3,
+      "source": "obsidian",
+      "title": "Obsidian Note 3: Test Document 3",
+      "similarity": 0.5582804699999999,
+      "doc_preview": "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore \neu fugiat nulla pariat"
+    },
+    {
+      "query": "document processing",
+      "rank": 1,
+      "source": "zotero",
+      "title": "Research Paper 4: Test Document 4",
+      "similarity": 0.55891448,
+      "doc_preview": "Test Document 4\n\nThis is a sample test document used for unit testing the indexing pipeline.\nIt cont"
+    },
+    {
+      "query": "document processing",
+      "rank": 2,
+      "source": "obsidian",
+      "title": "Obsidian Note 1: Test Document 1",
+      "similarity": 0.5583251,
+      "doc_preview": "Test Document 1\n\nThis is a sample test document used for unit testing the indexing pipeline.\nIt cont"
+    },
+    {
+      "query": "document processing",
+      "rank": 3,
+      "source": "obsidian",
+      "title": "Obsidian Note 3: Test Document 3",
+      "similarity": 0.55751407,
+      "doc_preview": "Test Document 3\n\nThis is a sample test document used for unit testing the indexing pipeline.\nIt cont"
+    },
+    {
+      "query": "sample content",
+      "rank": 1,
+      "source": "obsidian",
+      "title": "Obsidian Note 1: Test Document 1",
+      "similarity": 0.5770585500000001,
+      "doc_preview": "Test Document 1\n\nThis is a sample test document used for unit testing the indexing pipeline.\nIt cont"
+    },
+    {
+      "query": "sample content",
+      "rank": 2,
+      "source": "zotero",
+      "title": "Research Paper 0: Test Document 0",
+      "similarity": 0.57511163,
+      "doc_preview": "Test Document 0\n\nThis is a sample test document used for unit testing the indexing pipeline.\nIt cont"
+    },
+    {
+      "query": "sample content",
+      "rank": 3,
+      "source": "obsidian",
+      "title": "Obsidian Note 3: Test Document 3",
+      "similarity": 0.5684777999999999,
+      "doc_preview": "Test Document 3\n\nThis is a sample test document used for unit testing the indexing pipeline.\nIt cont"
+    }
+  ]
+}

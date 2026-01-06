@@ -11,6 +11,7 @@ Claude Desktop → MCP Server → ResearchRAGPipeline → ChromaDB + LM Studio
 ```
 
 The MCP server is designed as a **thin wrapper** around the existing `ResearchRAGPipeline`. This means:
+
 - ✅ All search logic stays in the pipeline
 - ✅ Pipeline improvements automatically benefit MCP
 - ✅ No code duplication
@@ -21,6 +22,7 @@ The MCP server is designed as a **thin wrapper** around the existing `ResearchRA
 ### Core Components
 
 - **`src/mcp_server.py`** - Main MCP server
+
   - Handles MCP protocol communication
   - Delegates all search logic to pipeline
   - Lazy initialization for fast startup
@@ -65,6 +67,22 @@ Add to your Claude Desktop config file:
 }
 ```
 
+Or, to ensure LM Studio uses the same Python where `mcp` is installed, point the server to the provided `run_mcp.bat` which uses an explicit Python executable:
+
+```json
+{
+  "mcpServers": {
+    "research-mcp": {
+      "command": "C:/Users/colin/Dev/GitHub/Re-Searcher/run_mcp.bat",
+      "args": [],
+      "env": {
+        "PYTHONPATH": "C:/Users/colin/Dev/GitHub/Re-Searcher"
+      }
+    }
+  }
+}
+```
+
 **Note**: Adjust paths for your system!
 
 ### 3. Restart Claude Desktop
@@ -94,12 +112,14 @@ Claude: [Uses search_research_library tool internally]
 The MCP server is designed to handle pipeline changes gracefully:
 
 **✅ Automatically handled:**
+
 - New data sources added
 - Embedding model changes
 - ChromaDB configuration updates
 - New metadata fields added
 
 **⚙️ May need updates:**
+
 - If result format from `pipeline.query()` changes fundamentally
   - Update `src/mcp/formatters.py`
   - Run tests: `python tests/test_mcp_formatters.py`
@@ -156,6 +176,11 @@ Or in Claude Desktop config:
 
 1. **Check config exists**: `config.yaml` must exist in project root
 2. **Check dependencies**: `pip install -r requirements.txt`
+
+   - If you see an error like `ModuleNotFoundError: No module named 'mcp.server'` when starting the MCP plugin in LM Studio, it usually means LM Studio launched the script using a Python environment that does not have the `mcp` package installed.
+   - Diagnose by running `python check_mcp.py` from the project root (it prints Python executable and whether `mcp.server` can be imported).
+   - To fix, either install the requirements into the same Python (e.g., `pip install -r requirements.txt`) or launch the MCP script with the explicit Python that has `mcp` installed (Windows: `run_mcp.bat`).
+
 3. **Check ChromaDB**: Ensure Docker container is running on port 8000
 4. **Check LM Studio**: Ensure it's running with BGE-M3 loaded on port 1234
 
@@ -167,6 +192,7 @@ Or in Claude Desktop config:
 ### Results don't match query.py
 
 This shouldn't happen since both use the same pipeline. If it does:
+
 1. Check you're using the same `config.yaml`
 2. Verify ChromaDB collection name matches
 3. Check for pipeline initialization errors in logs
@@ -176,19 +202,23 @@ This shouldn't happen since both use the same pipeline. If it does:
 The MCP server follows these principles for maintainability:
 
 1. **Separation of Concerns**
+
    - MCP protocol ↔ Business logic separated
    - Formatting logic isolated in formatters.py
 
 2. **Delegation Over Duplication**
+
    - All search logic delegated to pipeline
    - No reimplementation of existing functionality
 
 3. **Resilient to Change**
+
    - Uses `.get()` for optional metadata fields
    - Graceful error handling
    - Lazy initialization
 
 4. **Config-Driven**
+
    - No hardcoded endpoints or paths
    - Reads from same config.yaml as rest of project
 
@@ -207,6 +237,7 @@ Potential additions (easy to implement with current architecture):
 - **get_backlinks** - Get related documents via backlinks
 
 All of these would follow the same pattern:
+
 1. Add tool definition
 2. Add handler method that delegates to pipeline
 3. Add formatter if needed

@@ -1,6 +1,7 @@
 """Zotero data source for extracting items, notes, and attachments."""
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -19,6 +20,7 @@ class ZoteroSource(DataSource):
         self.data_dir = None
         self.db_path = None
         self.storage_dir = None
+        self.max_extraction_threads = self.zotero_config.get("max_extraction_threads", 4)
 
         if self.is_enabled():
             self.data_dir = Path(self.zotero_config.get("data_directory", "")).expanduser()
@@ -219,7 +221,10 @@ class ZoteroSource(DataSource):
     def _process_attachments(
         self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
     ) -> Iterator[Document]:
-        """Process attachments for an item."""
+        """Process attachments for an item using sequential extraction with timeout.
+        
+        Logs problematic PDFs to a file for later manual processing.
+        """
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -231,6 +236,8 @@ class ZoteroSource(DataSource):
             (item_id,),
         )
 
+        # Prepare extraction tasks
+        tasks = []
         for row in cursor.fetchall():
             path_str = row["path"]
             if not path_str or not path_str.startswith("storage:"):
@@ -244,11 +251,28 @@ class ZoteroSource(DataSource):
             if not file_path.exists():
                 continue
 
-            try:
-                print(f"  📎 Extracting: {file_path.name}")
-                full_text = extract_text(file_path)
+            tasks.append((file_path, attachment_id, attachment_key, filename, row["contentType"]))
 
-                if full_text.strip():
+        if not tasks:
+            return
+
+        # Track statistics and problems
+        processed_count = 0
+        skipped_count = 0
+        timeout_count = 0
+
+        # Extract attachments sequentially (no threading - subprocess handles timeout)
+        for file_path, attachment_id, attachment_key, filename, content_type in tasks:
+            # Get file size for diagnostics
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+            print(f"      Extracting: {filename} ({file_size_mb:.1f}MB)...", end="", flush=True)
+            
+            try:
+                # Call extract directly - subprocess inside handles timeout
+                full_text = self._extract_attachment(file_path)
+                
+                if full_text and full_text.strip():
+                    print(f" OK ({len(full_text)} chars)")
                     metadata = metadata_base.copy()
                     metadata.update(
                         {
@@ -257,7 +281,7 @@ class ZoteroSource(DataSource):
                             "attachment_key": attachment_key,
                             "file_name": filename,
                             "file_path": str(file_path),
-                            "content_type": row["contentType"],
+                            "content_type": content_type,
                         }
                     )
 
@@ -266,9 +290,43 @@ class ZoteroSource(DataSource):
                         metadata=metadata,
                         doc_id=f"zotero-{item_id}-attachment-{attachment_id}",
                     )
+                    processed_count += 1
+                else:
+                    print(f" [EMPTY - no extractable text]")
+                    self._log_problematic_pdf(file_path, filename, "empty: no text extracted")
+                    skipped_count += 1
 
             except Exception as e:
-                print(f"  ⚠️  Error extracting {file_path.name}: {e}")
+                print(f" [ERROR: {e}]")
+                self._log_problematic_pdf(file_path, filename, f"exception: {e}")
+                skipped_count += 1
+        
+        # Print summary for this item
+        if tasks:
+            total = len(tasks)
+            success_pct = (processed_count / total * 100) if total > 0 else 0
+            print(f"\n      Item summary: {processed_count}/{total} extracted ({success_pct:.0f}%)")
+            if timeout_count > 0:
+                print(f"                {timeout_count} PDFs timed out (see problematic_pdfs.log)")
+
+    def _log_problematic_pdf(self, file_path: Path, filename: str, reason: str):
+        """Log a problematic PDF for later manual processing."""
+        try:
+            from pathlib import Path as PathlibPath
+            log_file = PathlibPath(self.data_dir).parent / "problematic_pdfs.log"
+            
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+            
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"{filename} | {file_size_mb:.1f}MB | {reason} | {file_path}\n")
+        except Exception as e:
+            print(f"    [Warning: Could not log problematic PDF: {e}]")
+
+
+    def _extract_attachment(self, file_path: Path) -> str:
+        """Extract text from a single attachment file."""
+        full_text = extract_text(file_path)
+        return full_text
 
     def _process_annotations(
         self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]

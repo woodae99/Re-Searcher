@@ -21,30 +21,32 @@ def load_config():
         return yaml.safe_load(f)
 
 
-def test_end_to_end_pipeline(num_docs=10):
+def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
     """
-    Test the full pipeline:
-    1. Fetch documents from Zotero
+    Test the full pipeline with multiple sources:
+    1. Fetch documents from Zotero and Obsidian
     2. Chunk the text
     3. Generate embeddings via LM Studio
     4. Store in ChromaDB
     5. Run a test query
     """
     print("=" * 60)
-    print("END-TO-END PIPELINE TEST")
+    print("END-TO-END PIPELINE TEST (ZOTERO + OBSIDIAN)")
     print("=" * 60)
     
     config = load_config()
     
     # Import components
     from src.sources.zotero import ZoteroSource
+    from src.sources.obsidian import ObsidianSource
     from src.processing.chunker import TextChunker
     from src.embedding.lmstudio import LMStudioEmbedding
     from src.storage.chroma import ChromaVectorStore
     
     # Initialize components
-    print("\n[1/5] Initializing components...")
+    print("\n[1/6] Initializing components...")
     zotero = ZoteroSource(config)
+    obsidian = ObsidianSource(config)
     chunker = TextChunker(config)
     embedder = LMStudioEmbedding(config)
     
@@ -52,18 +54,31 @@ def test_end_to_end_pipeline(num_docs=10):
     config["storage"]["collection_name"] = "test_pipeline"
     store = ChromaVectorStore(config)
     
-    # Fetch documents
-    print(f"\n[2/5] Fetching {num_docs} documents from Zotero...")
+    # Fetch documents from both sources
     documents = []
+    
+    print(f"\n[2/6] Fetching {num_docs_zotero} documents from Zotero...")
+    zotero_count = 0
     for doc in zotero.fetch_documents():
         documents.append(doc)
-        if len(documents) >= num_docs:
+        zotero_count += 1
+        if zotero_count >= num_docs_zotero:
             break
+    print(f"      Fetched {zotero_count} documents from Zotero")
     
-    print(f"      Fetched {len(documents)} documents")
+    print(f"\n[3/6] Fetching {num_docs_obsidian} documents from Obsidian...")
+    obsidian_count = 0
+    for doc in obsidian.fetch_documents():
+        documents.append(doc)
+        obsidian_count += 1
+        if obsidian_count >= num_docs_obsidian:
+            break
+    print(f"      Fetched {obsidian_count} documents from Obsidian")
+    
+    print(f"\n      Total documents fetched: {len(documents)}")
     
     # Chunk documents
-    print(f"\n[3/5] Chunking documents...")
+    print(f"\n[4/6] Chunking documents...")
     all_chunks = []
     all_metadata = []
     all_ids = []
@@ -83,7 +98,7 @@ def test_end_to_end_pipeline(num_docs=10):
     print(f"      Created {len(all_chunks)} chunks from {len(documents)} documents")
     
     # Generate embeddings
-    print(f"\n[4/5] Generating embeddings via LM Studio...")
+    print(f"\n[5/6] Generating embeddings via LM Studio...")
     print(f"      This may take a moment...")
     
     embeddings = []
@@ -97,7 +112,7 @@ def test_end_to_end_pipeline(num_docs=10):
     print(f"      Generated {len(embeddings)} embeddings (dim={len(embeddings[0])})")
     
     # Store in ChromaDB
-    print(f"\n[5/5] Storing in ChromaDB...")
+    print(f"\n[6/6] Storing in ChromaDB...")
     
     # ChromaDB expects string values in metadata
     cleaned_metadata = []
@@ -163,13 +178,15 @@ def test_end_to_end_pipeline(num_docs=10):
     print("=" * 60)
     print(f"""
 Summary:
-  - Documents fetched: {len(documents)}
+  - Documents from Zotero: {zotero_count}
+  - Documents from Obsidian: {obsidian_count}
+  - Total documents: {len(documents)}
   - Chunks created: {len(all_chunks)}
   - Embeddings generated: {len(embeddings)}
   - Stored in ChromaDB: {count}
   - Test queries run: {len(test_queries)}
 
-✅ End-to-end pipeline is working!
+✅ End-to-end pipeline with multiple sources is working!
     """)
     
     return True
@@ -177,10 +194,12 @@ Summary:
 
 if __name__ == "__main__":
     # Allow specifying number of docs from command line
-    num_docs = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    # Usage: python test_pipeline.py [num_zotero] [num_obsidian]
+    num_docs_zotero = int(sys.argv[1]) if len(sys.argv) > 1 else 150
+    num_docs_obsidian = int(sys.argv[2]) if len(sys.argv) > 2 else 150
     
     try:
-        test_end_to_end_pipeline(num_docs)
+        test_end_to_end_pipeline(num_docs_zotero, num_docs_obsidian)
     except Exception as e:
         print(f"\n❌ Pipeline test failed: {e}")
         import traceback

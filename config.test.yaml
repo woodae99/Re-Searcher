@@ -1,0 +1,36 @@
+# Test configuration for Re-Searcher
+# Used for unit testing the indexing pipeline with ChromaDB
+
+# Output folder for test artifacts
+output_folder: ./output/test
+
+# Zotero configuration (disabled for tests)
+zotero:
+  enabled: false
+
+# Obsidian configuration (disabled for tests)
+obsidian:
+  enabled: false
+
+# Embedding configuration
+embedding:
+  model: "text-embedding-bge-m3"
+  api_endpoint: "http://localhost:1234/v1"
+  api_key: "sk-lm-nNiGKWlr:2CgOVIJlX5UcGyf3UKR6"
+  batch_size: 10
+
+# ChromaDB vector storage configuration
+storage:
+  type: "chroma"
+  endpoint: "http://localhost:8000"
+  collection_name: "test_research"
+  distance_metric: "cosine"
+
+# Text chunking configuration
+chunking:
+  chunk_size: 512 # Smaller for faster tests
+  chunk_overlap: 64
+
+# Indexing configuration
+indexing:
+  batch_size: 5 # Small batches for testing resume capability

@@ -8,6 +8,7 @@ import yaml
 from tqdm import tqdm
 
 from .embedding.lmstudio import LMStudioEmbedding
+from .indexing import DocumentStatus, IndexingProgress
 from .processing.chunker import TextChunker
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
@@ -37,6 +38,13 @@ class ResearchRAGPipeline:
         self.output_dir = Path(self.config.get("output_folder", "./output"))
         self.output_dir.mkdir(exist_ok=True)
 
+        # Progress tracking for resumable indexing
+        progress_file = self.output_dir / "indexing_progress.json"
+        self.progress = IndexingProgress(progress_file)
+
+        # Batch configuration
+        self.batch_size = self.config.get("indexing", {}).get("batch_size", 50)
+
     def _load_config(self, config_path: Path) -> Dict[str, Any]:
         """Load configuration from YAML file."""
         with open(config_path, "r") as f:
@@ -50,22 +58,22 @@ class ResearchRAGPipeline:
         zotero = ZoteroSource(self.config)
         if zotero.is_enabled() and zotero.validate_config():
             sources.append(zotero)
-            print("✅ Zotero source enabled")
+            print("[OK] Zotero source enabled")
 
         # Obsidian source
         obsidian = ObsidianSource(self.config)
         if obsidian.is_enabled() and obsidian.validate_config():
             sources.append(obsidian)
-            print("✅ Obsidian source enabled")
+            print("[OK] Obsidian source enabled")
 
         if not sources:
-            print("⚠️  No data sources enabled!")
+            print("[WARNING] No data sources enabled!")
 
         return sources
 
     def run(self, force_reindex: bool = False):
         """
-        Run the full indexing pipeline.
+        Run the full indexing pipeline with resumable batch processing.
 
         Args:
             force_reindex: If True, re-index even if sources haven't changed
@@ -76,37 +84,29 @@ class ResearchRAGPipeline:
 
         # Check if re-indexing is needed
         if not force_reindex and not self._needs_reindex():
-            print("📦 Index is up to date. Use --force to re-index anyway.")
+            print("[INFO] Index is up to date. Use --force to re-index anyway.")
             return
 
-        # Step 1: Fetch documents from all sources
-        print("\n📚 Step 1/4: Fetching documents from sources...")
+        # Fetch all documents
+        print("\n[1/4] Fetching documents from sources...")
         documents = self._fetch_all_documents()
-        print(f"✅ Fetched {len(documents)} documents")
+        print(f"[OK] Fetched {len(documents)} documents")
 
         if not documents:
-            print("⚠️  No documents to index!")
+            print("[WARNING] No documents to index!")
             return
 
-        # Step 2: Chunk documents
-        print("\n✂️  Step 2/4: Chunking documents...")
-        chunks, chunk_metadatas, chunk_ids = self._chunk_documents(documents)
-        print(f"✅ Created {len(chunks)} chunks")
+        # Initialize progress tracking
+        self.progress.set_total_documents(len(documents))
 
-        # Step 3: Generate embeddings
-        print("\n🧠 Step 3/4: Generating embeddings...")
-        embeddings = self._generate_embeddings(chunks)
-        print(f"✅ Generated {len(embeddings)} embeddings")
-
-        # Step 4: Store in vector database
-        print("\n💾 Step 4/4: Storing in ChromaDB...")
-        self._store_embeddings(chunks, embeddings, chunk_metadatas, chunk_ids)
-        print(f"✅ Stored {len(chunks)} chunks in ChromaDB")
+        # Process documents in batches
+        print(f"\n[2/4] Processing documents in batches (size: {self.batch_size})...")
+        self._process_batches(documents)
 
         # Save hash of sources
         self._save_source_hash()
 
-        # Print stats
+        # Print final stats
         stats = self.vector_store.get_collection_stats()
         print("\n" + "=" * 60)
         print("Indexing Complete!")
@@ -115,6 +115,113 @@ class ResearchRAGPipeline:
         print(f"Total documents: {stats.get('document_count')}")
         print(f"Endpoint: {stats.get('endpoint')}")
         print("=" * 60 + "\n")
+
+    def _process_batches(self, documents: List):
+        """
+        Process documents in batches with resumable checkpoints.
+
+        Args:
+            documents: List of Document objects
+        """
+        # Create mapping of doc_id -> Document for quick lookup
+        doc_map = {doc.doc_id: doc for doc in documents}
+
+        # Process in batches
+        for batch_idx in range(0, len(documents), self.batch_size):
+            batch_end = min(batch_idx + self.batch_size, len(documents))
+            batch = documents[batch_idx:batch_end]
+
+            print(f"\n  Batch {batch_idx // self.batch_size + 1}/{(len(documents) - 1) // self.batch_size + 1}")
+
+            # Filter out already processed documents
+            pending_docs = [
+                doc
+                for doc in batch
+                if not self.progress.has_completed_status(doc.doc_id)
+            ]
+
+            if not pending_docs:
+                print(f"    All {len(batch)} documents already processed. Skipping batch.")
+                self.progress.print_progress()
+                continue
+
+            print(f"    Processing {len(pending_docs)}/{len(batch)} pending documents...")
+
+            try:
+                # Step 1: Chunk documents
+                chunks, chunk_metadatas, chunk_ids = self._chunk_batch(pending_docs)
+
+                if not chunks:
+                    print(f"    [WARNING] No chunks generated for batch")
+                    self.progress.print_progress()
+                    continue
+
+                # Update progress: documents chunked
+                for doc in pending_docs:
+                    doc_chunks = sum(
+                        1 for chunk_id in chunk_ids
+                        if chunk_id.startswith(f"{doc.doc_id}-")
+                    )
+                    self.progress.set_document_status(
+                        doc.doc_id,
+                        DocumentStatus.CHUNKED,
+                        chunk_count=doc_chunks,
+                    )
+
+                # Step 2: Generate embeddings
+                try:
+                    embeddings = self._generate_embeddings(chunks)
+                except Exception as e:
+                    print(f"    [ERROR] Error generating embeddings: {e}")
+                    for doc in pending_docs:
+                        self.progress.set_document_status(
+                            doc.doc_id,
+                            DocumentStatus.ERROR,
+                            error_msg=str(e),
+                        )
+                    self.progress.print_progress()
+                    continue
+
+                # Update progress: documents embedded
+                for doc in pending_docs:
+                    self.progress.set_document_status(
+                        doc.doc_id,
+                        DocumentStatus.EMBEDDED,
+                    )
+
+                # Step 3: Store embeddings
+                try:
+                    self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
+                except Exception as e:
+                    print(f"    [ERROR] Error storing embeddings: {e}")
+                    for doc in pending_docs:
+                        self.progress.set_document_status(
+                            doc.doc_id,
+                            DocumentStatus.ERROR,
+                            error_msg=str(e),
+                        )
+                    self.progress.print_progress()
+                    continue
+
+                # Update progress: documents stored
+                for doc in pending_docs:
+                    self.progress.set_document_status(
+                        doc.doc_id,
+                        DocumentStatus.STORED,
+                    )
+
+                print(f"    [OK] Batch complete")
+                self.progress.print_progress()
+
+            except Exception as e:
+                print(f"    [ERROR] Unexpected error processing batch: {e}")
+                for doc in pending_docs:
+                    self.progress.set_document_status(
+                        doc.doc_id,
+                        DocumentStatus.ERROR,
+                        error_msg=str(e),
+                    )
+                self.progress.print_progress()
 
     def _fetch_all_documents(self) -> List:
         """Fetch documents from all sources."""
@@ -125,11 +232,39 @@ class ResearchRAGPipeline:
             try:
                 documents = list(source.fetch_documents())
                 all_documents.extend(documents)
-                print(f"  ✅ Fetched {len(documents)} documents")
+                print(f"  [OK] Fetched {len(documents)} documents")
             except Exception as e:
-                print(f"  ❌ Error fetching from {source.__class__.__name__}: {e}")
+                print(f"  [ERROR] Error fetching from {source.__class__.__name__}: {e}")
 
         return all_documents
+
+    def _chunk_batch(self, documents: List) -> tuple:
+        """
+        Chunk a batch of documents into smaller segments.
+
+        Returns:
+            Tuple of (chunks, metadatas, ids)
+        """
+        all_chunks = []
+        all_metadatas = []
+        all_ids = []
+
+        for doc in documents:
+            try:
+                chunk_data = self.chunker.chunk_with_metadata(doc.content, doc.metadata)
+
+                for idx, (chunk_text, chunk_metadata) in enumerate(chunk_data):
+                    all_chunks.append(chunk_text)
+                    all_metadatas.append(chunk_metadata)
+
+                    # Generate unique ID for chunk
+                    chunk_id = f"{doc.doc_id}-chunk-{idx}"
+                    all_ids.append(chunk_id)
+
+            except Exception as e:
+                print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
+
+        return all_chunks, all_metadatas, all_ids
 
     def _chunk_documents(self, documents: List) -> tuple:
         """
@@ -155,7 +290,7 @@ class ResearchRAGPipeline:
                     all_ids.append(chunk_id)
 
             except Exception as e:
-                print(f"  ⚠️  Error chunking document {doc.doc_id}: {e}")
+                print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
 
         return all_chunks, all_metadatas, all_ids
 
@@ -165,7 +300,30 @@ class ResearchRAGPipeline:
             embeddings = self.embedder.embed_texts(chunks)
             return embeddings
         except Exception as e:
-            print(f"❌ Error generating embeddings: {e}")
+            print(f"[ERROR] Error generating embeddings: {e}")
+            raise
+
+    def _store_batch(
+        self,
+        chunks: List[str],
+        embeddings: List[List[float]],
+        metadatas: List[Dict[str, Any]],
+        ids: List[str],
+    ):
+        """Store embeddings from a batch in vector database."""
+        try:
+            # Store in sub-batches to avoid overwhelming ChromaDB
+            batch_size = 100
+            for i in range(0, len(chunks), batch_size):
+                batch_end = min(i + batch_size, len(chunks))
+                self.vector_store.add_documents(
+                    texts=chunks[i:batch_end],
+                    embeddings=embeddings[i:batch_end],
+                    metadatas=metadatas[i:batch_end],
+                    ids=ids[i:batch_end],
+                )
+        except Exception as e:
+            print(f"[ERROR] Error storing embeddings: {e}")
             raise
 
     def _store_embeddings(
@@ -245,7 +403,7 @@ class ResearchRAGPipeline:
         Returns:
             List of search results
         """
-        print(f"\n🔍 Querying: {query_text}\n")
+        print(f"\nQuery: {query_text}\n")
 
         # Generate query embedding
         query_embedding = self.embedder.embed_query(query_text)

@@ -1,0 +1,175 @@
+{
+  "timestamp": "2026-01-06T08:02:56.922489",
+  "collection": "test_pipeline_20260106_080225",
+  "statistics": {
+    "total_documents": 10,
+    "sources": {
+      "zotero": 6,
+      "obsidian": 4
+    },
+    "document_types": {
+      "pdf": 6,
+      "markdown": 4
+    },
+    "chunks": 2
+  },
+  "queries": [
+    {
+      "query_type": "generic",
+      "query": "testing and indexing pipeline",
+      "results": 5,
+      "data": [
+        {
+          "rank": 1,
+          "source": "obsidian",
+          "source_type": "markdown",
+          "title": "Obsidian Note 1: Test Document 1",
+          "similarity": 0.55629182,
+          "doc_id": "test_doc_001",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 2,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 4: Test Document 4",
+          "similarity": 0.55023175,
+          "doc_id": "test_doc_004",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 3,
+          "source": "obsidian",
+          "source_type": "markdown",
+          "title": "Obsidian Note 3: Test Document 3",
+          "similarity": 0.54883158,
+          "doc_id": "test_doc_003",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 4,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 2: Test Document 2",
+          "similarity": 0.5486781000000001,
+          "doc_id": "test_doc_002",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 5,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 0: Test Document 0",
+          "similarity": 0.54571748,
+          "doc_id": "test_doc_000",
+          "chunk_index": "0"
+        }
+      ]
+    },
+    {
+      "query_type": "content",
+      "query": "document processing and chunking",
+      "results": 5,
+      "data": [
+        {
+          "rank": 1,
+          "source": "obsidian",
+          "source_type": "markdown",
+          "title": "Obsidian Note 3: Test Document 3",
+          "similarity": 0.50925696,
+          "doc_id": "test_doc_003",
+          "chunk_index": "1"
+        },
+        {
+          "rank": 2,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 4: Test Document 4",
+          "similarity": 0.5084615299999999,
+          "doc_id": "test_doc_004",
+          "chunk_index": "1"
+        },
+        {
+          "rank": 3,
+          "source": "obsidian",
+          "source_type": "markdown",
+          "title": "Obsidian Note 1: Test Document 1",
+          "similarity": 0.5073281000000001,
+          "doc_id": "test_doc_001",
+          "chunk_index": "1"
+        },
+        {
+          "rank": 4,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 2: Test Document 2",
+          "similarity": 0.50726724,
+          "doc_id": "test_doc_002",
+          "chunk_index": "1"
+        },
+        {
+          "rank": 5,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 0: Test Document 0",
+          "similarity": 0.5016774500000001,
+          "doc_id": "test_doc_000",
+          "chunk_index": "1"
+        }
+      ]
+    },
+    {
+      "query_type": "system",
+      "query": "sample test data",
+      "results": 5,
+      "data": [
+        {
+          "rank": 1,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 0: Test Document 0",
+          "similarity": 0.5458993999999999,
+          "doc_id": "test_doc_000",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 2,
+          "source": "obsidian",
+          "source_type": "markdown",
+          "title": "Obsidian Note 1: Test Document 1",
+          "similarity": 0.54496664,
+          "doc_id": "test_doc_001",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 3,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 2: Test Document 2",
+          "similarity": 0.5366797999999999,
+          "doc_id": "test_doc_002",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 4,
+          "source": "obsidian",
+          "source_type": "markdown",
+          "title": "Obsidian Note 3: Test Document 3",
+          "similarity": 0.5340727599999999,
+          "doc_id": "test_doc_003",
+          "chunk_index": "0"
+        },
+        {
+          "rank": 5,
+          "source": "zotero",
+          "source_type": "pdf",
+          "title": "Research Paper 4: Test Document 4",
+          "similarity": 0.52749395,
+          "doc_id": "test_doc_004",
+          "chunk_index": "0"
+        }
+      ]
+    }
+  ],
+  "validation_status": "PASSED"
+}

@@ -10,18 +10,33 @@ It's designed as a thin wrapper around the existing pipeline to ensure:
 
 import asyncio
 import sys
+import os
 from pathlib import Path
 from typing import Any, Dict
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-import mcp.server.stdio
+# Import MCP package with friendly error message if it's missing
+try:
+    from mcp.server import Server
+    from mcp.types import Tool, TextContent
+    import mcp.server.stdio
+except ImportError as e:
+    sys.stderr.write(
+        "[ERROR] MCP import error: Python cannot import the 'mcp' package.\n"
+        f"Python executable: {sys.executable}\n"
+        "This usually means the 'mcp' package is not installed in the Python environment that launched this script.\n"
+        "To fix, either:\n"
+        "  - Install project requirements: `pip install -r requirements.txt`\n"
+        "  - Install MCP directly: `pip install 'mcp>=1.0.0'`\n"
+        "  - Use the provided `run_mcp.bat` to run the script with the correct Python installation.\n"
+        "After installing, restart the MCP plugin in LM Studio.\n"
+    )
+    raise
 
 from src.pipeline import ResearchRAGPipeline
-from src.mcp.formatters import format_search_results, format_error_response
+from src.mcp_formatters.formatters import format_search_results, format_error_response
 
 
 # Configuration
@@ -197,6 +212,7 @@ async def main():
     # Allow custom config path via environment or command line
     config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_CONFIG_PATH
 
+    sys.stderr.write(f"Starting MCP server using Python: {sys.executable}\n")
     server = ResearchMCPServer(config_path)
     await server.run()
 

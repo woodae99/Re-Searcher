@@ -1,0 +1,45 @@
+# Integration test configuration - real data sources, test storage
+# Used for: Component interaction tests with real Zotero/Obsidian data
+
+# Output folder for test artifacts
+output_folder: ./output/test-integration
+
+# Zotero - enabled with real data
+zotero:
+  enabled: true
+  data_directory: "~/Zotero" # Update with your actual Zotero path
+  extract_attachments: false # Don't extract for quick integration tests
+  include_notes: true
+  include_annotations: false
+  max_extraction_threads: 4
+
+# Obsidian - enabled with real vault
+obsidian:
+  enabled: true
+  vault_path: "~/Documents/Obsidian/MyVault" # Update with your actual vault path
+  include_folders: [] # Empty = all folders
+  exclude_folders: [".obsidian", ".trash"]
+
+# Embedding configuration
+embedding:
+  model: "text-embedding-bge-m3"
+  api_endpoint: "http://localhost:1234/v1"
+  api_key: "sk-lm-nNiGKWlr:2CgOVIJlX5UcGyf3UKR6"
+  batch_size: 10
+
+# ChromaDB vector storage configuration
+storage:
+  type: "chroma"
+  endpoint: "http://localhost:8000"
+  collection_name: "test_integration"
+  distance_metric: "cosine"
+
+# Text chunking configuration
+chunking:
+  chunk_size: 512
+  chunk_overlap: 64
+  strategy: "recursive"
+
+# Indexing configuration
+indexing:
+  batch_size: 5

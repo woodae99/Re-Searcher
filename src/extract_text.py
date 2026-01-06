@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Dict
+import signal
 
 import docx
 import html2text
@@ -17,11 +18,85 @@ def load_config(config_path: Path) -> Dict:
         return yaml.safe_load(f)
 
 
-def extract_pdf_text(file_path: Path) -> str:
+def timeout_handler(signum, frame):
+    """Handler for timeout signal"""
+    raise TimeoutError("PDF extraction took too long")
+
+
+def extract_pdf_text(file_path: Path, timeout_seconds: int = 60) -> str:
+    """Extract text from PDF with process-based timeout for true interruption.
+    
+    Uses subprocess to allow true timeout and interruption of hung extractions.
+    
+    Args:
+        file_path: Path to PDF file
+        timeout_seconds: Maximum seconds to spend extracting (default: 60 for OCR'd files)
+    
+    Returns:
+        Extracted text or empty string if extraction fails/times out
+    """
     try:
-        return pdfminer.high_level.extract_text(str(file_path))
+        import subprocess
+        import sys
+        import json
+        import tempfile
+        import os
+        
+        # Create a temporary file for the result
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as tmp:
+            tmp_path = tmp.name
+        
+        try:
+            # Python code to run in subprocess
+            extract_code = f"""
+import sys
+import json
+import pdfminer.high_level
+
+try:
+    text = pdfminer.high_level.extract_text(r'{str(file_path)}')
+    result = {{'success': True, 'text': text}}
+except Exception as e:
+    result = {{'success': False, 'text': '', 'error': str(e)}}
+
+with open(r'{tmp_path}', 'w', encoding='utf-8') as f:
+    json.dump(result, f)
+"""
+            
+            # Run extraction in subprocess with timeout
+            try:
+                proc = subprocess.run(
+                    [sys.executable, '-c', extract_code],
+                    timeout=timeout_seconds,
+                    capture_output=True,
+                    text=True,
+                    check=False
+                )
+                
+                # Read result from temp file
+                try:
+                    if os.path.exists(tmp_path):
+                        with open(tmp_path, 'r', encoding='utf-8') as f:
+                            result = json.load(f)
+                            return result.get('text', '')
+                except:
+                    pass
+                
+                return ""
+                
+            except subprocess.TimeoutExpired:
+                # Process was killed due to timeout
+                return ""
+                
+        finally:
+            # Clean up temp file
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except:
+                pass
+            
     except Exception as e:
-        print(f"[PDF error] {file_path.name}: {e}")
         return ""
 
 

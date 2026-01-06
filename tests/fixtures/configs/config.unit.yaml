@@ -1,0 +1,37 @@
+# Unit test configuration - minimal setup, no real data sources
+# Used for: Fast component tests without external dependencies
+
+# Output folder for test artifacts
+output_folder: ./output/test-unit
+
+# Zotero - disabled for unit tests
+zotero:
+  enabled: false
+
+# Obsidian - disabled for unit tests
+obsidian:
+  enabled: false
+
+# Embedding configuration
+embedding:
+  model: "text-embedding-bge-m3"
+  api_endpoint: "http://localhost:1234/v1"
+  api_key: "sk-lm-nNiGKWlr:2CgOVIJlX5UcGyf3UKR6"
+  batch_size: 10
+
+# ChromaDB vector storage configuration
+storage:
+  type: "chroma"
+  endpoint: "http://localhost:8000"
+  collection_name: "test_unit"
+  distance_metric: "cosine"
+
+# Text chunking configuration
+chunking:
+  chunk_size: 512
+  chunk_overlap: 64
+  strategy: "recursive"
+
+# Indexing configuration
+indexing:
+  batch_size: 5

@@ -18,13 +18,13 @@ class LMStudioEmbedding(EmbeddingProvider):
         self.model = embedding_config.get("model", "text-embedding-bge-m3")
         self.batch_size = embedding_config.get("batch_size", 32)
         self.timeout = embedding_config.get("timeout", 30)
+        self.api_key = embedding_config.get("api_key")  # optional API key
 
         # Initialize OpenAI client pointing to LM Studio
-        self.client = OpenAI(
-            base_url=self.endpoint,
-            api_key="lm-studio",  # LM Studio doesn't require a real API key
-            timeout=self.timeout,
-        )
+        client_kwargs = {"base_url": self.endpoint, "timeout": self.timeout}
+        if self.api_key:
+            client_kwargs["api_key"] = self.api_key
+        self.client = OpenAI(**client_kwargs)
 
         # Cache dimension after first embedding
         self._dimension = None

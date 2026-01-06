@@ -70,9 +70,9 @@ class ChromaVectorStore(VectorStore):
         )
         count = collection.count()
         if count > 0:
-            print(f"✅ Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)")
+            print(f"[OK] Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)")
         else:
-            print(f"✅ Created/connected to ChromaDB collection: {self.collection_name}")
+            print(f"[OK] Created/connected to ChromaDB collection: {self.collection_name}")
         return collection
 
     def add_documents(
@@ -121,7 +121,7 @@ class ChromaVectorStore(VectorStore):
                 metadatas=sanitized_metadatas,
             )
         except Exception as e:
-            print(f"❌ Error adding documents to ChromaDB: {e}")
+            print(f"[ERROR] Error adding documents to ChromaDB: {e}")
             raise
 
     def search(
@@ -149,6 +149,9 @@ class ChromaVectorStore(VectorStore):
                 include=["documents", "metadatas", "distances"],
             )
 
+            # Debug: show raw results for inspection
+            # print("DEBUG: ChromaDB raw query results keys:", list(results.keys()))
+
             # Format results
             formatted_results = []
             if results["ids"] and results["ids"][0]:
@@ -157,6 +160,11 @@ class ChromaVectorStore(VectorStore):
                     text = results["documents"][0][i]
                     distance = results["distances"][0][i]
                     metadata = results["metadatas"][0][i]
+
+                    # Handle missing distance values
+                    if distance is None:
+                        print(f"[WARNING] ChromaDB returned None distance for document {doc_id}; setting distance to 1.0 (score 0.0)")
+                        distance = 1.0
 
                     # Convert distance to similarity score
                     # For cosine distance: similarity = 1 - distance
@@ -171,16 +179,16 @@ class ChromaVectorStore(VectorStore):
             return formatted_results
 
         except Exception as e:
-            print(f"❌ Error searching ChromaDB: {e}")
+            print(f"[ERROR] Error searching ChromaDB: {e}")
             return []
 
     def delete_collection(self) -> None:
         """Delete the entire collection."""
         try:
             self.client.delete_collection(name=self.collection_name)
-            print(f"🗑️  Deleted collection: {self.collection_name}")
+            print(f"[OK] Deleted collection: {self.collection_name}")
         except Exception as e:
-            print(f"❌ Error deleting collection: {e}")
+            print(f"[ERROR] Error deleting collection: {e}")
 
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the collection."""
@@ -193,5 +201,5 @@ class ChromaVectorStore(VectorStore):
                 "endpoint": self.endpoint,
             }
         except Exception as e:
-            print(f"❌ Error getting collection stats: {e}")
+            print(f"[ERROR] Error getting collection stats: {e}")
             return {}

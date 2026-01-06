@@ -6,7 +6,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.mcp.formatters import format_search_results, format_error_response
+from src.mcp_formatters.formatters import format_search_results, format_error_response
 
 
 def test_format_search_results():
