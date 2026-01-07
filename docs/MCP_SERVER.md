@@ -91,19 +91,52 @@ After updating config, completely restart Claude Desktop for changes to take eff
 
 ## Usage
 
-Once configured, Claude will have access to the `search_research_library` tool:
+Once configured, Claude will have access to the research library tools:
 
 ```
 You: "What does Whitehead say about process philosophy?"
 
 Claude: [Uses search_research_library tool internally]
         Based on your research library, Whitehead discusses...
+
+You: "Can you expand on that second result?"
+
+Claude: [Uses get_chunk_context to fetch parent chunk]
+        Here's the broader context from the same section...
 ```
 
-### Tool Parameters
+## Available Tools
 
+### search_research_library
+
+Search the research library using semantic search.
+
+**Parameters:**
 - **query** (required): Search query text
 - **k** (optional): Number of results (1-50, default: 5)
+
+**Returns:** Results with hierarchical metadata including:
+- Chunk level (coarse/mid/fine)
+- Parent chunk ID (for context expansion)
+- Section headings (for Obsidian notes)
+- Standard metadata (title, authors, DOI, backlinks)
+
+### get_chunk_context
+
+Fetch a chunk and its parent for expanded context. Use this when a fine-grained search result needs more surrounding text.
+
+**Parameters:**
+- **chunk_id** (required): The ID of the chunk (from search results)
+- **include_parent** (optional): Include parent chunk text (default: true)
+
+**Returns:** The chunk text plus its parent chunk, enabling hierarchical context expansion:
+- Fine chunks → Mid chunks → Coarse chunks
+
+**Example workflow:**
+1. Search returns a fine-grained result
+2. Call `get_chunk_context` with the chunk_id
+3. Get the parent (mid-level) chunk for more context
+4. If needed, call again with parent's parent_id for coarse-level context
 
 ## Maintenance
 
@@ -226,6 +259,33 @@ The MCP server follows these principles for maintainability:
    - Formatters tested independently
    - Mock-friendly design
 
+## Hierarchical Chunking (vNext)
+
+The MCP server supports the vNext hierarchical chunking strategy:
+
+### Chunk Levels
+
+| Level | Description | Parent |
+|-------|-------------|--------|
+| coarse | Large document sections | None |
+| mid | Medium paragraphs | coarse |
+| fine | Small, precise passages | mid |
+| atomic | Single annotations | None |
+
+### Context Expansion
+
+When Claude finds a relevant fine-grained chunk, it can use `get_chunk_context` to "zoom out":
+
+```
+fine chunk (precise match)
+    ↓ get_chunk_context
+mid chunk (paragraph context)
+    ↓ get_chunk_context (with parent's parent_id)
+coarse chunk (section context)
+```
+
+This allows Claude to start with precise matches and expand context as needed.
+
 ## Future Enhancements
 
 Potential additions (easy to implement with current architecture):
@@ -234,7 +294,7 @@ Potential additions (easy to implement with current architecture):
 - **list_sources** - Show available data sources
 - **search_by_author** - Filter by author
 - **search_by_source** - Filter by source type (Zotero/Obsidian)
-- **get_backlinks** - Get related documents via backlinks
+- **get_siblings** - Get chunks at the same level from the same document
 
 All of these would follow the same pattern:
 
