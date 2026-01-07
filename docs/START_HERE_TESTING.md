@@ -123,6 +123,9 @@ Status:   Infrastructure ready, tests to implement
 # 👨‍💻 DURING DEVELOPMENT (instant feedback)
 pytest tests/unit/test_chunking.py -v
 
+# 🧪 vNext chunking + rerank smoke
+pytest tests/unit/test_chunk_id_stability.py tests/unit/test_router_routing.py -v
+
 # ✅ UNIT TESTS (all components)
 pytest tests/unit/ -v
 

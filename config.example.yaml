@@ -51,7 +51,7 @@ local_files:
 
 # Embedding model configuration
 embedding:
-  # Provider: 'lmstudio' or 'sentence-transformers' (for backward compatibility)
+  # Provider: 'lmstudio' or 'openai'
   provider: lmstudio
   # LM Studio endpoint (OpenAI-compatible API)
   endpoint: "http://localhost:1234/v1"
@@ -61,6 +61,16 @@ embedding:
   batch_size: 32
   # Timeout for API requests (seconds)
   timeout: 30
+  # Provider-specific settings (preferred)
+  lmstudio:
+    base_url: "http://localhost:1234/v1"
+    model: "text-embedding-model-name"
+    timeout_seconds: 120
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    base_url: null
+    model: "text-embedding-3-large"
+    timeout_seconds: 60
 
 # Vector storage configuration
 storage:
@@ -81,6 +91,39 @@ chunking:
   chunk_overlap: 256
   # Chunking strategy: 'character', 'token', or 'semantic'
   strategy: character
+  # New router configuration (vNext)
+  router_enabled: true
+  id_strategy: stable_hash  # stable_hash | legacy
+  defaults:
+    strategy: recursive
+    chunk_size: 2048
+    chunk_overlap: 256
+  markdown:
+    enabled: true
+    header_levels: [1, 2, 3]
+    max_section_tokens: 900
+  huge_docs:
+    enabled: true
+    huge_doc_tokens: 25000
+    levels:
+      coarse: { chunk_size: 2200, chunk_overlap: 200 }
+      mid:    { chunk_size: 700,  chunk_overlap: 100 }
+      fine:   { chunk_size: 220,  chunk_overlap: 40 }
+
+retrieval:
+  k_recall: 50
+  rerank:
+    enabled: true
+    type: llm  # none | llm | cross_encoder
+    top_n: 8
+    llm:
+      provider: lmstudio  # lmstudio | openai
+      model: null
+      max_tokens: 256
+      temperature: 0.0
+  expand:
+    include_parent: true
+    max_parents: 1
 
 # Output configuration
 output_folder: ./output

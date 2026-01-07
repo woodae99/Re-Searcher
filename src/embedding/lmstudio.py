@@ -13,12 +13,21 @@ class LMStudioEmbedding(EmbeddingProvider):
     def __init__(self, config: dict):
         super().__init__(config)
         embedding_config = config.get("embedding", {})
+        lmstudio_config = embedding_config.get("lmstudio", {})
 
-        self.endpoint = embedding_config.get("endpoint", "http://localhost:1234/v1")
-        self.model = embedding_config.get("model", "text-embedding-bge-m3")
-        self.batch_size = embedding_config.get("batch_size", 32)
-        self.timeout = embedding_config.get("timeout", 30)
-        self.api_key = embedding_config.get("api_key")  # optional API key
+        self.endpoint = (
+            lmstudio_config.get("base_url")
+            or embedding_config.get("endpoint")
+            or "http://localhost:1234/v1"
+        )
+        self.model = (
+            lmstudio_config.get("model")
+            or embedding_config.get("model")
+            or "text-embedding-bge-m3"
+        )
+        self.batch_size = lmstudio_config.get("batch_size", embedding_config.get("batch_size", 32))
+        self.timeout = lmstudio_config.get("timeout_seconds", embedding_config.get("timeout", 30))
+        self.api_key = lmstudio_config.get("api_key") or embedding_config.get("api_key")
 
         # Initialize OpenAI client pointing to LM Studio
         client_kwargs = {"base_url": self.endpoint, "timeout": self.timeout}

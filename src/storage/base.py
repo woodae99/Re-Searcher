@@ -55,6 +55,11 @@ class VectorStore(ABC):
         pass
 
     @abstractmethod
+    def get_by_ids(self, ids: List[str]) -> List[Tuple[str, str, Dict[str, Any]]]:
+        """Fetch documents by IDs."""
+        pass
+
+    @abstractmethod
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the collection."""
         pass

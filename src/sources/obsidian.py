@@ -2,7 +2,9 @@
 
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Set
+
+import yaml
 
 from .base import DataSource, Document
 
@@ -56,9 +58,11 @@ class ObsidianSource(DataSource):
         md_files = self._find_markdown_files(include_folders, exclude_folders)
         print(f"📔 Found {len(md_files)} markdown files in Obsidian vault")
 
+        link_map = self._build_link_map(md_files)
+
         for md_file in md_files:
             try:
-                document = self._process_markdown_file(md_file)
+                document = self._process_markdown_file(md_file, link_map)
                 if document:
                     yield document
             except Exception as e:
@@ -98,7 +102,9 @@ class ObsidianSource(DataSource):
 
         return filtered_files
 
-    def _process_markdown_file(self, md_file: Path) -> Document:
+    def _process_markdown_file(
+        self, md_file: Path, link_map: Dict[str, str]
+    ) -> Document:
         """Process a single markdown file."""
         with open(md_file, "r", encoding="utf-8") as f:
             content = f.read()
@@ -108,6 +114,11 @@ class ObsidianSource(DataSource):
 
         # Extract wikilinks and backlinks
         wikilinks = self._extract_wikilinks(body)
+        resolved_links = self._resolve_wikilinks(wikilinks, link_map)
+        inline_tags = self._extract_inline_tags(body)
+        frontmatter_tags = self._extract_frontmatter_tags(frontmatter)
+        tags = self._normalize_tags(frontmatter_tags | inline_tags)
+        zotero_keys = self._extract_zotero_keys(frontmatter, body)
 
         # Get relative path from vault root
         relative_path = md_file.relative_to(self.vault_path)
@@ -121,13 +132,19 @@ class ObsidianSource(DataSource):
             "file_name": md_file.name,
             "title": frontmatter.get("title", md_file.stem),
             "wikilinks": wikilinks,
+            "links_out": resolved_links,
+            "tags": tags,
             "backlink": f"obsidian://open?vault={self.vault_path.name}&file={relative_path}",
+            "frontmatter": frontmatter,
         }
 
         # Add frontmatter fields to metadata
         for key, value in frontmatter.items():
             if key not in metadata:
                 metadata[key] = value
+
+        if zotero_keys:
+            metadata["zotero_key"] = zotero_keys[0] if len(zotero_keys) == 1 else zotero_keys
 
         return Document(
             content=body,
@@ -152,27 +169,48 @@ class ObsidianSource(DataSource):
                 frontmatter_text = parts[1].strip()
                 body = parts[2].strip()
 
-                # Simple YAML parsing (key: value format)
-                for line in frontmatter_text.split("\n"):
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        key = key.strip()
-                        value = value.strip()
-
-                        # Try to parse lists
-                        if value.startswith("[") and value.endswith("]"):
-                            # Simple list parsing
-                            value = [v.strip().strip('"\'') for v in value[1:-1].split(",")]
-                        # Try to parse booleans
-                        elif value.lower() in ("true", "false"):
-                            value = value.lower() == "true"
-                        # Try to parse numbers
-                        elif value.isdigit():
-                            value = int(value)
-
-                        frontmatter[key] = value
+                try:
+                    loaded = yaml.safe_load(frontmatter_text)
+                    if isinstance(loaded, dict):
+                        frontmatter = loaded
+                except yaml.YAMLError:
+                    frontmatter = {}
 
         return frontmatter, body
+
+    def _extract_inline_tags(self, content: str) -> Set[str]:
+        pattern = re.compile(r"(?<!\w)#([\w/-]+)")
+        return set(pattern.findall(content))
+
+    def _extract_frontmatter_tags(self, frontmatter: Dict[str, Any]) -> Set[str]:
+        tags = frontmatter.get("tags", [])
+        if isinstance(tags, str):
+            return {tags}
+        if isinstance(tags, list):
+            return {str(tag) for tag in tags}
+        return set()
+
+    def _normalize_tags(self, tags: Set[str]) -> List[str]:
+        normalized = []
+        for tag in tags:
+            tag_text = str(tag).lstrip("#").strip().lower()
+            if tag_text:
+                normalized.append(tag_text)
+        return sorted(set(normalized))
+
+    def _extract_zotero_keys(self, frontmatter: Dict[str, Any], content: str) -> List[str]:
+        zotero_keys = []
+        frontmatter_key = frontmatter.get("zotero_key") or frontmatter.get("citekey")
+        if frontmatter_key:
+            if isinstance(frontmatter_key, list):
+                zotero_keys.extend(str(key) for key in frontmatter_key)
+            else:
+                zotero_keys.append(str(frontmatter_key))
+
+        inline_keys = re.findall(r"@([A-Za-z0-9_:-]+)", content)
+        zotero_keys.extend(inline_keys)
+
+        return list(dict.fromkeys(zotero_keys))
 
     def _extract_wikilinks(self, content: str) -> List[str]:
         """
@@ -187,3 +225,20 @@ class ObsidianSource(DataSource):
         pattern = r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"
         matches = re.findall(pattern, content)
         return matches
+
+    def _build_link_map(self, md_files: List[Path]) -> Dict[str, str]:
+        link_map = {}
+        for md_file in md_files:
+            try:
+                relative_path = md_file.relative_to(self.vault_path)
+                link_map[md_file.stem] = str(relative_path)
+            except ValueError:
+                continue
+        return link_map
+
+    def _resolve_wikilinks(self, wikilinks: List[str], link_map: Dict[str, str]) -> List[str]:
+        resolved = []
+        for link in wikilinks:
+            key = Path(link).stem
+            resolved.append(link_map.get(key, link))
+        return resolved

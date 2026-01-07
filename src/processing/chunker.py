@@ -13,6 +13,10 @@ class TextChunker:
 
     def __init__(self, config: Dict[str, Any]):
         chunking_config = config.get("chunking", {})
+        if "defaults" in chunking_config:
+            chunking_config = chunking_config.get("defaults", {})
+        if "defaults" in chunking_config:
+            chunking_config = chunking_config.get("defaults", {})
 
         self.chunk_size = chunking_config.get("chunk_size", 2048)
         self.chunk_overlap = chunking_config.get("chunk_overlap", 256)
@@ -101,6 +105,7 @@ class TextChunker:
             chunk_metadata = base_metadata.copy()
             chunk_metadata["chunk_index"] = idx
             chunk_metadata["total_chunks"] = len(chunks)
+            chunk_metadata.setdefault("chunk_level", "mid")
             chunk_data.append((chunk, chunk_metadata))
 
         return chunk_data

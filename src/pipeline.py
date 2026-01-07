@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
-from tqdm import tqdm
 
-from .embedding.lmstudio import LMStudioEmbedding
+from .factories.chunker_factory import create_chunker
+from .factories.embedding_factory import create_embedder
+from .factories.reranker_factory import create_reranker
 from .indexing import DocumentStatus, IndexingProgress
-from .processing.chunker import TextChunker
+from .processing.id_utils import attach_parent_ids, stable_chunk_id
+from .retrieval.expand import attach_parent_context
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
 from .storage.chroma import ChromaVectorStore
@@ -30,8 +32,9 @@ class ResearchRAGPipeline:
 
         # Initialize components
         self.sources = self._initialize_sources()
-        self.chunker = TextChunker(self.config)
-        self.embedder = LMStudioEmbedding(self.config)
+        self.chunker = create_chunker(self.config)
+        self.embedder = create_embedder(self.config)
+        self.reranker = create_reranker(self.config)
         self.vector_store = ChromaVectorStore(self.config)
 
         # Output directory for metadata
@@ -258,39 +261,20 @@ class ResearchRAGPipeline:
                     all_metadatas.append(chunk_metadata)
 
                     # Generate unique ID for chunk
-                    chunk_id = f"{doc.doc_id}-chunk-{idx}"
+                    chunking_config = self.config.get("chunking", {})
+                    id_strategy = chunking_config.get("id_strategy", "legacy")
+                    if id_strategy == "legacy":
+                        chunk_id = f"{doc.doc_id}-chunk-{idx}"
+                    else:
+                        source_id = doc.doc_id
+                        level = chunk_metadata.get("chunk_level", "mid")
+                        chunk_id = stable_chunk_id(source_id, level, idx, chunk_text)
                     all_ids.append(chunk_id)
 
             except Exception as e:
                 print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
 
-        return all_chunks, all_metadatas, all_ids
-
-    def _chunk_documents(self, documents: List) -> tuple:
-        """
-        Chunk documents into smaller segments.
-
-        Returns:
-            Tuple of (chunks, metadatas, ids)
-        """
-        all_chunks = []
-        all_metadatas = []
-        all_ids = []
-
-        for doc in tqdm(documents, desc="Chunking"):
-            try:
-                chunk_data = self.chunker.chunk_with_metadata(doc.content, doc.metadata)
-
-                for idx, (chunk_text, chunk_metadata) in enumerate(chunk_data):
-                    all_chunks.append(chunk_text)
-                    all_metadatas.append(chunk_metadata)
-
-                    # Generate unique ID for chunk
-                    chunk_id = f"{doc.doc_id}-chunk-{idx}"
-                    all_ids.append(chunk_id)
-
-            except Exception as e:
-                print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
+        attach_parent_ids(all_metadatas, all_ids)
 
         return all_chunks, all_metadatas, all_ids
 
@@ -324,29 +308,6 @@ class ResearchRAGPipeline:
                 )
         except Exception as e:
             print(f"[ERROR] Error storing embeddings: {e}")
-            raise
-
-    def _store_embeddings(
-        self,
-        chunks: List[str],
-        embeddings: List[List[float]],
-        metadatas: List[Dict[str, Any]],
-        ids: List[str],
-    ):
-        """Store embeddings in vector database."""
-        try:
-            # Store in batches to avoid overwhelming ChromaDB
-            batch_size = 100
-            for i in tqdm(range(0, len(chunks), batch_size), desc="Storing"):
-                batch_end = min(i + batch_size, len(chunks))
-                self.vector_store.add_documents(
-                    texts=chunks[i:batch_end],
-                    embeddings=embeddings[i:batch_end],
-                    metadatas=metadatas[i:batch_end],
-                    ids=ids[i:batch_end],
-                )
-        except Exception as e:
-            print(f"❌ Error storing embeddings: {e}")
             raise
 
     def _compute_source_hash(self) -> str:
@@ -408,7 +369,25 @@ class ResearchRAGPipeline:
         # Generate query embedding
         query_embedding = self.embedder.embed_query(query_text)
 
+        retrieval_config = self.config.get("retrieval", {})
+        k_recall = retrieval_config.get("k_recall", 50)
+        k_return = k
+
         # Search vector store
-        results = self.vector_store.search(query_embedding, k=k)
+        results = self.vector_store.search(query_embedding, k=k_recall)
+
+        rerank_config = retrieval_config.get("rerank", {})
+        if rerank_config.get("enabled", False):
+            results = self.reranker.rerank(query_text, results)
+            top_n = rerank_config.get("top_n")
+            limit = k_return if top_n is None else min(k_return, top_n)
+            results = results[:limit]
+        else:
+            results = results[:k_return]
+
+        expand_config = retrieval_config.get("expand", {})
+        if expand_config.get("include_parent", False):
+            max_parents = expand_config.get("max_parents", 1)
+            results = attach_parent_context(results, self.vector_store, max_parents=max_parents)
 
         return results

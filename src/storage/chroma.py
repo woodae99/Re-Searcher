@@ -114,7 +114,7 @@ class ChromaVectorStore(VectorStore):
             sanitized_metadatas.append(sanitized)
 
         try:
-            self.collection.add(
+            self.collection.upsert(
                 ids=ids,
                 embeddings=embeddings,
                 documents=texts,
@@ -181,6 +181,27 @@ class ChromaVectorStore(VectorStore):
         except Exception as e:
             print(f"[ERROR] Error searching ChromaDB: {e}")
             return []
+
+    def get_by_ids(self, ids: List[str]) -> List[Tuple[str, str, Dict[str, Any]]]:
+        """Fetch documents by IDs."""
+        if not ids:
+            return []
+
+        try:
+            results = self.collection.get(
+                ids=ids,
+                include=["documents", "metadatas"],
+            )
+        except Exception as e:
+            print(f"[ERROR] Error fetching documents by IDs: {e}")
+            return []
+
+        records = []
+        for idx, doc_id in enumerate(results.get("ids", [])):
+            text = results.get("documents", [])[idx]
+            metadata = results.get("metadatas", [])[idx]
+            records.append((doc_id, text, metadata))
+        return records
 
     def delete_collection(self) -> None:
         """Delete the entire collection."""

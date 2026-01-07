@@ -2,5 +2,6 @@
 
 from .base import EmbeddingProvider
 from .lmstudio import LMStudioEmbedding
+from .openai import OpenAIEmbedding
 
-__all__ = ["EmbeddingProvider", "LMStudioEmbedding"]
+__all__ = ["EmbeddingProvider", "LMStudioEmbedding", "OpenAIEmbedding"]
