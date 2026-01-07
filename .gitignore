@@ -211,3 +211,6 @@ __marimo__/
 # Data folders for test files
 ZotDBTest/
 OutputFiles/
+
+# Generated output (reports, logs)
+output/

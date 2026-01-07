@@ -475,6 +475,7 @@ pytest tests/pipeline/ -v -s
 ### Collection Strategy
 
 **Unit Tests** (reuse static collection)
+
 ```bash
 pytest tests/unit/ -v
 # Uses: "test_unit" collection (persistent across runs)
@@ -482,6 +483,7 @@ pytest tests/unit/ -v
 ```
 
 **Integration Tests** (auto-cleanup per session)
+
 ```bash
 pytest tests/integration/ -v
 # Uses: Unique timestamped collection (auto-created, auto-deleted)
@@ -490,6 +492,7 @@ pytest tests/integration/ -v
 ```
 
 **Pipeline Tests** (auto-cleanup per test)
+
 ```bash
 pytest tests/pipeline/test_pipeline_fast.py -v
 # Uses: Unique timestamped collection (auto-created, auto-deleted)
@@ -498,6 +501,7 @@ pytest tests/pipeline/test_pipeline_fast.py -v
 ```
 
 **Manual/Development Tests** (keep for inspection)
+
 ```python
 # test_full_pipeline_with_sources.py generates:
 # Collection: "test_pipeline_20260106_080225"
@@ -537,13 +541,13 @@ store.client.delete_collection(name="test_unit_old")
 
 ### Cleanup Strategy
 
-| Context | Collection Lifecycle | Cleanup |
-|---------|-------------------|---------|
-| Unit tests | Static/reused | Never (same data) |
-| Integration tests | Unique per session | Auto (fixture) |
-| Pipeline tests | Unique per test | Auto (fixture) |
-| Manual tests | Named for inspection | Manual when done |
-| Production | Long-lived | Never |
+| Context           | Collection Lifecycle | Cleanup           |
+| ----------------- | -------------------- | ----------------- |
+| Unit tests        | Static/reused        | Never (same data) |
+| Integration tests | Unique per session   | Auto (fixture)    |
+| Pipeline tests    | Unique per test      | Auto (fixture)    |
+| Manual tests      | Named for inspection | Manual when done  |
+| Production        | Long-lived           | Never             |
 
 ---
 

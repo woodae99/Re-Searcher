@@ -5,8 +5,8 @@ import sys
 import os
 from pathlib import Path
 
-# Set up proper import path
-project_root = Path(__file__).parent
+# Set up proper import path - go up from tests/pipeline/ to project root
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 os.chdir(project_root)
 

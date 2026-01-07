@@ -7,7 +7,7 @@ output_folder: ./output/test-integration
 # Zotero - enabled with real data
 zotero:
   enabled: true
-  data_directory: "~/Zotero" # Update with your actual Zotero path
+  data_directory: "C:/Users/colin/Zotero"
   extract_attachments: false # Don't extract for quick integration tests
   include_notes: true
   include_annotations: false
@@ -16,9 +16,15 @@ zotero:
 # Obsidian - enabled with real vault
 obsidian:
   enabled: true
-  vault_path: "~/Documents/Obsidian/MyVault" # Update with your actual vault path
-  include_folders: [] # Empty = all folders
-  exclude_folders: [".obsidian", ".trash"]
+  vault_path: "C:/Users/colin/OneDrive/Documents/Vaults/PhD Vault"
+  include_folders:
+    - "fleeting"
+    - "LitNotes"
+    - "Concepts"
+  exclude_folders:
+    - "Templates"
+    - ".obsidian"
+    - ".trash"
 
 # Embedding configuration
 embedding:
