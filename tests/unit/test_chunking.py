@@ -5,6 +5,8 @@ Module: src/processing/chunker.py
 Tests the TextChunker class and chunking strategies.
 """
 
+import copy
+
 import pytest
 from src.processing.chunker import TextChunker
 
@@ -92,7 +94,7 @@ class TestTextChunkerStrategies:
 
     def test_character_strategy(self, unit_config, sample_text):
         """Character-based chunking should work."""
-        config = unit_config.copy()
+        config = copy.deepcopy(unit_config)
         config["chunking"]["strategy"] = "character"
         
         chunker = TextChunker(config)
@@ -103,7 +105,7 @@ class TestTextChunkerStrategies:
 
     def test_recursive_strategy(self, unit_config, sample_text):
         """Recursive chunking should work."""
-        config = unit_config.copy()
+        config = copy.deepcopy(unit_config)
         config["chunking"]["strategy"] = "recursive"
         
         chunker = TextChunker(config)
@@ -114,7 +116,7 @@ class TestTextChunkerStrategies:
 
     def test_invalid_strategy_defaults(self, unit_config, sample_text):
         """Invalid strategy should default to recursive."""
-        config = unit_config.copy()
+        config = copy.deepcopy(unit_config)
         config["chunking"]["strategy"] = "invalid_strategy"
         
         chunker = TextChunker(config)
@@ -200,7 +202,7 @@ class TestTextChunkerConfiguration:
 
     def test_custom_chunk_size(self, unit_config):
         """Should respect custom chunk size."""
-        config = unit_config.copy()
+        config = copy.deepcopy(unit_config)
         config["chunking"]["chunk_size"] = 256
         
         chunker = TextChunker(config)
@@ -208,7 +210,7 @@ class TestTextChunkerConfiguration:
 
     def test_custom_chunk_overlap(self, unit_config):
         """Should respect custom chunk overlap."""
-        config = unit_config.copy()
+        config = copy.deepcopy(unit_config)
         config["chunking"]["chunk_overlap"] = 32
         
         chunker = TextChunker(config)
