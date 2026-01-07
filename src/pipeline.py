@@ -257,6 +257,7 @@ class ResearchRAGPipeline:
                 chunk_data = self.chunker.chunk_with_metadata(doc.content, doc.metadata)
 
                 for idx, (chunk_text, chunk_metadata) in enumerate(chunk_data):
+                    chunk_metadata["source_id"] = doc.doc_id
                     all_chunks.append(chunk_text)
                     all_metadatas.append(chunk_metadata)
 

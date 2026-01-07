@@ -21,9 +21,10 @@ def test_stable_chunk_id_changes_with_text():
 
 @pytest.mark.unit
 def test_attach_parent_ids_sets_parent_id():
+    # source_id is required for document-scoped parent lookups
     metadatas = [
-        {"chunk_level": "mid", "chunk_index": 0},
-        {"chunk_level": "fine", "chunk_index": 0, "parent_level": "mid", "parent_ordinal": 0},
+        {"source_id": "doc-1", "chunk_level": "mid", "chunk_index": 0},
+        {"source_id": "doc-1", "chunk_level": "fine", "chunk_index": 0, "parent_level": "mid", "parent_ordinal": 0},
     ]
     ids = [
         stable_chunk_id("doc-1", "mid", 0, "mid text"),

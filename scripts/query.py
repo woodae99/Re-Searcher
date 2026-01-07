@@ -2,9 +2,15 @@
 """CLI script for querying the research library."""
 
 import argparse
+import sys
 import textwrap
 from pathlib import Path
-import sys
+
+# Fix Unicode encoding for Windows console
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -106,7 +112,7 @@ def interactive_mode(pipeline):
             print("\n\nGoodbye!")
             break
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"[ERROR] {e}")
 
 
 def main():
@@ -140,7 +146,7 @@ def main():
 
     # Check if config exists
     if not args.config.exists():
-        print(f"❌ Configuration file not found: {args.config}")
+        print(f"[ERROR] Configuration file not found: {args.config}")
         print("\nPlease create config.yaml from config.example.yaml")
         sys.exit(1)
 
@@ -151,7 +157,7 @@ def main():
         # Check if collection has any data
         stats = pipeline.vector_store.get_collection_stats()
         if stats.get("document_count", 0) == 0:
-            print("⚠️  Collection is empty! Run 'python scripts/index.py' first.")
+            print("[WARN] Collection is empty! Run 'python scripts/index.py' first.")
             sys.exit(1)
 
         # Run query or interactive mode
@@ -168,7 +174,7 @@ def main():
         print("\n\nGoodbye!")
         sys.exit(0)
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

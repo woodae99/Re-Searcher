@@ -23,7 +23,12 @@ def test_hierarchical_chunking_sets_parent_ids():
     text = "Sentence one. Sentence two. Sentence three. Sentence four. " * 5
     chunks = chunker.chunk_with_metadata(text, {"source_type": "pdf"})
 
-    metadatas = [metadata for _, metadata in chunks]
+    # Add source_id to all chunks for document-scoped parent lookups
+    metadatas = []
+    for _, metadata in chunks:
+        metadata["source_id"] = "doc-1"
+        metadatas.append(metadata)
+
     ids = [
         stable_chunk_id("doc-1", metadata.get("chunk_level", "mid"), idx, chunk_text)
         for idx, (chunk_text, metadata) in enumerate(chunks)

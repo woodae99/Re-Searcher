@@ -46,6 +46,29 @@ chunking:
   chunk_overlap: 64
   strategy: "recursive"
 
+  # vNext router config
+  router_enabled: true
+  id_strategy: stable_hash
+  debug_router: true  # Enable router debug output
+
+  defaults:
+    strategy: recursive
+    chunk_size: 2048
+    chunk_overlap: 256
+
+  markdown:
+    enabled: true
+    header_levels: [1, 2, 3]
+    max_section_tokens: 900
+
+  huge_docs:
+    enabled: true
+    huge_doc_tokens: 4000  # LOWERED for testing (production uses 25000)
+    levels:
+      coarse: { chunk_size: 2200, chunk_overlap: 200 }
+      mid:    { chunk_size: 700,  chunk_overlap: 100 }
+      fine:   { chunk_size: 220,  chunk_overlap: 40 }
+
 # Indexing configuration
 indexing:
   batch_size: 50

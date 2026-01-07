@@ -22,8 +22,8 @@ import time
 
 
 def load_config():
-    """Load configuration from config.yaml"""
-    config_path = Path("config.yaml")
+    """Load configuration from test config file"""
+    config_path = Path("tests/fixtures/configs/config.pipeline.yaml")
     with open(config_path) as f:
         return yaml.safe_load(f)
 
@@ -54,15 +54,16 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
     # Import components
     from src.sources.zotero import ZoteroSource
     from src.sources.obsidian import ObsidianSource
-    from src.processing.chunker import TextChunker
+    from src.factories.chunker_factory import create_chunker
+    from src.processing.id_utils import attach_parent_ids, stable_chunk_id
     from src.embedding.lmstudio import LMStudioEmbedding
     from src.storage.chroma import ChromaVectorStore
-    
+
     # Initialize components
     print("\n[1/6] Initializing components...")
     zotero = ZoteroSource(config)
     obsidian = ObsidianSource(config)
-    chunker = TextChunker(config)
+    chunker = create_chunker(config)
     embedder = LMStudioEmbedding(config)
     
     # Use a test collection to avoid polluting the main one
@@ -73,7 +74,7 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
     documents = []
     
     print(f"\n[2/6] Fetching {num_docs_zotero} documents from Zotero (with PDF extraction)...")
-    print("      ⚠️  This includes PDF text extraction - may take several minutes...")
+    print("      [WARN] This includes PDF text extraction - may take several minutes...")
     zotero_count = 0
     fetch_start = time.time()
     for doc in zotero.fetch_documents():
@@ -82,7 +83,7 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
         if zotero_count >= num_docs_zotero:
             break
     zotero_time = time.time() - fetch_start
-    print(f"      ✓ Fetched {zotero_count} documents from Zotero ({zotero_time:.2f}s)")
+    print(f"      [OK] Fetched {zotero_count} documents from Zotero ({zotero_time:.2f}s)")
     
     print(f"\n[3/6] Fetching {num_docs_obsidian} documents from Obsidian...")
     obsidian_count = 0
@@ -93,31 +94,38 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
         if obsidian_count >= num_docs_obsidian:
             break
     obsidian_time = time.time() - fetch_start
-    print(f"      ✓ Fetched {obsidian_count} documents from Obsidian ({obsidian_time:.2f}s)")
+    print(f"      [OK] Fetched {obsidian_count} documents from Obsidian ({obsidian_time:.2f}s)")
     
     print(f"\n      Total documents fetched: {len(documents)}")
     
-    # Chunk documents
-    print(f"\n[4/6] Chunking documents...")
+    # Chunk documents using vNext router
+    print(f"\n[4/6] Chunking documents (vNext router)...")
     all_chunks = []
     all_metadata = []
     all_ids = []
-    
+
     chunk_start = time.time()
     for doc in documents:
-        chunks = chunker.chunk_text(doc.content)
-        for i, chunk in enumerate(chunks):
-            chunk_id = f"{doc.doc_id}-chunk-{i}"
-            metadata = doc.metadata.copy()
-            metadata["chunk_index"] = i
-            metadata["total_chunks"] = len(chunks)
-            
-            all_chunks.append(chunk)
-            all_metadata.append(metadata)
+        # Use chunk_with_metadata for proper routing and metadata
+        chunk_data = chunker.chunk_with_metadata(doc.content, doc.metadata)
+        for idx, (chunk_text, chunk_metadata) in enumerate(chunk_data):
+            # Add source_id for document-scoped parent linking
+            chunk_metadata["source_id"] = doc.doc_id
+
+            # Use stable IDs (not legacy f-string format)
+            level = chunk_metadata.get("chunk_level", "mid")
+            ordinal = chunk_metadata.get("chunk_index", idx)
+            chunk_id = stable_chunk_id(doc.doc_id, level, ordinal, chunk_text)
+
+            all_chunks.append(chunk_text)
+            all_metadata.append(chunk_metadata)
             all_ids.append(chunk_id)
-    
+
+    # Attach parent IDs (now document-scoped)
+    attach_parent_ids(all_metadata, all_ids)
+
     chunk_time = time.time() - chunk_start
-    print(f"      ✓ Created {len(all_chunks)} chunks from {len(documents)} documents ({chunk_time:.2f}s)")
+    print(f"      [OK] Created {len(all_chunks)} chunks from {len(documents)} documents ({chunk_time:.2f}s)")
     
     # Generate embeddings
     print(f"\n[5/6] Generating embeddings via LM Studio...")
@@ -133,7 +141,7 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
         embeddings.extend(batch_embeddings)
     
     embed_time = time.time() - embed_start
-    print(f"      ✓ Generated {len(embeddings)} embeddings (dim={len(embeddings[0])}) ({embed_time:.2f}s)")
+    print(f"      [OK] Generated {len(embeddings)} embeddings (dim={len(embeddings[0])}) ({embed_time:.2f}s)")
     
     # Store in ChromaDB
     print(f"\n[6/6] Storing in ChromaDB...")
@@ -161,7 +169,7 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
         batch_chunks = all_chunks[i:i + batch_size]
         batch_metadata = cleaned_metadata[i:i + batch_size]
         
-        store.collection.add(
+        store.collection.upsert(
             ids=batch_ids,
             embeddings=batch_embeddings,
             documents=batch_chunks,
@@ -170,7 +178,7 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
     
     store_time = time.time() - store_start
     count = store.collection.count()
-    print(f"      ✓ Stored {count} chunks in collection 'test_pipeline_attachments' ({store_time:.2f}s)")
+    print(f"      [OK] Stored {count} chunks in collection 'test_pipeline_attachments' ({store_time:.2f}s)")
     
     # Test query
     print("\n" + "=" * 70)
@@ -233,7 +241,7 @@ Performance Summary (WITH PDF EXTRACTION):
   │ TOTAL TIME:              {total_time:6.2f}s                         │
   ╰─────────────────────────────────────────────────────────────╯
 
-✅ End-to-end pipeline with PDF extraction is working!
+[PASS] End-to-end pipeline with PDF extraction is working!
     """)
     
     return True
@@ -249,7 +257,7 @@ if __name__ == "__main__":
     try:
         test_end_to_end_pipeline(num_docs_zotero, num_docs_obsidian)
     except Exception as e:
-        print(f"\n❌ Pipeline test failed: {e}")
+        print(f"\n[FAIL] Pipeline test failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

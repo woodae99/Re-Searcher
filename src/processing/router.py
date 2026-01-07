@@ -32,16 +32,31 @@ class ChunkerRouter:
             return []
 
         source_type = metadata.get("source_type")
+        doc_id = metadata.get("doc_id", "unknown")
+
+        # Debug setup (avoid UnboundLocalError)
+        debug = self.config.get("chunking", {}).get("debug_router", False)
+        token_est = None
+        if debug:
+            token_est = len(text) // 4
+
         if source_type == "zotero_annotation":
-            return self.atomic_chunker.chunk_with_metadata(text, metadata)
+            selected = "AtomicChunker"
+            result = self.atomic_chunker.chunk_with_metadata(text, metadata)
+        elif self.markdown_enabled and self._is_markdown(metadata, text):
+            selected = "MarkdownChunker"
+            result = self.markdown_chunker.chunk_with_metadata(text, metadata)
+        elif self._is_huge_document(text):
+            selected = "HierarchicalChunker"
+            result = self.hierarchical_chunker.chunk_with_metadata(text, metadata)
+        else:
+            selected = "TextChunker"
+            result = self.default_chunker.chunk_with_metadata(text, metadata)
 
-        if self.markdown_enabled and self._is_markdown(metadata, text):
-            return self.markdown_chunker.chunk_with_metadata(text, metadata)
+        if debug:
+            print(f"  [ROUTER] {doc_id}: {selected} (tokens~{token_est}, source={source_type})")
 
-        if self._is_huge_document(text):
-            return self.hierarchical_chunker.chunk_with_metadata(text, metadata)
-
-        return self.default_chunker.chunk_with_metadata(text, metadata)
+        return result
 
     def _is_markdown(self, metadata: Dict[str, Any], text: str) -> bool:
         if metadata.get("source_type") == "obsidian":
