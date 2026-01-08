@@ -246,15 +246,27 @@ def verify_obsidian_metadata(collection) -> VerificationResult:
     has_contains_code = sum(1 for m in obsidian_chunks["metadatas"] if "contains_code" in m)
     has_tags = sum(1 for m in obsidian_chunks["metadatas"] if m.get("tags"))
     has_zotero_key = sum(1 for m in obsidian_chunks["metadatas"] if m.get("zotero_key"))
+    has_aliases = sum(1 for m in obsidian_chunks["metadatas"] if m.get("aliases"))
+    has_wikilinks = sum(1 for m in obsidian_chunks["metadatas"] if m.get("wikilinks"))
+    has_links_out = sum(1 for m in obsidian_chunks["metadatas"] if m.get("links_out"))
+
+    # Count notes with code blocks (where contains_code is True)
+    with_code = sum(1 for m in obsidian_chunks["metadatas"] if m.get("contains_code") is True)
 
     result.add_stat("has_heading_path", has_heading_path)
     result.add_stat("has_contains_code", has_contains_code)
     result.add_stat("has_tags", has_tags)
     result.add_stat("has_zotero_key", has_zotero_key)
+    result.add_stat("has_aliases", has_aliases)
+    result.add_stat("has_wikilinks", has_wikilinks)
+    result.add_stat("with_code_blocks", with_code)
 
     result.info(f"  heading_path:  {has_heading_path}/{total} ({has_heading_path/total*100:.1f}%)")
-    result.info(f"  contains_code: {has_contains_code}/{total} ({has_contains_code/total*100:.1f}%)")
+    result.info(f"  contains_code: {has_contains_code}/{total} ({has_contains_code/total*100:.1f}%) - {with_code} have code blocks")
     result.info(f"  tags:          {has_tags}/{total} ({has_tags/total*100:.1f}%)")
+    result.info(f"  aliases:       {has_aliases}/{total} ({has_aliases/total*100:.1f}%)")
+    result.info(f"  wikilinks:     {has_wikilinks}/{total} ({has_wikilinks/total*100:.1f}%)")
+    result.info(f"  links_out:     {has_links_out}/{total} ({has_links_out/total*100:.1f}%)")
     result.info(f"  zotero_key:    {has_zotero_key}/{total} ({has_zotero_key/total*100:.1f}%)")
 
     return result

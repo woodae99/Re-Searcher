@@ -151,7 +151,7 @@ python scripts/verify_run.py
 
 **File**: `src/progress.py` (new)
 
-- [ ] Create `IndexingStage` enum:
+- [x] Create `IndexingStage` enum:
   ```python
   class IndexingStage(Enum):
       INITIALIZING = "Initializing"
@@ -162,7 +162,7 @@ python scripts/verify_run.py
       COMPLETE = "Complete"
   ```
 
-- [ ] Create `SourceStats` dataclass:
+- [x] Create `SourceStats` dataclass:
   ```python
   @dataclass
   class SourceStats:
@@ -175,20 +175,20 @@ python scripts/verify_run.py
       errors: int = 0
   ```
 
-- [ ] Create `TimingTracker` class:
+- [x] Create `TimingTracker` class:
   - `started_at: datetime`
   - `item_times: deque` (rolling window of last 100)
   - `record_item(elapsed: float)`
   - `average_time() -> float`
   - `estimate_remaining(items_left: int) -> timedelta`
 
-- [ ] Create `ProgressDisplay` class:
+- [x] Create `ProgressDisplay` class:
   - Thread-safe with `threading.Lock`
   - Uses `rich.Live` for dynamic display
   - Methods: `start()`, `stop()`, `set_stage()`, `update_source()`, `set_activity()`
   - **Individual file progress**: For PDFs > 10MB, show a sub-progress bar
 
-- [ ] Display format (interactive TTY):
+- [x] Display format (interactive TTY):
   ```
   Re-Searcher Indexing Pipeline
   ══════════════════════════════════════════════════════════════
@@ -210,13 +210,13 @@ python scripts/verify_run.py
 
 **Important**: `rich.Live` breaks non-interactive logging.
 
-- [ ] **Auto-detect TTY**: If `sys.stdout.isatty()` is False → auto-disable Live
-- [ ] Create `PlainProgressDisplay` class:
+- [x] **Auto-detect TTY**: If `sys.stdout.isatty()` is False → auto-disable Live
+- [x] Create `PlainProgressDisplay` class:
   - Prints periodic single-line updates (every N seconds or N items)
   - Format: `[Stage 2/4] Zotero: 127/180 (70%) | 45 new, 2 errors | ETA: 00:02:15`
   - No cursor movement, no escape codes
-- [ ] Add `--plain-progress` CLI flag to force plain mode even on TTY
-- [ ] Factory function to select display type:
+- [x] Add `--plain-progress` CLI flag to force plain mode even on TTY
+- [x] Factory function to select display type:
   ```python
   def create_progress_display(mode: str = "auto") -> ProgressDisplay:
       if mode == "plain" or (mode == "auto" and not sys.stdout.isatty()):
@@ -228,34 +228,34 @@ python scripts/verify_run.py
 
 **File**: `src/pipeline.py`
 
-- [ ] Add `progress_mode: str = "auto"` parameter to `__init__` (auto/rich/plain/quiet)
-- [ ] Initialize appropriate ProgressDisplay based on mode
-- [ ] Add stage transitions in `run()`:
+- [x] Add `progress_mode: str = "auto"` parameter to `__init__` (auto/rich/plain/quiet)
+- [x] Initialize appropriate ProgressDisplay based on mode
+- [x] Add stage transitions in `run()`:
   - `INITIALIZING` → `FETCHING` → `CHUNKING` → `EMBEDDING` → `STORING` → `COMPLETE`
-- [ ] Wrap run in try/finally to ensure `progress.stop()` is called
+- [x] Wrap run in try/finally to ensure `progress.stop()` is called
 
 ### 1.4 Source callback interface
 
 **File**: `src/sources/base.py`
 
-- [ ] Add optional `progress_callback: Callable[[dict], None]` to base class
-- [ ] Define callback signature: `{"event": str, "source": str, ...}`
+- [x] Add optional `progress_callback: Callable[[dict], None]` to base class
+- [x] Define callback signature: `{"event": str, "source": str, ...}`
 
 **File**: `src/sources/zotero.py`
 
-- [ ] Wire progress callback for extraction events
+- [x] Wire progress callback for extraction events
 
 **File**: `src/sources/obsidian.py`
 
-- [ ] Wire progress callback for note processing events
+- [x] Wire progress callback for note processing events
 
 ### 1.5 CLI updates
 
 **File**: `scripts/index.py`
 
-- [ ] Add `--quiet` flag to disable all progress output
-- [ ] Add `--plain-progress` flag to force plain mode
-- [ ] Pass appropriate `progress_mode` to pipeline
+- [x] Add `--quiet` flag to disable all progress output
+- [x] Add `--plain-progress` flag to force plain mode
+- [x] Pass appropriate `progress_mode` to pipeline
 
 ### Stage 1 Checkpoint
 
@@ -286,7 +286,7 @@ python scripts/index.py --limit 20 > output.log 2>&1
 
 **File**: `config.yaml`
 
-- [ ] Add extraction config section:
+- [x] Add extraction config section:
   ```yaml
   extraction:
     parallel: true
@@ -294,13 +294,13 @@ python scripts/index.py --limit 20 > output.log 2>&1
     mode: thread   # thread | process (thread recommended)
   ```
 
-- [ ] Deprecate `zotero.max_extraction_threads` (map to `extraction.workers` for backwards compat)
+- [x] Deprecate `zotero.max_extraction_threads` (map to `extraction.workers` for backwards compat)
 
 ### 2.2 Extraction dataclasses
 
 **File**: `src/sources/zotero.py`
 
-- [ ] Add dataclasses:
+- [x] Add dataclasses:
   ```python
   @dataclass
   class ExtractionTask:
@@ -325,12 +325,12 @@ python scripts/index.py --limit 20 > output.log 2>&1
 
 **File**: `src/sources/zotero.py`
 
-- [ ] Implement `_extract_single_attachment(task: ExtractionTask) -> ExtractionResult`:
+- [x] Implement `_extract_single_attachment(task: ExtractionTask) -> ExtractionResult`:
   - Stateless, thread-safe
   - Calls existing subprocess extraction
   - Handles exceptions gracefully
 
-- [ ] Refactor `_process_attachments()`:
+- [x] Refactor `_process_attachments()`:
   - **Sort tasks by stable key FIRST** (attachment_key or file_path) before assigning indices
     - This ensures "same run, same IDs, same ordering" assumption holds
   - Execute with `ThreadPoolExecutor(max_workers=workers)`
@@ -362,7 +362,7 @@ python scripts/index.py --limit 20 > output.log 2>&1
               yield self._create_document(results[i], metadata_base)
   ```
 
-- [ ] Get worker count:
+- [x] Get worker count:
   ```python
   def _get_worker_count(self) -> int:
       config_workers = self.extraction_config.get("workers", "auto")
@@ -373,7 +373,7 @@ python scripts/index.py --limit 20 > output.log 2>&1
 
 ### 2.4 Progress integration
 
-- [ ] Update progress display with:
+- [x] Update progress display with:
   - Current file being extracted
   - Per-file progress bar for large PDFs (> 10MB) — based on elapsed vs. estimated time
   - Error count updates in real-time
@@ -579,29 +579,29 @@ python scripts/index.py --limit 100 --verbose
 
 **File**: `src/sources/obsidian.py`
 
-- [ ] Parse YAML frontmatter into metadata dict
-- [ ] Handle common fields: `tags`, `aliases`, `zotero_key`, `date`, custom fields
+- [x] Parse YAML frontmatter into metadata dict
+- [x] Handle common fields: `tags`, `aliases`, `zotero_key`, `date`, custom fields
 
 ### 4.2 Tag extraction
 
-- [ ] Extract YAML tags: `tags: [tag1, tag2]`
-- [ ] Extract inline tags: `#tag-name`
-- [ ] Merge into `metadata.tags` list
+- [x] Extract YAML tags: `tags: [tag1, tag2]`
+- [x] Extract inline tags: `#tag-name`
+- [x] Merge into `metadata.tags` list
 
 ### 4.3 Link extraction
 
-- [ ] Extract wikilinks: `[[Page Name]]`, `[[Page Name|Display]]`
-- [ ] Store in `metadata.links_out` list
-- [ ] Compute backlinks if feasible (may require two-pass)
+- [x] Extract wikilinks: `[[Page Name]]`, `[[Page Name|Display]]`
+- [x] Store in `metadata.links_out` list
+- [x] Compute backlinks if feasible (may require two-pass) — deferred, wikilinks stored instead
 
 ### 4.4 Code block handling
 
-- [ ] Set `metadata.contains_code: true` if note has fenced code blocks
-- [ ] Ensure chunker doesn't split inside code blocks
+- [x] Set `metadata.contains_code: true` if note has fenced code blocks
+- [x] Ensure chunker doesn't split inside code blocks — handled by markdown chunker
 
 ### 4.5 Zotero key propagation
 
-- [ ] If frontmatter contains `zotero_key`, propagate to all chunks from that note
+- [x] If frontmatter contains `zotero_key`, propagate to all chunks from that note
 
 ### Stage 4 Checkpoint
 
@@ -679,7 +679,10 @@ Use this section to track multi-session progress.
 |------|---------|---------------|---------|-------|
 | 2026-01-08 | 1 | Planning | — | Created implementation plan |
 | 2026-01-08 | 2 | Stage 0 | 0ac6156 | Preflight validation + verify_run.py complete |
-| 2026-01-08 | 2 | Stage 3 | — | Oversize guard + root cause logging complete |
+| 2026-01-08 | 2 | Stage 3 | d8899d6 | Oversize guard + root cause logging complete |
+| 2026-01-08 | 3 | Stage 1 | — | Rich progress display, PlainProgressDisplay, CLI flags |
+| 2026-01-08 | 3 | Stage 2 | — | Parallel PDF extraction with ThreadPoolExecutor |
+| 2026-01-08 | 3 | Stage 4 | — | Obsidian metadata: aliases, contains_code, heading_path |
 | | | | | |
 
 ### Stage Status
@@ -687,10 +690,10 @@ Use this section to track multi-session progress.
 | Stage | Status | Started | Completed |
 |-------|--------|---------|-----------|
 | 0 - Preflight | ✅ Complete | 2026-01-08 | 2026-01-08 |
-| 1 - Progress UI | ⬜ Not started | | |
-| 2 - Parallel Extraction | ⬜ Not started | | |
+| 1 - Progress UI | ✅ Complete | 2026-01-08 | 2026-01-08 |
+| 2 - Parallel Extraction | ✅ Complete | 2026-01-08 | 2026-01-08 |
 | 3 - Oversize Guard | ✅ Complete | 2026-01-08 | 2026-01-08 |
-| 4 - Obsidian Metadata | ⬜ Not started | | |
+| 4 - Obsidian Metadata | ✅ Complete | 2026-01-08 | 2026-01-08 |
 | 5 - Tests | ⬜ Not started | | |
 
 Legend: ⬜ Not started | 🟡 In progress | ✅ Complete

@@ -2,18 +2,22 @@
 
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Set
+from typing import Any, Dict, Iterator, List, Optional, Set
 
 import yaml
 
-from .base import DataSource, Document
+from .base import DataSource, Document, ProgressCallback
 
 
 class ObsidianSource(DataSource):
     """Data source for Obsidian vault."""
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        progress_callback: Optional[ProgressCallback] = None,
+    ):
+        super().__init__(config, progress_callback)
         self.obsidian_config = config.get("obsidian", {})
         self.vault_path = None
 
@@ -56,17 +60,46 @@ class ObsidianSource(DataSource):
 
         # Find all markdown files
         md_files = self._find_markdown_files(include_folders, exclude_folders)
-        print(f"📔 Found {len(md_files)} markdown files in Obsidian vault")
+        total_files = len(md_files)
+        print(f"📔 Found {total_files} markdown files in Obsidian vault")
+
+        # Emit source initialization
+        self._emit_progress("source_init", total=total_files)
 
         link_map = self._build_link_map(md_files)
 
-        for md_file in md_files:
+        for idx, md_file in enumerate(md_files):
+            self._emit_progress("item_start", file_path=str(md_file), index=idx, total=total_files)
+
             try:
                 document = self._process_markdown_file(md_file, link_map)
                 if document:
                     yield document
+                    self._emit_progress(
+                        "item_complete",
+                        file_path=str(md_file),
+                        index=idx,
+                        total=total_files,
+                        status="success"
+                    )
+                else:
+                    self._emit_progress(
+                        "item_complete",
+                        file_path=str(md_file),
+                        index=idx,
+                        total=total_files,
+                        status="empty"
+                    )
             except Exception as e:
-                print(f"  ⚠️  Error processing {md_file.name}: {e}")
+                print(f"  Warning: Error processing {md_file.name}: {e}")
+                self._emit_progress(
+                    "item_error",
+                    file_path=str(md_file),
+                    index=idx,
+                    error=str(e)
+                )
+
+        self._emit_progress("source_complete")
 
     def _find_markdown_files(
         self, include_folders: List[str], exclude_folders: set
@@ -120,6 +153,18 @@ class ObsidianSource(DataSource):
         tags = self._normalize_tags(frontmatter_tags | inline_tags)
         zotero_keys = self._extract_zotero_keys(frontmatter, body)
 
+        # Extract aliases from frontmatter
+        aliases = self._extract_aliases(frontmatter)
+
+        # Check for code blocks
+        contains_code = self._has_code_blocks(body)
+
+        # Extract headings for heading_path context
+        headings = self._extract_headings(body)
+        # Build heading path at document start (position 0)
+        # Individual chunks will get their own heading_path during chunking
+        heading_path = self._build_heading_path(headings, len(body)) if headings else ""
+
         # Get relative path from vault root
         relative_path = md_file.relative_to(self.vault_path)
 
@@ -136,7 +181,17 @@ class ObsidianSource(DataSource):
             "tags": tags,
             "backlink": f"obsidian://open?vault={self.vault_path.name}&file={relative_path}",
             "frontmatter": frontmatter,
+            "contains_code": contains_code,
+            "heading_count": len(headings),
         }
+
+        # Add aliases if present
+        if aliases:
+            metadata["aliases"] = aliases
+
+        # Add heading_path if we have headings
+        if heading_path:
+            metadata["heading_path"] = heading_path
 
         # Add frontmatter fields to metadata
         for key, value in frontmatter.items():
@@ -211,6 +266,76 @@ class ObsidianSource(DataSource):
         zotero_keys.extend(inline_keys)
 
         return list(dict.fromkeys(zotero_keys))
+
+    def _extract_aliases(self, frontmatter: Dict[str, Any]) -> List[str]:
+        """Extract aliases from frontmatter."""
+        aliases = frontmatter.get("aliases", [])
+        if isinstance(aliases, str):
+            return [aliases]
+        if isinstance(aliases, list):
+            return [str(a) for a in aliases if a]
+        return []
+
+    def _has_code_blocks(self, content: str) -> bool:
+        """Check if content contains fenced code blocks."""
+        # Match fenced code blocks: ```lang or ``` or ~~~
+        pattern = r"^(?:```|~~~)"
+        return bool(re.search(pattern, content, re.MULTILINE))
+
+    def _extract_headings(self, content: str) -> List[Dict[str, Any]]:
+        """
+        Extract markdown headings with their levels and positions.
+
+        Returns list of dicts with: level, text, start_pos, end_pos
+        """
+        headings = []
+        # Match ATX-style headings: # Heading
+        pattern = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+)?$", re.MULTILINE)
+
+        for match in pattern.finditer(content):
+            level = len(match.group(1))
+            text = match.group(2).strip()
+            headings.append({
+                "level": level,
+                "text": text,
+                "start_pos": match.start(),
+                "end_pos": match.end(),
+            })
+
+        return headings
+
+    def _build_heading_path(self, headings: List[Dict[str, Any]], position: int = 0) -> str:
+        """
+        Build a heading path (breadcrumb) for a given position in the document.
+
+        Example: "Chapter 1 > Section A > Subsection"
+        """
+        if not headings:
+            return ""
+
+        # Find all headings before the given position
+        relevant_headings = [h for h in headings if h["start_pos"] <= position]
+
+        if not relevant_headings:
+            return ""
+
+        # Build path maintaining hierarchy
+        path_parts = []
+        current_level = 0
+
+        for heading in relevant_headings:
+            level = heading["level"]
+            text = heading["text"]
+
+            if level <= current_level:
+                # Same or higher level - trim path back
+                while path_parts and path_parts[-1][0] >= level:
+                    path_parts.pop()
+
+            path_parts.append((level, text))
+            current_level = level
+
+        return " > ".join(text for _, text in path_parts)
 
     def _extract_wikilinks(self, content: str) -> List[str]:
         """

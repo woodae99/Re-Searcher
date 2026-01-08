@@ -1,31 +1,74 @@
 """Zotero data source for extracting items, notes, and attachments."""
 
+import os
 import sqlite3
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import html2text
 
 from ..extract_text import extract_text
-from .base import DataSource, Document
+from .base import DataSource, Document, ProgressCallback
+
+
+@dataclass
+class ExtractionTask:
+    """Represents a single attachment extraction task."""
+
+    file_path: Path
+    attachment_id: int
+    attachment_key: str
+    filename: str
+    content_type: str
+    file_size_mb: float
+    zotero_item_id: int
+    index: int = 0  # Assigned after sorting for deterministic ordering
+
+
+@dataclass
+class ExtractionResult:
+    """Result of extracting text from an attachment."""
+
+    task: ExtractionTask
+    text: Optional[str]
+    error: Optional[str]
+    elapsed_seconds: float
 
 
 class ZoteroSource(DataSource):
     """Data source for Zotero library."""
 
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        progress_callback: Optional[ProgressCallback] = None,
+    ):
+        super().__init__(config, progress_callback)
         self.zotero_config = config.get("zotero", {})
+        self.extraction_config = config.get("extraction", {})
         self.data_dir = None
         self.db_path = None
         self.storage_dir = None
-        self.max_extraction_threads = self.zotero_config.get("max_extraction_threads", 4)
+
+        # Extraction settings with backwards compatibility
+        self.parallel_enabled = self.extraction_config.get("parallel", True)
+        # Legacy fallback: zotero.max_extraction_threads -> extraction.workers
+        legacy_threads = self.zotero_config.get("max_extraction_threads")
+        self.configured_workers = self.extraction_config.get("workers", legacy_threads or "auto")
 
         if self.is_enabled():
             self.data_dir = Path(self.zotero_config.get("data_directory", "")).expanduser()
             self.db_path = self.data_dir / "zotero.sqlite"
             self.storage_dir = self.data_dir / "storage"
+
+    def _get_worker_count(self) -> int:
+        """Get the number of workers for parallel extraction."""
+        if self.configured_workers == "auto":
+            return os.cpu_count() or 4
+        return int(self.configured_workers)
 
     def is_enabled(self) -> bool:
         """Check if Zotero source is enabled."""
@@ -64,14 +107,40 @@ class ZoteroSource(DataSource):
 
         try:
             items = self._get_all_items(conn)
-            print(f"📚 Found {len(items)} items in Zotero library")
+            total_items = len(items)
+            print(f"📚 Found {total_items} items in Zotero library")
 
-            for item_row in items:
+            # Emit source initialization
+            self._emit_progress("source_init", total=total_items)
+
+            for idx, item_row in enumerate(items):
                 item_id = item_row["itemID"]
-                yield from self._process_item(conn, item_id)
+                self._emit_progress("item_start", item_id=item_id, index=idx, total=total_items)
+
+                try:
+                    docs_yielded = 0
+                    for doc in self._process_item(conn, item_id):
+                        yield doc
+                        docs_yielded += 1
+
+                    self._emit_progress(
+                        "item_complete",
+                        item_id=item_id,
+                        index=idx,
+                        total=total_items,
+                        docs_yielded=docs_yielded
+                    )
+                except Exception as e:
+                    self._emit_progress(
+                        "item_error",
+                        item_id=item_id,
+                        index=idx,
+                        error=str(e)
+                    )
 
         finally:
             conn.close()
+            self._emit_progress("source_complete")
 
     def _get_db_connection(self) -> Optional[sqlite3.Connection]:
         """Establish read-only connection to Zotero SQLite database."""
@@ -218,13 +287,10 @@ class ZoteroSource(DataSource):
                     doc_id=f"zotero-{item_id}-note-{note_id}",
                 )
 
-    def _process_attachments(
-        self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
-    ) -> Iterator[Document]:
-        """Process attachments for an item using sequential extraction with timeout.
-        
-        Logs problematic PDFs to a file for later manual processing.
-        """
+    def _collect_attachment_tasks(
+        self, conn: sqlite3.Connection, item_id: int
+    ) -> List[ExtractionTask]:
+        """Collect all attachment extraction tasks for an item."""
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -236,7 +302,6 @@ class ZoteroSource(DataSource):
             (item_id,),
         )
 
-        # Prepare extraction tasks
         tasks = []
         for row in cursor.fetchall():
             path_str = row["path"]
@@ -251,63 +316,202 @@ class ZoteroSource(DataSource):
             if not file_path.exists():
                 continue
 
-            tasks.append((file_path, attachment_id, attachment_key, filename, row["contentType"]))
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+
+            tasks.append(
+                ExtractionTask(
+                    file_path=file_path,
+                    attachment_id=attachment_id,
+                    attachment_key=attachment_key,
+                    filename=filename,
+                    content_type=row["contentType"],
+                    file_size_mb=file_size_mb,
+                    zotero_item_id=item_id,
+                )
+            )
+
+        return tasks
+
+    def _extract_single_attachment(self, task: ExtractionTask) -> ExtractionResult:
+        """
+        Extract text from a single attachment. Thread-safe and stateless.
+
+        This function is designed to be called from multiple threads concurrently.
+        It calls the subprocess-based extract_text function which handles timeouts.
+        """
+        start_time = time.time()
+        try:
+            text = extract_text(task.file_path)
+            elapsed = time.time() - start_time
+
+            if text and text.strip():
+                return ExtractionResult(task=task, text=text, error=None, elapsed_seconds=elapsed)
+            else:
+                return ExtractionResult(
+                    task=task, text=None, error="empty: no extractable text", elapsed_seconds=elapsed
+                )
+        except Exception as e:
+            elapsed = time.time() - start_time
+            return ExtractionResult(task=task, text=None, error=str(e), elapsed_seconds=elapsed)
+
+    def _process_attachments(
+        self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
+    ) -> Iterator[Document]:
+        """Process attachments for an item using parallel extraction.
+
+        Uses ThreadPoolExecutor for concurrent extraction while maintaining
+        deterministic output ordering for reproducibility.
+        """
+        # Step 1: Collect all tasks
+        tasks = self._collect_attachment_tasks(conn, item_id)
 
         if not tasks:
             return
 
-        # Track statistics and problems
+        # Step 2: Sort tasks by attachment_key for deterministic ordering
+        # This ensures "same run, same IDs, same ordering"
+        tasks.sort(key=lambda t: t.attachment_key)
+
+        # Step 3: Assign indices after sorting
+        for i, task in enumerate(tasks):
+            task.index = i
+
+        total_tasks = len(tasks)
+
+        # Step 4: Execute extraction (parallel or sequential based on config)
+        if self.parallel_enabled and total_tasks > 1:
+            results = self._extract_parallel(tasks, item_id)
+        else:
+            results = self._extract_sequential(tasks, item_id)
+
+        # Step 5: Yield documents in deterministic order (by index)
         processed_count = 0
-        skipped_count = 0
-        timeout_count = 0
+        error_count = 0
 
-        # Extract attachments sequentially (no threading - subprocess handles timeout)
-        for file_path, attachment_id, attachment_key, filename, content_type in tasks:
-            # Get file size for diagnostics
-            file_size_mb = file_path.stat().st_size / (1024 * 1024)
-            print(f"      Extracting: {filename} ({file_size_mb:.1f}MB)...", end="", flush=True)
-            
-            try:
-                # Call extract directly - subprocess inside handles timeout
-                full_text = self._extract_attachment(file_path)
-                
-                if full_text and full_text.strip():
-                    print(f" OK ({len(full_text)} chars)")
-                    metadata = metadata_base.copy()
-                    metadata.update(
-                        {
-                            "source_type": "zotero_fulltext",
-                            "attachment_id": attachment_id,
-                            "attachment_key": attachment_key,
-                            "file_name": filename,
-                            "file_path": str(file_path),
-                            "content_type": content_type,
-                        }
-                    )
+        for i in range(total_tasks):
+            result = results.get(i)
+            if not result:
+                continue
 
-                    yield Document(
-                        content=full_text,
-                        metadata=metadata,
-                        doc_id=f"zotero-{item_id}-attachment-{attachment_id}",
-                    )
-                    processed_count += 1
-                else:
-                    print(f" [EMPTY - no extractable text]")
-                    self._log_problematic_pdf(file_path, filename, "empty: no text extracted")
-                    skipped_count += 1
+            task = result.task
 
-            except Exception as e:
-                print(f" [ERROR: {e}]")
-                self._log_problematic_pdf(file_path, filename, f"exception: {e}")
-                skipped_count += 1
-        
+            if result.text:
+                metadata = metadata_base.copy()
+                metadata.update(
+                    {
+                        "source_type": "zotero_fulltext",
+                        "attachment_id": task.attachment_id,
+                        "attachment_key": task.attachment_key,
+                        "file_name": task.filename,
+                        "file_path": str(task.file_path),
+                        "content_type": task.content_type,
+                    }
+                )
+
+                yield Document(
+                    content=result.text,
+                    metadata=metadata,
+                    doc_id=f"zotero-{item_id}-attachment-{task.attachment_id}",
+                )
+                processed_count += 1
+            else:
+                error_count += 1
+                self._log_problematic_pdf(task.file_path, task.filename, result.error or "unknown")
+
         # Print summary for this item
-        if tasks:
-            total = len(tasks)
-            success_pct = (processed_count / total * 100) if total > 0 else 0
-            print(f"\n      Item summary: {processed_count}/{total} extracted ({success_pct:.0f}%)")
-            if timeout_count > 0:
-                print(f"                {timeout_count} PDFs timed out (see problematic_pdfs.log)")
+        if total_tasks > 0:
+            success_pct = (processed_count / total_tasks * 100) if total_tasks > 0 else 0
+            print(f"      Item summary: {processed_count}/{total_tasks} extracted ({success_pct:.0f}%)")
+
+    def _extract_parallel(
+        self, tasks: List[ExtractionTask], item_id: int
+    ) -> Dict[int, ExtractionResult]:
+        """Execute extraction tasks in parallel using ThreadPoolExecutor."""
+        results: Dict[int, ExtractionResult] = {}
+        worker_count = self._get_worker_count()
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            # Submit all tasks
+            future_to_task = {
+                executor.submit(self._extract_single_attachment, task): task for task in tasks
+            }
+
+            # Process results as they complete
+            for future in as_completed(future_to_task):
+                result = future.result()
+                task = result.task
+
+                # Store result by index for deterministic ordering
+                results[task.index] = result
+
+                # Emit progress event
+                if result.text:
+                    print(f"      [Worker] Extracted: {task.filename} ({len(result.text)} chars, {result.elapsed_seconds:.1f}s)")
+                    self._emit_progress(
+                        "attachment_complete",
+                        item_id=item_id,
+                        attachment_id=task.attachment_id,
+                        file_name=task.filename,
+                        chars_extracted=len(result.text),
+                        status="success",
+                    )
+                else:
+                    print(f"      [Worker] Failed: {task.filename} ({result.error})")
+                    self._emit_progress(
+                        "attachment_error",
+                        item_id=item_id,
+                        attachment_id=task.attachment_id,
+                        file_name=task.filename,
+                        error=result.error,
+                    )
+
+        return results
+
+    def _extract_sequential(
+        self, tasks: List[ExtractionTask], item_id: int
+    ) -> Dict[int, ExtractionResult]:
+        """Execute extraction tasks sequentially (fallback for single task or disabled parallel)."""
+        results: Dict[int, ExtractionResult] = {}
+
+        for task in tasks:
+            print(f"      Extracting: {task.filename} ({task.file_size_mb:.1f}MB)...", end="", flush=True)
+
+            # Emit start event
+            self._emit_progress(
+                "attachment_start",
+                item_id=item_id,
+                attachment_id=task.attachment_id,
+                file_name=task.filename,
+                file_size_mb=task.file_size_mb,
+                index=task.index,
+                total=len(tasks),
+            )
+
+            result = self._extract_single_attachment(task)
+            results[task.index] = result
+
+            # Emit completion event
+            if result.text:
+                print(f" OK ({len(result.text)} chars)")
+                self._emit_progress(
+                    "attachment_complete",
+                    item_id=item_id,
+                    attachment_id=task.attachment_id,
+                    file_name=task.filename,
+                    chars_extracted=len(result.text),
+                    status="success",
+                )
+            else:
+                print(f" [ERROR: {result.error}]")
+                self._emit_progress(
+                    "attachment_error",
+                    item_id=item_id,
+                    attachment_id=task.attachment_id,
+                    file_name=task.filename,
+                    error=result.error,
+                )
+
+        return results
 
     def _log_problematic_pdf(self, file_path: Path, filename: str, reason: str):
         """Log a problematic PDF for later manual processing."""
@@ -321,12 +525,6 @@ class ZoteroSource(DataSource):
                 f.write(f"{filename} | {file_size_mb:.1f}MB | {reason} | {file_path}\n")
         except Exception as e:
             print(f"    [Warning: Could not log problematic PDF: {e}]")
-
-
-    def _extract_attachment(self, file_path: Path) -> str:
-        """Extract text from a single attachment file."""
-        full_text = extract_text(file_path)
-        return full_text
 
     def _process_annotations(
         self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]

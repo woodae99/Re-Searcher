@@ -1,7 +1,7 @@
 """Abstract base class for data sources."""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterator, List
+from typing import Any, Callable, Dict, Iterator, Optional
 
 
 class Document:
@@ -21,11 +21,36 @@ class Document:
         return f"Document(id={self.doc_id}, content_length={len(self.content)})"
 
 
+# Type alias for progress callback
+# Callback receives: {"event": str, "source": str, ...additional fields}
+ProgressCallback = Callable[[Dict[str, Any]], None]
+
+
 class DataSource(ABC):
     """Abstract base class for data sources."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        progress_callback: Optional[ProgressCallback] = None,
+    ):
         self.config = config
+        self.progress_callback = progress_callback
+
+    def _emit_progress(self, event: str, **kwargs) -> None:
+        """
+        Emit a progress event if callback is set.
+
+        Args:
+            event: Event type (e.g., "item_start", "item_complete", "error")
+            **kwargs: Additional event data
+        """
+        if self.progress_callback:
+            self.progress_callback({
+                "event": event,
+                "source": self.__class__.__name__,
+                **kwargs,
+            })
 
     @abstractmethod
     def fetch_documents(self) -> Iterator[Document]:

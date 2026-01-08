@@ -85,6 +85,15 @@ storage:
   # Distance metric: 'cosine', 'l2', or 'ip' (inner product)
   distance_metric: cosine
 
+# Extraction configuration (parallel PDF extraction)
+extraction:
+  # Enable parallel extraction for better throughput
+  parallel: true
+  # Number of workers: "auto" = os.cpu_count(), or explicit int
+  workers: auto
+  # Execution mode: 'thread' (recommended) or 'process'
+  mode: thread
+
 # Text chunking configuration
 chunking:
   # Chunk size in characters

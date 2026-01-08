@@ -54,8 +54,21 @@ def main():
         action="store_true",
         help="Suppress progress output (errors and warnings still shown)",
     )
+    parser.add_argument(
+        "--plain-progress",
+        action="store_true",
+        help="Use plain text progress output (no rich terminal UI)",
+    )
 
     args = parser.parse_args()
+
+    # Determine progress mode
+    if args.quiet:
+        progress_mode = "quiet"
+    elif args.plain_progress:
+        progress_mode = "plain"
+    else:
+        progress_mode = "auto"
 
     # Check if config exists
     if not args.config.exists():
@@ -103,7 +116,7 @@ def main():
 
     try:
         # Initialize and run pipeline
-        pipeline = ResearchRAGPipeline(args.config)
+        pipeline = ResearchRAGPipeline(args.config, progress_mode=progress_mode)
         pipeline.run(force_reindex=args.force)
 
     except KeyboardInterrupt:
