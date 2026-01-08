@@ -144,5 +144,16 @@ retrieval:
 output_folder: ./output
 log_progress: true
 
+# Indexing configuration
+indexing:
+  # Documents per batch for resumable indexing
+  batch_size: 50
+  # Optional: pipeline embed/store overlap to reduce idle time
+  embed_store_pipeline:
+    enabled: false
+    queue_max_items: 8
+    embed_sub_batch_size: 500
+    store_sub_batch_size: 500
+
 # Optional: Ontology expansion (from original Re-Searcher)
 ontology_file: ""

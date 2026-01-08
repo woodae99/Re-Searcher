@@ -1,6 +1,10 @@
 """Main pipeline for indexing research library into vector store."""
 
 import hashlib
+import queue
+import threading
+import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -141,7 +145,10 @@ class ResearchRAGPipeline:
             self.progress_display.set_stage(IndexingStage.INITIALIZING, 1, 4)
 
             # Check if re-indexing is needed
-            if not force_reindex and not self._needs_reindex():
+            if force_reindex:
+                print("[INFO] --force enabled: resetting index state and vector store")
+                self._reset_index_state()
+            elif not self._needs_reindex():
                 print("[INFO] Index is up to date. Use --force to re-index anyway.")
                 return
 
@@ -156,6 +163,9 @@ class ResearchRAGPipeline:
 
             # Initialize progress tracking
             self.progress.set_total_documents(len(documents))
+            self._overall_total_chunks = 0
+            self._overall_embedded = 0
+            self._overall_stored = 0
 
             # Stage 3: Chunking + Embedding
             self.progress_display.set_stage(IndexingStage.CHUNKING, 3, 4)
@@ -215,6 +225,8 @@ class ResearchRAGPipeline:
                 if not chunks:
                     continue
 
+                self._overall_total_chunks += len(chunks)
+
                 # Update progress: documents chunked
                 for doc in pending_docs:
                     doc_chunks = sum(
@@ -227,40 +239,72 @@ class ResearchRAGPipeline:
                         chunk_count=doc_chunks,
                     )
 
-                # Step 2: Generate embeddings
+                # Step 2: Generate embeddings (+ store, if pipelined)
                 self.progress_display.set_stage(IndexingStage.EMBEDDING, 3, 4)
-                self.progress_display.set_activity(f"Embedding {len(chunks)} chunks (batch {batch_num}/{total_batches})...")
-                try:
-                    embeddings = self._generate_embeddings(chunks)
-                except Exception as e:
-                    for doc in pending_docs:
-                        self.progress.set_document_status(
-                            doc.doc_id,
-                            DocumentStatus.ERROR,
-                            error_msg=str(e),
-                        )
-                    continue
-
-                # Update progress: documents embedded
-                for doc in pending_docs:
-                    self.progress.set_document_status(
-                        doc.doc_id,
-                        DocumentStatus.EMBEDDED,
+                if self._should_use_embed_store_pipeline():
+                    self.progress_display.set_activity(
+                        f"Batch {batch_num} of {total_batches} Embedding + storing {len(chunks)} chunks"
                     )
+                    try:
+                        self._process_embeddings_and_store(
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                            batch_num,
+                            total_batches,
+                        )
+                    except Exception as e:
+                        for doc in pending_docs:
+                            self.progress.set_document_status(
+                                doc.doc_id,
+                                DocumentStatus.ERROR,
+                                error_msg=str(e),
+                            )
+                        continue
 
-                # Step 3: Store embeddings
-                self.progress_display.set_stage(IndexingStage.STORING, 3, 4)
-                self.progress_display.set_activity(f"Storing {len(chunks)} chunks (batch {batch_num}/{total_batches})...")
-                try:
-                    self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
-                except Exception as e:
+                    # Update progress: documents embedded
                     for doc in pending_docs:
                         self.progress.set_document_status(
                             doc.doc_id,
-                            DocumentStatus.ERROR,
-                            error_msg=str(e),
+                            DocumentStatus.EMBEDDED,
                         )
-                    continue
+                else:
+                    self.progress_display.set_activity(
+                        f"Batch {batch_num} of {total_batches} Embedding {len(chunks)} chunks"
+                    )
+                    try:
+                        embeddings = self._generate_embeddings(chunks)
+                    except Exception as e:
+                        for doc in pending_docs:
+                            self.progress.set_document_status(
+                                doc.doc_id,
+                                DocumentStatus.ERROR,
+                                error_msg=str(e),
+                            )
+                        continue
+
+                    # Update progress: documents embedded
+                    for doc in pending_docs:
+                        self.progress.set_document_status(
+                            doc.doc_id,
+                            DocumentStatus.EMBEDDED,
+                        )
+
+                    # Step 3: Store embeddings
+                    self.progress_display.set_stage(IndexingStage.STORING, 3, 4)
+                    self.progress_display.set_activity(
+                        f"Batch {batch_num} of {total_batches} Storing {len(chunks)} chunks"
+                    )
+                    try:
+                        self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
+                    except Exception as e:
+                        for doc in pending_docs:
+                            self.progress.set_document_status(
+                                doc.doc_id,
+                                DocumentStatus.ERROR,
+                                error_msg=str(e),
+                            )
+                        continue
 
                 # Update progress: documents stored
                 for doc in pending_docs:
@@ -359,6 +403,153 @@ class ResearchRAGPipeline:
             print(f"[ERROR] Error generating embeddings: {e}")
             raise
 
+    def _should_use_embed_store_pipeline(self) -> bool:
+        """Check if embed/store pipelining is enabled."""
+        pipeline_cfg = self.config.get("indexing", {}).get("embed_store_pipeline", {})
+        return bool(pipeline_cfg.get("enabled", False))
+
+    def _process_embeddings_and_store(
+        self,
+        chunks: List[str],
+        chunk_metadatas: List[Dict[str, Any]],
+        chunk_ids: List[str],
+        batch_num: int,
+        total_batches: int,
+    ) -> None:
+        """Embed chunks and store in Chroma, optionally pipelined."""
+        if not chunks:
+            return
+
+        if not self._should_use_embed_store_pipeline():
+            embeddings = self._generate_embeddings(chunks)
+            self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
+            return
+
+        pipeline_cfg = self.config.get("indexing", {}).get("embed_store_pipeline", {})
+        queue_max = int(pipeline_cfg.get("queue_max_items", 8))
+        embed_sub_batch = int(pipeline_cfg.get("embed_sub_batch_size", 2000))
+        store_sub_batch = int(pipeline_cfg.get("store_sub_batch_size", embed_sub_batch))
+
+        work_queue: queue.Queue = queue.Queue(maxsize=queue_max)
+        stop_event = threading.Event()
+        error_lock = threading.Lock()
+        errors: List[tuple[Exception, str]] = []
+        progress_lock = threading.Lock()
+        embedded_count = 0
+        stored_count = 0
+        total_chunks = len(chunks)
+        last_update = 0.0
+
+        def maybe_update_activity() -> None:
+            nonlocal last_update
+            now = time.monotonic()
+            if now - last_update < 0.5:
+                return
+            last_update = now
+            overall_total = self._overall_total_chunks
+            overall_embedded = self._overall_embedded
+            overall_stored = self._overall_stored
+            overall_embedded_pct = 0.0 if overall_total == 0 else (overall_embedded / overall_total) * 100
+            overall_stored_pct = 0.0 if overall_total == 0 else (overall_stored / overall_total) * 100
+            detail = (
+                "Overall Progress: "
+                f"Embedded {overall_embedded}/{overall_total} ({overall_embedded_pct:.1f}%) | "
+                f"Stored {overall_stored}/{overall_total} ({overall_stored_pct:.1f}%)"
+            )
+            self.progress_display.set_activity(
+                f"Batch {batch_num} of {total_batches} Embedding + storing {total_chunks} chunks | "
+                f"embedded: {embedded_count} | stored: {stored_count}",
+                detail=detail,
+            )
+
+        def record_error(err: Exception, trace: str) -> None:
+            with error_lock:
+                errors.append((err, trace))
+                stop_event.set()
+            print(f"[ERROR] Embed/store pipeline error: {err}")
+            if trace:
+                print(trace)
+
+        def producer() -> None:
+            nonlocal embedded_count
+            try:
+                for i in range(0, len(chunks), embed_sub_batch):
+                    if stop_event.is_set():
+                        break
+                    batch_end = min(i + embed_sub_batch, len(chunks))
+                    batch_chunks = chunks[i:batch_end]
+                    batch_metadatas = chunk_metadatas[i:batch_end]
+                    batch_ids = chunk_ids[i:batch_end]
+
+                    embeddings = self._generate_embeddings(batch_chunks)
+                    with progress_lock:
+                        embedded_count += len(batch_chunks)
+                        self._overall_embedded += len(batch_chunks)
+                        maybe_update_activity()
+                    while True:
+                        try:
+                            work_queue.put(
+                                (batch_chunks, embeddings, batch_metadatas, batch_ids),
+                                timeout=1,
+                            )
+                            break
+                        except queue.Full:
+                            if stop_event.is_set():
+                                return
+            except Exception as e:
+                record_error(e, traceback.format_exc())
+            finally:
+                while True:
+                    try:
+                        work_queue.put(None, timeout=1)
+                        break
+                    except queue.Full:
+                        if stop_event.is_set():
+                            break
+
+        def consumer() -> None:
+            nonlocal stored_count
+            try:
+                while True:
+                    try:
+                        item = work_queue.get(timeout=1)
+                    except queue.Empty:
+                        if stop_event.is_set():
+                            break
+                        continue
+                    if item is None:
+                        break
+                    batch_chunks, batch_embeddings, batch_metadatas, batch_ids = item
+
+                    for i in range(0, len(batch_chunks), store_sub_batch):
+                        if stop_event.is_set():
+                            break
+                        batch_end = min(i + store_sub_batch, len(batch_chunks))
+                        self._store_batch(
+                            batch_chunks[i:batch_end],
+                            batch_embeddings[i:batch_end],
+                            batch_metadatas[i:batch_end],
+                            batch_ids[i:batch_end],
+                        )
+                        with progress_lock:
+                            stored_count += batch_end - i
+                            self._overall_stored += batch_end - i
+                            maybe_update_activity()
+            except Exception as e:
+                record_error(e, traceback.format_exc())
+
+        producer_thread = threading.Thread(target=producer, name="EmbedProducer")
+        consumer_thread = threading.Thread(target=consumer, name="StoreConsumer")
+
+        producer_thread.start()
+        consumer_thread.start()
+
+        producer_thread.join()
+        consumer_thread.join()
+
+        if errors:
+            raise errors[0][0]
+
     def _store_batch(
         self,
         chunks: List[str],
@@ -424,6 +615,23 @@ class ResearchRAGPipeline:
         hash_file = self.output_dir / "source_hash.txt"
         current_hash = self._compute_source_hash()
         hash_file.write_text(current_hash)
+
+    def _reset_index_state(self):
+        """Reset progress and storage for a full re-index."""
+        self.progress.clear()
+
+        hash_file = self.output_dir / "source_hash.txt"
+        if hash_file.exists():
+            hash_file.unlink()
+
+        try:
+            self.vector_store.delete_collection()
+        except Exception as e:
+            print(f"[ERROR] Failed to reset vector store: {e}")
+            raise
+
+        if hasattr(self.vector_store, "_get_or_create_collection"):
+            self.vector_store.collection = self.vector_store._get_or_create_collection()
 
     def query(self, query_text: str, k: int = 5) -> List:
         """

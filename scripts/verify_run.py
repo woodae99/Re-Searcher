@@ -152,11 +152,20 @@ def verify_parent_child_relationships(collection, sample_size: int = 100) -> Ver
 
     # Verify each sampled parent relationship
     parent_ids = [metadata["parent_id"] for _, metadata in sample]
+    seen_parent_ids = set()
+    unique_parent_ids: List[str] = []
+    duplicate_parent_ids = 0
+    for parent_id in parent_ids:
+        if parent_id in seen_parent_ids:
+            duplicate_parent_ids += 1
+            continue
+        seen_parent_ids.add(parent_id)
+        unique_parent_ids.append(parent_id)
 
     # Fetch parents
     try:
         parents = collection.get(
-            ids=parent_ids,
+            ids=unique_parent_ids,
             include=["metadatas"],
         )
     except Exception as e:
@@ -195,11 +204,19 @@ def verify_parent_child_relationships(collection, sample_size: int = 100) -> Ver
             source_mismatch += 1
 
     result.add_stat("sampled", len(sample))
+    result.add_stat("parent_ids_total", len(parent_ids))
+    result.add_stat("parent_ids_unique", len(unique_parent_ids))
+    result.add_stat("parent_ids_duplicates", duplicate_parent_ids)
     result.add_stat("missing_parents", missing_parents)
     result.add_stat("wrong_level", wrong_level)
     result.add_stat("source_mismatch", source_mismatch)
 
     result.info(f"Sampled {len(sample)} fine chunks with parent_id")
+    if duplicate_parent_ids > 0:
+        result.warn(
+            f"{duplicate_parent_ids} duplicate parent_ids in sample "
+            f"({len(unique_parent_ids)} unique)"
+        )
 
     if missing_parents > 0:
         result.fail(f"{missing_parents} chunks have parent_id pointing to non-existent parent")
@@ -322,7 +339,11 @@ def verify_collection_health(collection) -> VerificationResult:
     return result
 
 
-def run_verification(config_path: Path, verbose: bool = False) -> bool:
+def run_verification(
+    config_path: Path,
+    verbose: bool = False,
+    parent_sample_size: int = 100,
+) -> bool:
     """
     Run all verification checks.
 
@@ -364,7 +385,7 @@ def run_verification(config_path: Path, verbose: bool = False) -> bool:
     results.append(verify_chunk_level_distribution(collection))
 
     # 3. Parent-child relationships
-    results.append(verify_parent_child_relationships(collection))
+    results.append(verify_parent_child_relationships(collection, sample_size=parent_sample_size))
 
     # 4. Obsidian metadata
     results.append(verify_obsidian_metadata(collection))
@@ -417,6 +438,12 @@ def main():
         action="store_true",
         help="Show detailed output for all checks",
     )
+    parser.add_argument(
+        "--parent-sample-size",
+        type=int,
+        default=100,
+        help="Number of fine chunks to sample for parent-child verification",
+    )
 
     args = parser.parse_args()
 
@@ -424,7 +451,11 @@ def main():
         print(f"Error: Configuration file not found: {args.config}")
         sys.exit(1)
 
-    success = run_verification(args.config, verbose=args.verbose)
+    success = run_verification(
+        args.config,
+        verbose=args.verbose,
+        parent_sample_size=args.parent_sample_size,
+    )
     sys.exit(0 if success else 1)
 
 

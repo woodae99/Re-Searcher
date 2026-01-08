@@ -97,6 +97,9 @@ class ZoteroSource(DataSource):
         - Item notes (as separate documents)
         - Item attachments (full text extraction from PDFs, etc.)
         - Item annotations (if enabled)
+
+        Uses item-level parallelization when parallel extraction is enabled,
+        processing multiple Zotero items concurrently with thread-per-item.
         """
         if not self.validate_config():
             return
@@ -107,12 +110,36 @@ class ZoteroSource(DataSource):
 
         try:
             items = self._get_all_items(conn)
+            limit = self.zotero_config.get("limit_items")
+            if isinstance(limit, int) and limit > 0:
+                items = items[:limit]
             total_items = len(items)
             print(f"📚 Found {total_items} items in Zotero library")
 
             # Emit source initialization
             self._emit_progress("source_init", total=total_items)
 
+            # Close main connection - parallel processing uses per-thread connections
+            conn.close()
+            conn = None
+
+            if self.parallel_enabled:
+                yield from self._fetch_documents_parallel(items, total_items)
+            else:
+                yield from self._fetch_documents_sequential(items, total_items)
+
+        finally:
+            if conn:
+                conn.close()
+            self._emit_progress("source_complete")
+
+    def _fetch_documents_sequential(self, items: List, total_items: int) -> Iterator[Document]:
+        """Process items sequentially (fallback mode)."""
+        conn = self._get_db_connection()
+        if not conn:
+            return
+
+        try:
             for idx, item_row in enumerate(items):
                 item_id = item_row["itemID"]
                 self._emit_progress("item_start", item_id=item_id, index=idx, total=total_items)
@@ -137,10 +164,121 @@ class ZoteroSource(DataSource):
                         index=idx,
                         error=str(e)
                     )
-
         finally:
             conn.close()
-            self._emit_progress("source_complete")
+
+    def _fetch_documents_parallel(self, items: List, total_items: int) -> Iterator[Document]:
+        """
+        Process items in parallel using a sliding window approach.
+
+        Maintains a constant number of in-flight tasks by submitting new items
+        as workers become free. Results are buffered and yielded in deterministic
+        order (original item order).
+        """
+        worker_count = self._get_worker_count()
+        max_in_flight = worker_count * 2  # Keep this many tasks queued
+
+        print(f"    [Parallel] Using {worker_count} workers, max {max_in_flight} in-flight")
+
+        # Results buffer keyed by index for deterministic ordering
+        results_buffer: Dict[int, List[Document]] = {}
+        next_to_yield = 0  # Next index we need to yield
+        next_to_submit = 0  # Next index to submit
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            pending_futures: Dict[Any, tuple] = {}  # future -> (idx, item_id)
+
+            # Initial submission to fill the pipeline
+            while next_to_submit < total_items and len(pending_futures) < max_in_flight:
+                item_row = items[next_to_submit]
+                future = executor.submit(
+                    self._process_item_standalone,
+                    item_row["itemID"],
+                    next_to_submit,
+                    total_items
+                )
+                pending_futures[future] = (next_to_submit, item_row["itemID"])
+                next_to_submit += 1
+
+            # Process results as they complete, submitting new tasks to replace them
+            while pending_futures:
+                # Wait for at least one future to complete
+                done_futures = set()
+                for future in pending_futures:
+                    if future.done():
+                        done_futures.add(future)
+
+                # If none are done yet, wait for one
+                if not done_futures:
+                    import concurrent.futures
+                    done, _ = concurrent.futures.wait(
+                        pending_futures.keys(),
+                        return_when=concurrent.futures.FIRST_COMPLETED
+                    )
+                    done_futures = done
+
+                # Process completed futures
+                for future in done_futures:
+                    idx, item_id = pending_futures.pop(future)
+                    try:
+                        docs = future.result()
+                        results_buffer[idx] = docs
+                        self._emit_progress(
+                            "item_complete",
+                            item_id=item_id,
+                            index=idx,
+                            total=total_items,
+                            docs_yielded=len(docs)
+                        )
+                    except Exception as e:
+                        results_buffer[idx] = []
+                        self._emit_progress(
+                            "item_error",
+                            item_id=item_id,
+                            index=idx,
+                            error=str(e)
+                        )
+
+                    # Submit a new task to replace the completed one
+                    if next_to_submit < total_items:
+                        item_row = items[next_to_submit]
+                        new_future = executor.submit(
+                            self._process_item_standalone,
+                            item_row["itemID"],
+                            next_to_submit,
+                            total_items
+                        )
+                        pending_futures[new_future] = (next_to_submit, item_row["itemID"])
+                        next_to_submit += 1
+
+                # Yield any results that are ready in order
+                while next_to_yield in results_buffer:
+                    for doc in results_buffer.pop(next_to_yield):
+                        yield doc
+                    next_to_yield += 1
+
+            # Yield any remaining buffered results
+            while next_to_yield in results_buffer:
+                for doc in results_buffer.pop(next_to_yield):
+                    yield doc
+                next_to_yield += 1
+
+    def _process_item_standalone(self, item_id: int, idx: int, total: int) -> List[Document]:
+        """
+        Process a single item with its own DB connection (thread-safe).
+
+        Returns a list of documents instead of yielding, for thread-pool compatibility.
+        """
+        self._emit_progress("item_start", item_id=item_id, index=idx, total=total)
+
+        conn = self._get_db_connection()
+        if not conn:
+            return []
+
+        try:
+            return list(self._process_item(conn, item_id))
+        finally:
+            conn.close()
 
     def _get_db_connection(self) -> Optional[sqlite3.Connection]:
         """Establish read-only connection to Zotero SQLite database."""
@@ -161,6 +299,7 @@ class ZoteroSource(DataSource):
             SELECT itemID, itemTypeID, dateAdded, dateModified, key
             FROM items
             WHERE itemID NOT IN (SELECT itemID FROM deletedItems)
+            ORDER BY itemID
             """
         )
         return cursor.fetchall()
@@ -357,10 +496,10 @@ class ZoteroSource(DataSource):
     def _process_attachments(
         self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
     ) -> Iterator[Document]:
-        """Process attachments for an item using parallel extraction.
+        """Process attachments for an item sequentially.
 
-        Uses ThreadPoolExecutor for concurrent extraction while maintaining
-        deterministic output ordering for reproducibility.
+        Parallelization happens at the item level (multiple items processed
+        concurrently), so attachment extraction within an item is sequential.
         """
         # Step 1: Collect all tasks
         tasks = self._collect_attachment_tasks(conn, item_id)
@@ -369,31 +508,14 @@ class ZoteroSource(DataSource):
             return
 
         # Step 2: Sort tasks by attachment_key for deterministic ordering
-        # This ensures "same run, same IDs, same ordering"
         tasks.sort(key=lambda t: t.attachment_key)
 
-        # Step 3: Assign indices after sorting
-        for i, task in enumerate(tasks):
-            task.index = i
-
-        total_tasks = len(tasks)
-
-        # Step 4: Execute extraction (parallel or sequential based on config)
-        if self.parallel_enabled and total_tasks > 1:
-            results = self._extract_parallel(tasks, item_id)
-        else:
-            results = self._extract_sequential(tasks, item_id)
-
-        # Step 5: Yield documents in deterministic order (by index)
+        # Step 3: Extract each attachment sequentially
         processed_count = 0
         error_count = 0
 
-        for i in range(total_tasks):
-            result = results.get(i)
-            if not result:
-                continue
-
-            task = result.task
+        for task in tasks:
+            result = self._extract_single_attachment(task)
 
             if result.text:
                 metadata = metadata_base.copy()
@@ -417,101 +539,6 @@ class ZoteroSource(DataSource):
             else:
                 error_count += 1
                 self._log_problematic_pdf(task.file_path, task.filename, result.error or "unknown")
-
-        # Print summary for this item
-        if total_tasks > 0:
-            success_pct = (processed_count / total_tasks * 100) if total_tasks > 0 else 0
-            print(f"      Item summary: {processed_count}/{total_tasks} extracted ({success_pct:.0f}%)")
-
-    def _extract_parallel(
-        self, tasks: List[ExtractionTask], item_id: int
-    ) -> Dict[int, ExtractionResult]:
-        """Execute extraction tasks in parallel using ThreadPoolExecutor."""
-        results: Dict[int, ExtractionResult] = {}
-        worker_count = self._get_worker_count()
-
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            # Submit all tasks
-            future_to_task = {
-                executor.submit(self._extract_single_attachment, task): task for task in tasks
-            }
-
-            # Process results as they complete
-            for future in as_completed(future_to_task):
-                result = future.result()
-                task = result.task
-
-                # Store result by index for deterministic ordering
-                results[task.index] = result
-
-                # Emit progress event
-                if result.text:
-                    print(f"      [Worker] Extracted: {task.filename} ({len(result.text)} chars, {result.elapsed_seconds:.1f}s)")
-                    self._emit_progress(
-                        "attachment_complete",
-                        item_id=item_id,
-                        attachment_id=task.attachment_id,
-                        file_name=task.filename,
-                        chars_extracted=len(result.text),
-                        status="success",
-                    )
-                else:
-                    print(f"      [Worker] Failed: {task.filename} ({result.error})")
-                    self._emit_progress(
-                        "attachment_error",
-                        item_id=item_id,
-                        attachment_id=task.attachment_id,
-                        file_name=task.filename,
-                        error=result.error,
-                    )
-
-        return results
-
-    def _extract_sequential(
-        self, tasks: List[ExtractionTask], item_id: int
-    ) -> Dict[int, ExtractionResult]:
-        """Execute extraction tasks sequentially (fallback for single task or disabled parallel)."""
-        results: Dict[int, ExtractionResult] = {}
-
-        for task in tasks:
-            print(f"      Extracting: {task.filename} ({task.file_size_mb:.1f}MB)...", end="", flush=True)
-
-            # Emit start event
-            self._emit_progress(
-                "attachment_start",
-                item_id=item_id,
-                attachment_id=task.attachment_id,
-                file_name=task.filename,
-                file_size_mb=task.file_size_mb,
-                index=task.index,
-                total=len(tasks),
-            )
-
-            result = self._extract_single_attachment(task)
-            results[task.index] = result
-
-            # Emit completion event
-            if result.text:
-                print(f" OK ({len(result.text)} chars)")
-                self._emit_progress(
-                    "attachment_complete",
-                    item_id=item_id,
-                    attachment_id=task.attachment_id,
-                    file_name=task.filename,
-                    chars_extracted=len(result.text),
-                    status="success",
-                )
-            else:
-                print(f" [ERROR: {result.error}]")
-                self._emit_progress(
-                    "attachment_error",
-                    item_id=item_id,
-                    attachment_id=task.attachment_id,
-                    file_name=task.filename,
-                    error=result.error,
-                )
-
-        return results
 
     def _log_problematic_pdf(self, file_path: Path, filename: str, reason: str):
         """Log a problematic PDF for later manual processing."""

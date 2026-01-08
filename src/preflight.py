@@ -317,10 +317,14 @@ def check_services(config: Dict[str, Any]) -> Tuple[bool, List[str]]:
     embedding = config.get("embedding", {})
     if embedding.get("provider") == "lmstudio":
         endpoint = embedding.get("endpoint", "http://localhost:1234/v1")
+        api_key = embedding.get("api_key")
         try:
             import httpx
 
-            response = httpx.get(f"{endpoint}/models", timeout=5)
+            headers = {}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            response = httpx.get(f"{endpoint}/models", headers=headers, timeout=5)
             if response.status_code != 200:
                 errors.append(f"LM Studio not responding at {endpoint}")
         except Exception as e:

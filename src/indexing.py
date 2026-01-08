@@ -144,8 +144,9 @@ class IndexingProgress:
         return None
 
     def has_completed_status(self, doc_id: str) -> bool:
-        """Check if document has been processed (any status except PENDING)."""
-        return doc_id in self.data["documents"]
+        """Check if document is fully indexed (status == STORED)."""
+        status = self.get_status(doc_id)
+        return status == DocumentStatus.STORED
 
     def get_stats(self) -> Dict[str, Any]:
         """Get current statistics."""

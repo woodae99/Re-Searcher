@@ -17,7 +17,7 @@ python src/main.py
 
 ### 2. Configuration
 
-Add optional batch size to `config.yaml`:
+Add optional indexing settings to `config.yaml`:
 
 ```yaml
 # ... existing config ...
@@ -25,6 +25,11 @@ Add optional batch size to `config.yaml`:
 # Indexing configuration (optional, defaults shown)
 indexing:
   batch_size: 50 # Documents to process per batch
+  embed_store_pipeline:
+    enabled: true
+    queue_max_items: 8
+    embed_sub_batch_size: 500
+    store_sub_batch_size: 500
 ```
 
 **Batch size tuning**:
@@ -79,7 +84,7 @@ If you want to rebuild the entire index from scratch:
 rm output/indexing_progress.json
 python src/main.py
 
-# Method 2: Use force flag (when implemented)
+# Method 2: Use force flag
 python src/main.py --force
 ```
 
@@ -316,7 +321,17 @@ python src/main.py
      batch_size: 100
    ```
 
-2. **Ensure LM Studio is on same machine or low-latency network**
+2. **Enable pipelined embed + store** (reduce idle time):
+
+   ```yaml
+   indexing:
+     embed_store_pipeline:
+       enabled: true
+       embed_sub_batch_size: 500
+       store_sub_batch_size: 500
+   ```
+
+3. **Ensure LM Studio is on same machine or low-latency network**
 
    - Network latency multiplies when embedding many chunks
 

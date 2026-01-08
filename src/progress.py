@@ -86,6 +86,7 @@ class CurrentActivity:
     """Current activity being performed."""
 
     message: str = ""
+    detail: str = ""
     file_name: str = ""
     file_size_mb: float = 0.0
     progress_pct: float = 0.0  # For large file progress
@@ -128,7 +129,13 @@ class ProgressDisplay(ABC):
         pass
 
     @abstractmethod
-    def set_activity(self, message: str, file_name: str = "", file_size_mb: float = 0.0) -> None:
+    def set_activity(
+        self,
+        message: str,
+        file_name: str = "",
+        file_size_mb: float = 0.0,
+        detail: str = "",
+    ) -> None:
         """Set the current activity message."""
         pass
 
@@ -206,10 +213,17 @@ class RichProgressDisplay(ProgressDisplay):
             stats.errors += errors
             self._refresh()
 
-    def set_activity(self, message: str, file_name: str = "", file_size_mb: float = 0.0) -> None:
+    def set_activity(
+        self,
+        message: str,
+        file_name: str = "",
+        file_size_mb: float = 0.0,
+        detail: str = "",
+    ) -> None:
         """Set the current activity message."""
         with self._lock:
             self.activity.message = message
+            self.activity.detail = detail
             self.activity.file_name = file_name
             self.activity.file_size_mb = file_size_mb
             self.activity.progress_pct = 0.0
@@ -259,6 +273,11 @@ class RichProgressDisplay(ProgressDisplay):
                 activity_text.append(")", style="dim")
             content.add_row(activity_text)
 
+            if self.activity.detail:
+                detail_text = Text()
+                detail_text.append(self.activity.detail)
+                content.add_row(detail_text)
+
             # Large file progress bar
             if self.activity.file_size_mb > 10 and self.activity.progress_pct > 0:
                 file_bar = self._make_file_progress_bar()
@@ -299,10 +318,15 @@ class RichProgressDisplay(ProgressDisplay):
         timing_text.append("Time: ", style="dim")
         timing_text.append(f"{elapsed_str} elapsed")
 
-        if remaining_items > 0 and self.timing.item_times:
-            eta = self.timing.estimate_remaining(remaining_items)
-            eta_str = str(eta).split(".")[0]
-            timing_text.append(f" | ETA: ~{eta_str} remaining", style="dim")
+        if remaining_items > 0 and processed_items > 0:
+            avg_seconds = elapsed.total_seconds() / processed_items
+            eta_seconds = avg_seconds * remaining_items
+            eta = timedelta(seconds=int(eta_seconds))
+            eta_str = str(eta)
+            eta_clock = datetime.now() + eta
+            eta_clock_str = eta_clock.strftime("%H:%M:%S")
+            timing_text.append(f" | Remaining: {eta_str}", style="dim")
+            timing_text.append(f" | ETA: {eta_clock_str}", style="dim")
 
         content.add_row(timing_text)
 
@@ -412,10 +436,17 @@ class PlainProgressDisplay(ProgressDisplay):
 
             self._maybe_print_progress()
 
-    def set_activity(self, message: str, file_name: str = "", file_size_mb: float = 0.0) -> None:
+    def set_activity(
+        self,
+        message: str,
+        file_name: str = "",
+        file_size_mb: float = 0.0,
+        detail: str = "",
+    ) -> None:
         """Set the current activity message."""
         with self._lock:
             self.activity.message = message
+            self.activity.detail = detail
             self.activity.file_name = file_name
             self.activity.file_size_mb = file_size_mb
             # Don't print every activity in plain mode - too noisy
@@ -506,7 +537,13 @@ class QuietProgressDisplay(ProgressDisplay):
     ) -> None:
         pass
 
-    def set_activity(self, message: str, file_name: str = "", file_size_mb: float = 0.0) -> None:
+    def set_activity(
+        self,
+        message: str,
+        file_name: str = "",
+        file_size_mb: float = 0.0,
+        detail: str = "",
+    ) -> None:
         pass
 
     def update_file_progress(self, progress_pct: float) -> None:

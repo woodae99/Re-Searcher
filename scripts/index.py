@@ -59,6 +59,23 @@ def main():
         action="store_true",
         help="Use plain text progress output (no rich terminal UI)",
     )
+    parser.add_argument(
+        "--limit-zotero",
+        type=int,
+        default=None,
+        help="Limit Zotero items processed (for test runs)",
+    )
+    parser.add_argument(
+        "--collection",
+        type=str,
+        default=None,
+        help="Override storage.collection_name (for test runs)",
+    )
+    parser.add_argument(
+        "--disable-obsidian",
+        action="store_true",
+        help="Disable Obsidian source (for test runs)",
+    )
 
     args = parser.parse_args()
 
@@ -86,11 +103,35 @@ def main():
         print(f"[ERROR] Failed to parse configuration: {e}")
         sys.exit(1)
 
+    overrides_applied = False
+    if args.collection:
+        storage = config.setdefault("storage", {})
+        storage["collection_name"] = args.collection
+        overrides_applied = True
+
+    if args.limit_zotero is not None:
+        zotero = config.setdefault("zotero", {})
+        zotero["limit_items"] = args.limit_zotero
+        overrides_applied = True
+
+    if args.disable_obsidian:
+        obsidian = config.setdefault("obsidian", {})
+        obsidian["enabled"] = False
+        overrides_applied = True
+
+    config_path = args.config
+    if overrides_applied:
+        output_dir = Path(config.get("output_folder", "./output"))
+        output_dir.mkdir(exist_ok=True)
+        config_path = output_dir / "config.override.yaml"
+        with open(config_path, "w") as f:
+            yaml.safe_dump(config, f, sort_keys=False)
+
     # Run preflight validation
     if not args.skip_preflight:
         preflight_passed = run_preflight(
             config=config,
-            config_path=args.config,
+            config_path=config_path,
             allow_legacy_chunking=args.allow_legacy_chunking,
             allow_default_config=args.allow_default_config,
             quiet=args.quiet,
@@ -116,7 +157,7 @@ def main():
 
     try:
         # Initialize and run pipeline
-        pipeline = ResearchRAGPipeline(args.config, progress_mode=progress_mode)
+        pipeline = ResearchRAGPipeline(config_path, progress_mode=progress_mode)
         pipeline.run(force_reindex=args.force)
 
     except KeyboardInterrupt:

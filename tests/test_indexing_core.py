@@ -64,6 +64,21 @@ class TestIndexingProgress:
             progress.set_document_status("doc1", DocumentStatus.STORED)
             assert progress.get_status("doc1") == DocumentStatus.STORED
 
+    def test_has_completed_status_only_when_stored(self):
+        """Test completion status only marks stored documents as complete."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            progress_file = Path(tmpdir) / "progress.json"
+            progress = IndexingProgress(progress_file)
+
+            progress.set_document_status("doc1", DocumentStatus.CHUNKED)
+            assert progress.has_completed_status("doc1") is False
+
+            progress.set_document_status("doc1", DocumentStatus.EMBEDDED)
+            assert progress.has_completed_status("doc1") is False
+
+            progress.set_document_status("doc1", DocumentStatus.STORED)
+            assert progress.has_completed_status("doc1") is True
+
     def test_stats_updates(self):
         """Test that stats are updated correctly."""
         with tempfile.TemporaryDirectory() as tmpdir:

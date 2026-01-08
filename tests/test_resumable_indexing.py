@@ -135,6 +135,18 @@ class TestIndexingProgress:
 class TestResumableIndexing:
     """Tests for resumable batch indexing."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_pipeline_dependencies(self):
+        with patch("src.pipeline.create_embedder") as mock_embedder, patch(
+            "src.pipeline.create_reranker"
+        ) as mock_reranker, patch(
+            "src.pipeline.ChromaVectorStore"
+        ) as mock_store:
+            mock_embedder.return_value = MagicMock()
+            mock_reranker.return_value = MagicMock()
+            mock_store.return_value = MagicMock()
+            yield
+
     @pytest.fixture
     def temp_output_dir(self):
         """Create temporary output directory for tests."""
@@ -177,6 +189,7 @@ class TestResumableIndexing:
 
             assert pipeline.progress is not None
             assert pipeline.batch_size == 5
+            pipeline.progress.set_total_documents(1)
             assert (temp_output_dir / "indexing_progress.json").exists()
 
     def test_batch_processing_with_mock(self, test_config_path, temp_output_dir):
@@ -243,6 +256,64 @@ class TestResumableIndexing:
             assert pipeline._generate_embeddings.call_count == 2
             assert pipeline._store_batch.call_count == 2
 
+    def test_embed_store_pipeline_enabled(self, test_config_path, temp_output_dir):
+        """Test embed/store pipeline sub-batching behavior."""
+        with patch(
+            "src.pipeline.ResearchRAGPipeline._load_config"
+        ) as mock_load, patch(
+            "src.pipeline.ResearchRAGPipeline._initialize_sources"
+        ) as mock_sources:
+
+            config = {
+                "output_folder": str(temp_output_dir),
+                "zotero": {"enabled": False},
+                "obsidian": {"enabled": False},
+                "embedding": {
+                    "model": "test",
+                    "api_endpoint": "http://localhost:1234/v1",
+                },
+                "storage": {"endpoint": "http://localhost:8000"},
+                "chunking": {"chunk_size": 512},
+                "indexing": {
+                    "batch_size": 2,
+                    "embed_store_pipeline": {
+                        "enabled": True,
+                        "queue_max_items": 2,
+                        "embed_sub_batch_size": 2,
+                        "store_sub_batch_size": 1,
+                    },
+                },
+            }
+            mock_load.return_value = config
+            mock_sources.return_value = []
+
+            pipeline = ResearchRAGPipeline(test_config_path)
+
+            def embed_side_effect(batch):
+                return [[0.1] * 3 for _ in batch]
+
+            store_calls = []
+
+            def store_side_effect(texts, embeddings, metadatas, ids):
+                store_calls.append((len(texts), len(embeddings), len(metadatas), len(ids)))
+
+            pipeline._generate_embeddings = MagicMock(side_effect=embed_side_effect)
+            pipeline._store_batch = MagicMock(side_effect=store_side_effect)
+
+            chunks = ["c1", "c2", "c3", "c4"]
+            metadatas = [{"i": i} for i in range(4)]
+            ids = [f"id{i}" for i in range(4)]
+
+            pipeline._overall_total_chunks = len(chunks)
+            pipeline._overall_embedded = 0
+            pipeline._overall_stored = 0
+
+            pipeline._process_embeddings_and_store(chunks, metadatas, ids, 1, 1)
+
+            assert pipeline._generate_embeddings.call_count == 2
+            assert pipeline._store_batch.call_count == 4
+            assert all(call[0] == 1 for call in store_calls)
+
     def test_resume_from_checkpoint(self, test_config_path, temp_output_dir):
         """Test resuming indexing from checkpoint."""
         with patch(
@@ -293,7 +364,7 @@ class TestResumableIndexing:
             )
 
             # Run first batch (2 docs)
-            pipeline._process_batches(documents)
+            pipeline._process_batches(documents[:2])
 
             # Verify first batch completed
             assert pipeline._chunk_batch.call_count == 1
@@ -315,6 +386,55 @@ class TestResumableIndexing:
             assert pipeline._chunk_batch.call_count == 1
             assert progress.get_status("test_doc_002") == DocumentStatus.STORED
             assert progress.get_status("test_doc_003") == DocumentStatus.STORED
+
+    def test_resume_reprocesses_nonstored_documents(self, test_config_path, temp_output_dir):
+        """Test that non-stored documents are reprocessed on resume."""
+        with patch(
+            "src.pipeline.ResearchRAGPipeline._load_config"
+        ) as mock_load, patch(
+            "src.pipeline.ResearchRAGPipeline._initialize_sources"
+        ) as mock_sources, patch(
+            "src.pipeline.ResearchRAGPipeline._needs_reindex"
+        ) as mock_needs_reindex, patch(
+            "src.pipeline.ResearchRAGPipeline._fetch_all_documents"
+        ) as mock_fetch, patch(
+            "src.pipeline.ResearchRAGPipeline._save_source_hash"
+        ) as mock_save_hash:
+
+            config = {
+                "output_folder": str(temp_output_dir),
+                "zotero": {"enabled": False},
+                "obsidian": {"enabled": False},
+                "embedding": {
+                    "model": "test",
+                    "api_endpoint": "http://localhost:1234/v1",
+                },
+                "storage": {"endpoint": "http://localhost:8000"},
+                "chunking": {"chunk_size": 512},
+                "indexing": {"batch_size": 2},
+            }
+            mock_load.return_value = config
+            mock_sources.return_value = []
+            mock_needs_reindex.return_value = True
+            documents = create_test_documents(2)
+            mock_fetch.return_value = documents
+
+            pipeline = ResearchRAGPipeline(test_config_path)
+
+            pipeline._chunk_batch = MagicMock(
+                return_value=(["chunk1"], [{"doc_id": "test"}], ["id1"])
+            )
+            pipeline._generate_embeddings = MagicMock(return_value=[[0.1] * 1024])
+            pipeline._store_batch = MagicMock()
+            pipeline.vector_store = MagicMock()
+
+            pipeline.progress.set_document_status("test_doc_000", DocumentStatus.CHUNKED)
+
+            pipeline._process_batches(documents)
+
+            assert pipeline._chunk_batch.call_count == 1
+            assert pipeline.progress.get_status("test_doc_000") == DocumentStatus.STORED
+            assert pipeline.progress.get_status("test_doc_001") == DocumentStatus.STORED
 
     def test_interrupted_batch_recovery(self, test_config_path, temp_output_dir):
         """Test recovery from interrupted batch processing."""
@@ -436,6 +556,44 @@ class TestResumableIndexing:
 
             # Second run should not call store_batch (all already processed)
             assert store_call_count_second == store_call_count_first
+
+    def test_force_reindex_resets_state(self, test_config_path, temp_output_dir):
+        """Test that force reindex resets progress and source hash."""
+        with patch(
+            "src.pipeline.ResearchRAGPipeline._load_config"
+        ) as mock_load, patch(
+            "src.pipeline.ResearchRAGPipeline._initialize_sources"
+        ) as mock_sources:
+
+            config = {
+                "output_folder": str(temp_output_dir),
+                "zotero": {"enabled": False},
+                "obsidian": {"enabled": False},
+                "embedding": {
+                    "model": "test",
+                    "api_endpoint": "http://localhost:1234/v1",
+                },
+                "storage": {"endpoint": "http://localhost:8000"},
+                "chunking": {"chunk_size": 512},
+                "indexing": {"batch_size": 2},
+            }
+            mock_load.return_value = config
+            mock_sources.return_value = []
+
+            pipeline = ResearchRAGPipeline(test_config_path)
+
+            hash_file = temp_output_dir / "source_hash.txt"
+            hash_file.write_text("abc")
+            pipeline.progress.set_document_status("doc1", DocumentStatus.STORED)
+
+            pipeline.vector_store = MagicMock()
+            pipeline.vector_store._get_or_create_collection = MagicMock(return_value="collection")
+
+            pipeline._reset_index_state()
+
+            assert pipeline.progress.get_status("doc1") is None
+            assert not hash_file.exists()
+            pipeline.vector_store.delete_collection.assert_called_once()
 
     def test_progress_file_integrity(self, test_config_path, temp_output_dir):
         """Test that progress file stays valid and consistent."""

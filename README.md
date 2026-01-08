@@ -118,6 +118,14 @@ storage:
   provider: chroma
   endpoint: "http://localhost:8000"
   collection_name: "research_library"
+
+# Indexing configuration
+indexing:
+  batch_size: 50
+  embed_store_pipeline:
+    enabled: true
+    embed_sub_batch_size: 500
+    store_sub_batch_size: 500
 ```
 
 ## Usage
@@ -139,6 +147,9 @@ This will:
 **Options:**
 - `--force`: Force re-indexing even if sources haven't changed
 - `--config PATH`: Use a different config file
+- `--collection NAME`: Override Chroma collection name
+- `--limit-zotero N`: Limit Zotero items for test runs
+- `--disable-obsidian`: Disable Obsidian source without editing config
 
 ### 2. Query Your Library
 
