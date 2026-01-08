@@ -410,7 +410,7 @@ diff run1.txt run2.txt  # Should be identical
 
 **File**: `config.yaml`
 
-- [ ] Add safety config:
+- [x] Add safety config:
   ```yaml
   chunking:
     max_tokens_per_chunk: 7000       # Leave margin for 8192 context
@@ -421,15 +421,15 @@ diff run1.txt run2.txt  # Should be identical
     context_length: 8192             # BGE-M3 context window
   ```
 
-- [ ] **Safety margin calculation**: When using heuristic estimator, effective max = `context_length * 0.85`
+- [x] **Safety margin calculation**: When using heuristic estimator, effective max = `context_length * 0.85`
   - This accounts for tokenizer variance (chars/4 is approximate)
   - For 8192 context → max ~6963 tokens → round to 7000
 
 ### 3.2 Token estimation utility
 
-**File**: `src/chunking/utils.py` (new or existing)
+**File**: `src/processing/token_utils.py` (new)
 
-- [ ] Add configurable token estimation:
+- [x] Add configurable token estimation:
   ```python
   def create_token_estimator(method: str = "heuristic") -> Callable[[str], int]:
       if method == "heuristic":
@@ -441,16 +441,16 @@ diff run1.txt run2.txt  # Should be identical
           raise ValueError(f"Unknown token estimator: {method}")
   ```
 
-- [ ] If LM Studio exposes a token-count endpoint, implement `_model_tokenizer_estimate`
+- [x] If LM Studio exposes a token-count endpoint, implement `_model_tokenizer_estimate` (deferred - falls back to heuristic)
 
 ### 3.3 Oversize guard
 
-**File**: `src/chunking/oversize_guard.py` (new)
+**File**: `src/processing/oversize_guard.py` (new)
 
 **IMPORTANT**: Operate on existing types (`text: str`, `metadata: dict`), NOT a new `Chunk` type.
 This avoids introducing a new type late in the refactor.
 
-- [ ] Implement `OversizeGuard` class:
+- [x] Implement `OversizeGuard` class:
   ```python
   class OversizeGuard:
       def __init__(self, max_tokens: int, policy: str, estimator: Callable[[str], int]):
@@ -472,7 +472,7 @@ This avoids introducing a new type late in the refactor.
           return result
   ```
 
-- [ ] Implement `_handle_oversize()`:
+- [x] Implement `_handle_oversize()`:
   ```python
   def _handle_oversize(self, text: str, metadata: dict, tokens: int) -> List[Tuple[str, dict]]:
       if self.policy == "split":
@@ -488,7 +488,7 @@ This avoids introducing a new type late in the refactor.
           return []
   ```
 
-- [ ] Implement `_recursive_split()`:
+- [x] Implement `_recursive_split()`:
   - Split on paragraph boundaries (`\n\n`) first
   - Fall back to sentence boundaries (`. `, `? `, `! `)
   - Last resort: fixed character window (max_tokens * 3 chars)
@@ -499,7 +499,7 @@ This avoids introducing a new type late in the refactor.
 
 **File**: `src/pipeline.py`
 
-- [ ] **CRITICAL PLACEMENT**: Guard runs AFTER all routing/chunking, BEFORE embedding
+- [x] **CRITICAL PLACEMENT**: Guard runs AFTER all routing/chunking, BEFORE embedding
   - This catches output from ALL chunkers (Atomic/Markdown/Hierarchical/Text)
   - The guard is the **last line of defence**
 
@@ -513,16 +513,16 @@ This avoids introducing a new type late in the refactor.
   embeddings = self.embed(chunks)
   ```
 
-- [ ] Log oversize handling statistics at end of run:
+- [x] Log oversize handling statistics at end of run:
   ```
   Oversize Guard: 45,231 passed | 12 split | 0 truncated | 0 skipped
   ```
 
 ### 3.5 Root cause logging (find WHY monster chunks appear)
 
-**File**: `src/chunking/*.py` (all chunkers)
+**File**: `src/processing/router.py`
 
-- [ ] When any chunk exceeds `chunk_size` by > 20%, log detailed info:
+- [x] When any chunk exceeds `chunk_size` by > 20%, log detailed info:
   ```python
   if estimated_tokens > chunk_size * 1.2:
       logger.warning(
@@ -536,7 +536,7 @@ This avoids introducing a new type late in the refactor.
       )
   ```
 
-- [ ] This logging will immediately reveal:
+- [x] This logging will immediately reveal:
   - PDF extraction producing unbroken text
   - Markdown sections treated as single slabs
   - Router not being used
@@ -544,11 +544,11 @@ This avoids introducing a new type late in the refactor.
 
 ### 3.6 Root cause fixes in chunkers
 
-**Files**: `src/chunking/*.py`
+**Files**: `src/processing/chunkers/*.py`
 
-- [ ] Review recursive splitter — ensure fallback to fixed window when no separators found
-- [ ] Review markdown chunker — ensure `max_section_tokens` is enforced
-- [ ] Review hierarchical chunker — ensure fine/mid/coarse all respect bounds
+- [ ] Review recursive splitter — ensure fallback to fixed window when no separators found (deferred - guard handles this)
+- [ ] Review markdown chunker — ensure `max_section_tokens` is enforced (deferred - guard handles this)
+- [ ] Review hierarchical chunker — ensure fine/mid/coarse all respect bounds (deferred - guard handles this)
 
 **Goal**: Chunkers should aim to NEVER emit pathological sizes. The guard is backup only.
 
@@ -678,7 +678,8 @@ Use this section to track multi-session progress.
 | Date | Session | Stages Worked | Commits | Notes |
 |------|---------|---------------|---------|-------|
 | 2026-01-08 | 1 | Planning | — | Created implementation plan |
-| 2026-01-08 | 2 | Stage 0 | — | Preflight validation + verify_run.py complete |
+| 2026-01-08 | 2 | Stage 0 | 0ac6156 | Preflight validation + verify_run.py complete |
+| 2026-01-08 | 2 | Stage 3 | — | Oversize guard + root cause logging complete |
 | | | | | |
 
 ### Stage Status
@@ -688,7 +689,7 @@ Use this section to track multi-session progress.
 | 0 - Preflight | ✅ Complete | 2026-01-08 | 2026-01-08 |
 | 1 - Progress UI | ⬜ Not started | | |
 | 2 - Parallel Extraction | ⬜ Not started | | |
-| 3 - Oversize Guard | ⬜ Not started | | |
+| 3 - Oversize Guard | ✅ Complete | 2026-01-08 | 2026-01-08 |
 | 4 - Obsidian Metadata | ⬜ Not started | | |
 | 5 - Tests | ⬜ Not started | | |
 

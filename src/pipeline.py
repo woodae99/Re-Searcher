@@ -11,6 +11,7 @@ from .factories.embedding_factory import create_embedder
 from .factories.reranker_factory import create_reranker
 from .indexing import DocumentStatus, IndexingProgress
 from .processing.id_utils import attach_parent_ids, stable_chunk_id
+from .processing.oversize_guard import create_oversize_guard
 from .retrieval.expand import attach_parent_context
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
@@ -33,6 +34,7 @@ class ResearchRAGPipeline:
         # Initialize components
         self.sources = self._initialize_sources()
         self.chunker = create_chunker(self.config)
+        self.oversize_guard = create_oversize_guard(self.config)
         self.embedder = create_embedder(self.config)
         self.reranker = create_reranker(self.config)
         self.vector_store = ChromaVectorStore(self.config)
@@ -248,33 +250,52 @@ class ResearchRAGPipeline:
         Returns:
             Tuple of (chunks, metadatas, ids)
         """
-        all_chunks = []
-        all_metadatas = []
-        all_ids = []
+        # Step 1: Chunk all documents
+        all_chunk_data: List[tuple] = []
 
         for doc in documents:
             try:
                 chunk_data = self.chunker.chunk_with_metadata(doc.content, doc.metadata)
 
-                for idx, (chunk_text, chunk_metadata) in enumerate(chunk_data):
+                # Add source_id to each chunk's metadata
+                for chunk_text, chunk_metadata in chunk_data:
                     chunk_metadata["source_id"] = doc.doc_id
-                    all_chunks.append(chunk_text)
-                    all_metadatas.append(chunk_metadata)
-
-                    # Generate unique ID for chunk
-                    chunking_config = self.config.get("chunking", {})
-                    id_strategy = chunking_config.get("id_strategy", "legacy")
-                    if id_strategy == "legacy":
-                        chunk_id = f"{doc.doc_id}-chunk-{idx}"
-                    else:
-                        source_id = doc.doc_id
-                        level = chunk_metadata.get("chunk_level", "mid")
-                        chunk_id = stable_chunk_id(source_id, level, idx, chunk_text)
-                    all_ids.append(chunk_id)
+                    all_chunk_data.append((chunk_text, chunk_metadata))
 
             except Exception as e:
                 print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
 
+        # Step 2: Apply oversize guard (CRITICAL - runs after all chunking, before IDs)
+        all_chunk_data = self.oversize_guard.process(all_chunk_data)
+
+        # Log oversize guard stats if any chunks were handled
+        guard_stats = self.oversize_guard.get_stats()
+        if guard_stats.split > 0 or guard_stats.truncated > 0 or guard_stats.skipped > 0:
+            print(f"    {guard_stats.summary()}")
+
+        # Step 3: Generate IDs for chunks
+        all_chunks = []
+        all_metadatas = []
+        all_ids = []
+
+        chunking_config = self.config.get("chunking", {})
+        id_strategy = chunking_config.get("id_strategy", "legacy")
+
+        for idx, (chunk_text, chunk_metadata) in enumerate(all_chunk_data):
+            all_chunks.append(chunk_text)
+            all_metadatas.append(chunk_metadata)
+
+            # Generate unique ID for chunk
+            if id_strategy == "legacy":
+                source_id = chunk_metadata.get("source_id", "unknown")
+                chunk_id = f"{source_id}-chunk-{idx}"
+            else:
+                source_id = chunk_metadata.get("source_id", "unknown")
+                level = chunk_metadata.get("chunk_level", "mid")
+                chunk_id = stable_chunk_id(source_id, level, idx, chunk_text)
+            all_ids.append(chunk_id)
+
+        # Step 4: Attach parent IDs
         attach_parent_ids(all_metadatas, all_ids)
 
         return all_chunks, all_metadatas, all_ids

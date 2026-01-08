@@ -61,6 +61,8 @@ embedding:
   batch_size: 32
   # Timeout for API requests (seconds)
   timeout: 30
+  # Model context length (for oversize guard calculations)
+  context_length: 8192  # BGE-M3 context window
   # Provider-specific settings (preferred)
   lmstudio:
     base_url: "http://localhost:1234/v1"
@@ -94,6 +96,10 @@ chunking:
   # New router configuration (vNext)
   router_enabled: true
   id_strategy: stable_hash  # stable_hash | legacy
+  # Oversize guard settings (prevents embedder truncation)
+  max_tokens_per_chunk: 7000     # Leave margin for 8192 context
+  oversize_policy: split         # split | truncate | skip
+  token_estimator: heuristic     # heuristic | model_tokenizer
   defaults:
     strategy: recursive
     chunk_size: 2048

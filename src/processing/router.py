@@ -1,5 +1,6 @@
 """Chunking router with adaptive logic."""
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -8,6 +9,8 @@ from src.processing.chunker import TextChunker
 from src.processing.chunkers.atomic import AtomicChunker
 from src.processing.chunkers.hierarchical import HierarchicalChunker
 from src.processing.chunkers.markdown import MarkdownChunker
+
+logger = logging.getLogger(__name__)
 
 
 class ChunkerRouter:
@@ -19,6 +22,10 @@ class ChunkerRouter:
         self.defaults = chunking_config.get("defaults", chunking_config)
         self.huge_docs_config = chunking_config.get("huge_docs", {})
         self.markdown_enabled = chunking_config.get("markdown", {}).get("enabled", True)
+
+        # Get expected chunk size for oversize detection
+        self.expected_chunk_size = self.defaults.get("chunk_size", 2048)
+        self.oversize_threshold = 1.2  # Log warning if chunk is 20% over expected
 
         self.atomic_chunker = AtomicChunker()
         self.markdown_chunker = MarkdownChunker(config)
@@ -33,12 +40,11 @@ class ChunkerRouter:
 
         source_type = metadata.get("source_type")
         doc_id = metadata.get("doc_id", "unknown")
+        source_id = metadata.get("source_id", doc_id)
 
         # Debug setup (avoid UnboundLocalError)
         debug = self.config.get("chunking", {}).get("debug_router", False)
-        token_est = None
-        if debug:
-            token_est = len(text) // 4
+        token_est = len(text) // 4
 
         if source_type == "zotero_annotation":
             selected = "AtomicChunker"
@@ -56,7 +62,67 @@ class ChunkerRouter:
         if debug:
             print(f"  [ROUTER] {doc_id}: {selected} (tokens~{token_est}, source={source_type})")
 
+        # Root cause logging: detect and log oversize chunks
+        self._log_oversize_chunks(result, selected, source_id, source_type)
+
         return result
+
+    def _log_oversize_chunks(
+        self,
+        chunks: List[Tuple[str, Dict[str, Any]]],
+        chunker_name: str,
+        source_id: str,
+        source_type: str,
+    ) -> None:
+        """Log detailed info when chunks exceed expected size by >20%."""
+        threshold_tokens = int(self.expected_chunk_size * self.oversize_threshold / 4)
+
+        for chunk_text, chunk_metadata in chunks:
+            estimated_tokens = len(chunk_text) // 4
+
+            if estimated_tokens > threshold_tokens:
+                # This chunk is significantly larger than expected
+                chunk_level = chunk_metadata.get("chunk_level", "unknown")
+                text_preview = chunk_text[:120].replace("\n", " ")
+
+                # Try to determine why split failed
+                reason = self._diagnose_oversize_reason(chunk_text)
+
+                logger.warning(
+                    f"Oversize chunk created: "
+                    f"source_id={source_id}, "
+                    f"source_type={source_type}, "
+                    f"selected_chunker={chunker_name}, "
+                    f"chunk_level={chunk_level}, "
+                    f"estimated_tokens={estimated_tokens}, "
+                    f"expected_max={threshold_tokens}, "
+                    f"text_preview={text_preview!r}, "
+                    f"reason={reason}"
+                )
+
+    def _diagnose_oversize_reason(self, text: str) -> str:
+        """Try to diagnose why a chunk ended up oversized."""
+        # Check for lack of paragraph breaks
+        if "\n\n" not in text:
+            return "no paragraph breaks found"
+
+        # Check for lack of sentence boundaries
+        if not re.search(r"[.?!]\s", text):
+            return "no sentence boundaries found"
+
+        # Check if it's mostly code
+        code_indicators = ["def ", "class ", "function ", "import ", "const ", "var ", "{", "}"]
+        code_count = sum(1 for ind in code_indicators if ind in text)
+        if code_count >= 3:
+            return "appears to be code block"
+
+        # Check for very long lines (common in extracted PDFs)
+        lines = text.split("\n")
+        long_lines = [l for l in lines if len(l) > 500]
+        if long_lines:
+            return f"contains {len(long_lines)} very long lines (PDF extraction artifact?)"
+
+        return "unknown - may need investigation"
 
     def _is_markdown(self, metadata: Dict[str, Any], text: str) -> bool:
         if metadata.get("source_type") == "obsidian":
