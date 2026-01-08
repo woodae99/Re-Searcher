@@ -625,39 +625,39 @@ python scripts/verify_run.py
 
 ### 5.1 Unit tests
 
-**File**: `tests/test_chunking.py`
+**File**: `tests/unit/test_chunk_id_stability.py`
 
-- [ ] `test_stable_chunk_id_determinism` — same input → same ID
-- [ ] `test_stable_chunk_id_changes_with_text` — different input → different ID
-- [ ] `test_attach_parent_ids_scoping` — respects source_id boundaries
-- [ ] `test_attach_parent_ids_no_overwrite` — doesn't clobber existing parent_id
+- [x] `test_stable_chunk_id_is_deterministic` — same input → same ID
+- [x] `test_stable_chunk_id_changes_with_text` — different input → different ID
+- [x] `test_attach_parent_ids_scoping_respects_source_id` — respects source_id boundaries
+- [x] `test_attach_parent_ids_no_overwrite` — doesn't clobber existing parent_id
 
-**File**: `tests/test_router.py`
+**File**: `tests/unit/test_router_routing.py`
 
-- [ ] `test_router_selects_annotation_chunker`
-- [ ] `test_router_selects_obsidian_chunker`
-- [ ] `test_router_selects_huge_doc_chunker`
-- [ ] `test_router_fallback_to_default`
+- [x] `test_router_routes_zotero_annotations_to_atomic`
+- [x] `test_router_routes_obsidian_to_markdown`
+- [x] `test_router_routes_huge_docs_to_hierarchical`
+- [x] `test_router_fallback_to_default`
 
-**File**: `tests/test_oversize_guard.py`
+**File**: `tests/unit/test_oversize_guard.py`
 
-- [ ] `test_oversize_guard_splits_large_chunk`
-- [ ] `test_oversize_guard_passes_small_chunk`
-- [ ] `test_oversize_guard_truncate_policy`
-- [ ] `test_oversize_guard_skip_policy`
+- [x] `test_splits_large_chunk`
+- [x] `test_passes_small_chunk`
+- [x] `test_truncate_policy`
+- [x] `test_skip_policy`
 
 ### 5.2 Integration tests
 
-**File**: `tests/test_integration.py`
+**File**: `tests/integration/test_parent_fetch.py`
 
-- [ ] `test_chroma_parent_fetch` — get_by_ids works for parent lookup
-- [ ] `test_reindex_stable_count` — rerunning doesn't balloon collection
+- [x] `test_chroma_parent_fetch` — get_by_ids works for parent lookup
+- [x] `test_reindex_stable_count` — rerunning doesn't balloon collection
 
 ### 5.3 Smoke test
 
 **File**: `tests/test_smoke.py`
 
-- [ ] `test_small_run_with_router` — 10 docs, router enabled, at least one hierarchical chunk
+- [x] `test_small_run_with_router_produces_hierarchical_chunks` — router enabled, hierarchical chunks
 
 ### Stage 5 Checkpoint
 
@@ -682,8 +682,8 @@ Use this section to track multi-session progress.
 | 2026-01-08 | 2 | Stage 3 | d8899d6 | Oversize guard + root cause logging complete |
 | 2026-01-08 | 3 | Stage 1 | — | Rich progress display, PlainProgressDisplay, CLI flags |
 | 2026-01-08 | 3 | Stage 2 | — | Parallel PDF extraction with ThreadPoolExecutor |
-| 2026-01-08 | 3 | Stage 4 | — | Obsidian metadata: aliases, contains_code, heading_path |
-| | | | | |
+| 2026-01-08 | 3 | Stage 4 | 3d1a4b6 | Obsidian metadata: aliases, contains_code, heading_path |
+| 2026-01-08 | 4 | Stage 5 | — | Unit tests for ID, router, oversize guard; integration + smoke tests |
 
 ### Stage Status
 
@@ -694,7 +694,7 @@ Use this section to track multi-session progress.
 | 2 - Parallel Extraction | ✅ Complete | 2026-01-08 | 2026-01-08 |
 | 3 - Oversize Guard | ✅ Complete | 2026-01-08 | 2026-01-08 |
 | 4 - Obsidian Metadata | ✅ Complete | 2026-01-08 | 2026-01-08 |
-| 5 - Tests | ⬜ Not started | | |
+| 5 - Tests | ✅ Complete | 2026-01-08 | 2026-01-08 |
 
 Legend: ⬜ Not started | 🟡 In progress | ✅ Complete
 
