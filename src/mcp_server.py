@@ -9,8 +9,11 @@ It's designed as a thin wrapper around the existing pipeline to ensure:
 """
 
 import asyncio
-import sys
+import json
 import os
+import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -90,6 +93,27 @@ class ResearchMCPServer:
                                 "type": "integer",
                                 "description": "Number of results to return (default: 5)",
                                 "default": 5,
+                                "minimum": 1,
+                                "maximum": 50,
+                            },
+                            "expand_parents": {
+                                "type": "integer",
+                                "description": (
+                                    "Number of parent levels to expand for context. "
+                                    "0 = no expansion, 1 = immediate parent, 2 = parent + grandparent. "
+                                    "If not specified, uses config default. "
+                                    "Use 0 for quick lookups, 1-2 for detailed context."
+                                ),
+                                "minimum": 0,
+                                "maximum": 3,
+                            },
+                            "top_n": {
+                                "type": "integer",
+                                "description": (
+                                    "Override reranking top_n limit. "
+                                    "If not specified, uses config default. "
+                                    "Useful to get more or fewer reranked results."
+                                ),
                                 "minimum": 1,
                                 "maximum": 50,
                             },
@@ -182,12 +206,31 @@ class ResearchMCPServer:
             # Extract arguments
             query = arguments.get("query")
             k = arguments.get("k", 5)
+            expand_parents = arguments.get("expand_parents")
+            top_n = arguments.get("top_n")
 
             if not query:
                 raise ValueError("Query parameter is required")
 
-            # Execute search using existing pipeline
-            results = self.pipeline.query(query, k=k)
+            self._log_debug(
+                "mcp_tool_call",
+                {
+                    "tool": "search_research_library", 
+                    "query": query, 
+                    "k": k,
+                    "expand_parents": expand_parents,
+                    "top_n": top_n,
+                },
+            )
+            start_time = time.perf_counter()
+
+            # Execute search using existing pipeline with optional overrides
+            results = self.pipeline.query(
+                query, 
+                k=k,
+                expand_parents=expand_parents,
+                top_n=top_n,
+            )
 
             # Format results using separate formatter
             formatted_results = format_search_results(results)
@@ -238,14 +281,48 @@ class ResearchMCPServer:
 
                 # The actual text
                 response_parts.append(f"\nText:\n{result['text']}")
+
+                # Parent context if expanded
+                if "parent_text" in result:
+                    response_parts.append("\n--- Parent Context ---")
+                    parent_meta = result.get("parent_metadata", {})
+                    if "chunk_level" in parent_meta:
+                        response_parts.append(f"Parent Level: {parent_meta['chunk_level']}")
+                    if "parent_id" in parent_meta:
+                        response_parts.append(f"Grandparent: {parent_meta['parent_id']}")
+                    response_parts.append(f"\n{result['parent_text']}")
+                
+                # Multiple parent contexts (for list-based parent_id)
+                if "parent_contexts" in result:
+                    for idx, parent_ctx in enumerate(result["parent_contexts"], 1):
+                        response_parts.append(f"\n--- Parent Context #{idx} ---")
+                        p_meta = parent_ctx.get("metadata", {})
+                        if "chunk_level" in p_meta:
+                            response_parts.append(f"Parent Level: {p_meta['chunk_level']}")
+                        response_parts.append(f"Parent ID: {parent_ctx['id']}")
+                        response_parts.append(f"\n{parent_ctx['text']}")
+
                 response_parts.append("")  # blank line
 
             response_text = "\n".join(response_parts)
 
+            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+            self._log_debug(
+                "mcp_tool_result",
+                {
+                    "tool": "search_research_library",
+                    "results_count": len(formatted_results),
+                    "elapsed_ms": elapsed_ms,
+                },
+            )
             return [TextContent(type="text", text=response_text)]
 
         except Exception as e:
             error_info = format_error_response(e)
+            self._log_debug(
+                "mcp_tool_error",
+                {"tool": "search_research_library", "error": str(e)},
+            )
             error_text = (
                 f"Error executing search: {error_info['error']}\n"
                 f"Message: {error_info['message']}"
@@ -269,6 +346,15 @@ class ResearchMCPServer:
 
             chunk_id = arguments.get("chunk_id")
             include_parent = arguments.get("include_parent", True)
+
+            self._log_debug(
+                "mcp_tool_call",
+                {
+                    "tool": "get_chunk_context",
+                    "chunk_id": chunk_id,
+                    "include_parent": include_parent,
+                },
+            )
 
             if not chunk_id:
                 raise ValueError("chunk_id parameter is required")
@@ -341,11 +427,27 @@ class ResearchMCPServer:
 
         except Exception as e:
             error_info = format_error_response(e)
+            self._log_debug(
+                "mcp_tool_error",
+                {"tool": "get_chunk_context", "error": str(e)},
+            )
             error_text = (
                 f"Error getting chunk context: {error_info['error']}\n"
                 f"Message: {error_info['message']}"
             )
             return [TextContent(type="text", text=error_text)]
+
+    def _log_debug(self, event: str, payload: Dict[str, Any]) -> None:
+        log_path = os.getenv("MCP_DEBUG_LOG")
+        if not log_path:
+            return
+        record = {"ts": datetime.utcnow().isoformat() + "Z", "event": event}
+        record.update(payload)
+        try:
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
 
     async def run(self):
         """Run the MCP server using stdio transport."""

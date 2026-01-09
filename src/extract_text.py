@@ -12,6 +12,14 @@ import yaml
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
+# ebooklib ITEM_DOCUMENT moved in some versions; handle both locations.
+ITEM_DOCUMENT = getattr(epub, "ITEM_DOCUMENT", None)
+if ITEM_DOCUMENT is None:
+    try:
+        from ebooklib import ITEM_DOCUMENT as ITEM_DOCUMENT  # type: ignore
+    except Exception:
+        ITEM_DOCUMENT = None
+
 
 def load_config(config_path: Path) -> Dict:
     with open(config_path, "r") as f:
@@ -114,7 +122,7 @@ def extract_epub_text(file_path: Path) -> str:
         book = epub.read_epub(str(file_path))
         text = []
         for item in book.get_items():
-            if item.get_type() == epub.ITEM_DOCUMENT:
+            if ITEM_DOCUMENT is not None and item.get_type() == ITEM_DOCUMENT:
                 soup = BeautifulSoup(item.get_content(), "html.parser")
                 text.append(soup.get_text())
         return "\n".join(text)

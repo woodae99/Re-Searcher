@@ -109,6 +109,30 @@ chunking:
   max_tokens_per_chunk: 7000     # Leave margin for 8192 context
   oversize_policy: split         # split | truncate | skip
   token_estimator: heuristic     # heuristic | model_tokenizer
+  quality_filter:
+    enabled: false
+    dry_run: false
+    min_alnum_chars: 40
+    min_alnum_ratio: 0.20
+    max_whitespace_ratio: 0.85
+    min_token_est: 20
+    min_unique_char_ratio: 0.08
+    max_line_repeat_ratio: 0.30
+    drop_if_matches:
+      - "^[0-9]{1,3}$"
+      - "^\\*{3,}$"
+      - "^(SUMMARY|ABSTRACT|CONTENTS)$"
+    keep_if_metadata_present:
+      - "heading_path"
+      - "zotero_key"
+    skip_source_types:
+      - "obsidian"
+    whitelist_source_ids: []
+    blacklist_source_ids: []
+    report:
+      enabled: true
+      top_n: 50
+      output_path: "runs/{RUN_ID}/quality_report.json"
   defaults:
     strategy: recursive
     chunk_size: 2048

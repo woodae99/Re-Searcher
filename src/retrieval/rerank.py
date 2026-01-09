@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 from openai import OpenAI
@@ -80,11 +82,39 @@ class LLMReranker(BaseReranker):
             "Return strict JSON as {\"scores\": [{\"id\": ..., \"score\": ...}, ...]}."
         )
 
+        payload_text = json.dumps(payload, ensure_ascii=True)
+        self._log_debug(
+            "rerank_request",
+            {
+                "model": self.model,
+                "results_count": len(results),
+                "query": query,
+                "prompt": prompt,
+                "payload_chars": len(payload_text),
+                "payload_preview": self._truncate(payload_text),
+            },
+        )
+
         response_text = self._invoke_model(prompt, payload)
+        self._log_debug(
+            "rerank_response_raw",
+            {
+                "response_chars": len(response_text or ""),
+                "response_preview": self._truncate(response_text or ""),
+            },
+        )
+        response_text = self._clean_response_text(response_text)
 
         try:
             parsed = json.loads(response_text)
         except json.JSONDecodeError as exc:
+            self._log_debug(
+                "rerank_parse_error",
+                {
+                    "error": str(exc),
+                    "response_preview": self._truncate(response_text),
+                },
+            )
             raise ValueError(f"Invalid JSON from reranker: {response_text}") from exc
 
         scores = {item["id"]: item.get("score", 0) for item in parsed.get("scores", [])}
@@ -97,6 +127,22 @@ class LLMReranker(BaseReranker):
 
         reranked.sort(key=lambda item: item[3].get("rerank_score", 0), reverse=True)
         return reranked
+
+    def _clean_response_text(self, response_text: str) -> str:
+        """Strip reasoning tags and isolate JSON payload."""
+        if not response_text:
+            return response_text
+
+        # Remove <think>...</think> blocks used by some models.
+        cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL)
+
+        # Extract the first JSON object if extra text remains.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return cleaned[start:end + 1].strip()
+
+        return cleaned.strip()
 
     def _invoke_model(self, prompt: str, payload: Dict[str, Any]) -> str:
         if self.provider == "lmstudio":
@@ -118,3 +164,21 @@ class LLMReranker(BaseReranker):
             temperature=self.temperature,
         )
         return response.choices[0].message.content
+
+    def _log_debug(self, event: str, payload: Dict[str, Any]) -> None:
+        log_path = os.getenv("RERANK_DEBUG_LOG")
+        if not log_path:
+            return
+        record = {"ts": datetime.utcnow().isoformat() + "Z", "event": event}
+        record.update(payload)
+        try:
+            with open(log_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _truncate(text: str, limit: int = 2000) -> str:
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "...(truncated)"

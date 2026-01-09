@@ -61,6 +61,13 @@ def format_search_results(
         if "url" in metadata:
             result["url"] = metadata["url"]
 
+        # Parent context (added by expand_parents)
+        if "parent_text" in metadata:
+            result["parent_text"] = metadata["parent_text"]
+            result["parent_metadata"] = metadata.get("parent_metadata", {})
+        if "parent_contexts" in metadata:
+            result["parent_contexts"] = metadata["parent_contexts"]
+
         formatted.append(result)
 
     return formatted

@@ -214,4 +214,5 @@ OutputFiles/
 
 # Generated output (reports, logs)
 output/
+runs/
 .claude/
