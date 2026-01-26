@@ -289,6 +289,30 @@ This project evolved from **Re-Searcher**, a semantic search tool for researcher
 - Verify data sources are enabled
 - Check permissions on Zotero/Obsidian directories
 
+## MCP Access
+
+The research library can be accessed via MCP (Model Context Protocol) for use with Claude and other MCP-compatible clients.
+
+Start the HTTP server:
+
+```bash
+python src/mcp_http_server.py
+```
+
+Then configure your MCP client with:
+
+```json
+{
+  "mcpServers": {
+    "research-mcp": {
+      "url": "http://127.0.0.1:8001/mcp"
+    }
+  }
+}
+```
+
+For LAN access and detailed configuration, see [docs/MCP_SERVER.md](docs/MCP_SERVER.md).
+
 ## License
 
 MIT License - See LICENSE file

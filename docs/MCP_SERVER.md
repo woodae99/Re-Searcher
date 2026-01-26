@@ -89,6 +89,86 @@ Or, to ensure LM Studio uses the same Python where `mcp` is installed, point the
 
 After updating config, completely restart Claude Desktop for changes to take effect.
 
+## HTTP (Streamable) Server
+
+To expose the MCP server over HTTP (for remote clients), use the streamable HTTP
+entrypoint. This runs the same MCP tools but over an HTTP endpoint suitable for
+MCP clients that use a URL.
+
+Start the server:
+
+```bash
+python src/mcp_http_server.py
+```
+
+Optional environment variables:
+- `MCP_HTTP_HOST` (default: 127.0.0.1)
+- `MCP_HTTP_PORT` (default: 8001)
+- `MCP_CONFIG_PATH` (default: config.yaml)
+
+### LAN Access (Windows)
+
+If you want to access the server from another device on your LAN, you must bind
+to all interfaces and allow the port through the firewall.
+
+PowerShell (run from repo root):
+
+```powershell
+$env:MCP_HTTP_HOST="0.0.0.0"
+$env:MCP_HTTP_PORT="8001"
+python -m src.mcp_http_server
+```
+
+One-line PowerShell command (run from repo root):
+
+```powershell
+$env:MCP_HTTP_HOST="0.0.0.0"; $env:MCP_HTTP_PORT="8001"; python -m src.mcp_http_server
+```
+
+Or use the helper batch file (run from repo root):
+
+```
+run_mcp_http_lan.bat
+```
+
+Or use the helper PowerShell script (run from repo root):
+
+```powershell
+.\run_mcp_http_lan.ps1
+```
+
+Test from another device on the LAN:
+
+```
+curl http://<server-ip>:8001/healthz
+```
+
+If this times out, ensure Windows Firewall allows inbound TCP on port 8001.
+
+Windows Firewall (GUI steps):
+1. Open "Windows Defender Firewall with Advanced Security".
+2. Click "Inbound Rules" -> "New Rule..."
+3. Select "Port" -> Next.
+4. Choose "TCP" and enter "8001" -> Next.
+5. Select "Allow the connection" -> Next.
+6. Check "Private" (and "Domain" if needed) -> Next.
+7. Name it e.g. "MCP HTTP Server 8001" -> Finish.
+
+Example MCP URL (for clients that accept a URL):
+
+```
+http://<host>:8001/mcp
+```
+
+Health check:
+
+```
+http://<host>:8001/healthz
+```
+
+Note: This HTTP endpoint has no auth by default. If you expose it publicly,
+put it behind a firewall or reverse proxy and only open it when needed.
+
 ## Usage
 
 Once configured, Claude will have access to the research library tools:
