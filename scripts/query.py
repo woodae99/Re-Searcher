@@ -106,6 +106,7 @@ def interactive_mode(pipeline):
 
             # Run query
             results = pipeline.query(query, k=k)
+            # Note: interactive mode does not currently expose rerank/diversity overrides.
             print_results(results, show_full_text=show_full_text)
 
         except KeyboardInterrupt:
@@ -146,6 +147,17 @@ def main():
         action="store_true",
         help="Disable reranking for this run (overrides config)",
     )
+    parser.add_argument(
+        "--no-diversity",
+        action="store_true",
+        help="Disable diversity/dedupe for this run (allows many chunks per source)",
+    )
+    parser.add_argument(
+        "--max-per-source",
+        type=int,
+        default=None,
+        help="Override diversity max_per_key (max results per source/title). Example: 1 for broad scan, 10 for deep dive.",
+    )
 
     args = parser.parse_args()
 
@@ -156,23 +168,8 @@ def main():
         sys.exit(1)
 
     try:
-        # If requested, override config without modifying the original file.
-        config_path = args.config
-        if args.no_rerank:
-            import tempfile
-            import yaml
-
-            cfg = yaml.safe_load(config_path.read_text())
-            cfg.setdefault("retrieval", {}).setdefault("rerank", {})
-            cfg["retrieval"]["rerank"]["enabled"] = False
-
-            tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
-            yaml.safe_dump(cfg, tmp, sort_keys=False)
-            tmp.flush()
-            config_path = Path(tmp.name)
-
         # Initialize pipeline
-        pipeline = ResearchRAGPipeline(config_path)
+        pipeline = ResearchRAGPipeline(args.config)
 
         # Check if collection has any data
         stats = pipeline.vector_store.get_collection_stats()
@@ -184,7 +181,13 @@ def main():
         if args.query:
             # Single query mode
             query_text = " ".join(args.query)
-            results = pipeline.query(query_text, k=args.k)
+            results = pipeline.query(
+                query_text,
+                k=args.k,
+                rerank_enabled=(False if args.no_rerank else None),
+                diversity_enabled=(False if args.no_diversity else None),
+                diversity_max_per_key=args.max_per_source,
+            )
             print_results(results, show_full_text=args.full)
         else:
             # Interactive mode

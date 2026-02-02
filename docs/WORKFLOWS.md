@@ -25,6 +25,10 @@ The guiding principle is:
 
 ## Workflow 2 — Depth-first on a single author/work
 
+Tip: if diversity/dedupe is hiding depth, run with:
+- `--no-diversity` (allow many chunks from the same source)
+- or `--max-per-source 10` (controlled depth)
+
 **Use when:** you want a focused explanation of one author’s concept (e.g. “How does Deleuze conceive of intensities?”).
 
 **Steps**

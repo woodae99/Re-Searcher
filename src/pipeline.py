@@ -634,7 +634,15 @@ class ResearchRAGPipeline:
         if hasattr(self.vector_store, "_get_or_create_collection"):
             self.vector_store.collection = self.vector_store._get_or_create_collection()
 
-    def query(self, query_text: str, k: int = 5) -> List:
+    def query(
+        self,
+        query_text: str,
+        k: int = 5,
+        *,
+        rerank_enabled: Optional[bool] = None,
+        diversity_enabled: Optional[bool] = None,
+        diversity_max_per_key: Optional[int] = None,
+    ) -> List:
         """
         Query the vector store.
 
@@ -658,7 +666,8 @@ class ResearchRAGPipeline:
         results = self.vector_store.search(query_embedding, k=k_recall)
 
         rerank_config = retrieval_config.get("rerank", {})
-        if rerank_config.get("enabled", False):
+        rerank_on = rerank_config.get("enabled", False) if rerank_enabled is None else bool(rerank_enabled)
+        if rerank_on:
             try:
                 results = self.reranker.rerank(query_text, results)
             except Exception as e:
@@ -667,15 +676,18 @@ class ResearchRAGPipeline:
 
         # Stage 2: diversity / de-duplication (implicit-first)
         diversity_cfg = retrieval_config.get("diversity", {})
-        if diversity_cfg.get("enabled", False):
+        diversity_on = diversity_cfg.get("enabled", False) if diversity_enabled is None else bool(diversity_enabled)
+        if diversity_on:
             key_priority = diversity_cfg.get(
                 "key_priority", ["source_id", "zotero_key", "title"]
             )
             max_per_key = int(diversity_cfg.get("max_per_key", 2))
+            if diversity_max_per_key is not None:
+                max_per_key = int(diversity_max_per_key)
             results = apply_diversity(results, key_priority=key_priority, max_per_key=max_per_key)
 
         # Final slicing
-        if rerank_config.get("enabled", False):
+        if rerank_on:
             top_n = rerank_config.get("top_n")
             limit = k_return if top_n is None else min(k_return, top_n)
             results = results[:limit]

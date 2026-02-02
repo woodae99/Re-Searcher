@@ -3,7 +3,8 @@
 This file is a lightweight board for things we don’t want to lose track of.
 
 ## Active
-- [ ] **Stage 2 (diversity/dedupe)**: prevent repeated near-identical chunks from same source in final top‑k.
+- [x] **Stage 2 (diversity/dedupe)**: prevent repeated near-identical chunks from same source in final top‑k.
+- [ ] **Expose runtime overrides to agent tools**: ensure MCP tool schemas include diversity/rerank overrides and guidance (done for search tool; keep an eye if new tools are added).
 - [ ] **Stage 3 (noise reduction)**: mojibake + PDF extraction garbage; review existing filters and decide on a safer approach.
 - [ ] **Reranker tuning**: choose a small, reliable rerank model and confirm LM Studio loading/unloading works smoothly under real use.
 

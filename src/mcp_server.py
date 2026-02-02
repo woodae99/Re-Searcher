@@ -93,6 +93,22 @@ class ResearchMCPServer:
                                 "minimum": 1,
                                 "maximum": 50,
                             },
+                            "no_rerank": {
+                                "type": "boolean",
+                                "description": "Disable reranking for this call (falls back to vector similarity ordering).",
+                                "default": False,
+                            },
+                            "no_diversity": {
+                                "type": "boolean",
+                                "description": "Disable diversity/dedupe for this call (allows many chunks from the same source).",
+                                "default": False,
+                            },
+                            "max_per_source": {
+                                "type": "integer",
+                                "description": "Override diversity max_per_key (max results per source_id/zotero_key/title). Useful for deep dives.",
+                                "minimum": 1,
+                                "maximum": 50,
+                            },
                         },
                         "required": ["query"],
                     },
@@ -182,12 +198,21 @@ class ResearchMCPServer:
             # Extract arguments
             query = arguments.get("query")
             k = arguments.get("k", 5)
+            no_rerank = bool(arguments.get("no_rerank", False))
+            no_diversity = bool(arguments.get("no_diversity", False))
+            max_per_source = arguments.get("max_per_source")
 
             if not query:
                 raise ValueError("Query parameter is required")
 
             # Execute search using existing pipeline
-            results = self.pipeline.query(query, k=k)
+            results = self.pipeline.query(
+                query,
+                k=k,
+                rerank_enabled=(False if no_rerank else None),
+                diversity_enabled=(False if no_diversity else None),
+                diversity_max_per_key=max_per_source,
+            )
 
             # Format results using separate formatter
             formatted_results = format_search_results(results)
