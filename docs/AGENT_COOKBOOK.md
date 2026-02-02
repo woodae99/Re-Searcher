@@ -152,6 +152,97 @@ Done when:
 
 ---
 
+## Mission template (copy/paste)
+
+When assigning a task, capture the intent in a structured way. This massively improves agent reliability.
+
+```text
+MISSION:
+- Question / goal:
+- Audience:
+- Deliverable format: (e.g. 3 paragraphs / 1-page brief / outline / quote pack / annotated bib)
+- Scope:
+  - Author/work focus (if any):
+  - Sources allowed: (primary only / primary+secondary / notes only)
+  - Time range (if any):
+- Evidence requirements:
+  - # of direct quotes:
+  - Prefer chunk levels: (fine for quotes; mid/coarse for framing)
+  - Include Zotero/Obsidian backlinks for every quote: (yes/no)
+- Process constraints:
+  - Max time / max iterations:
+  - Avoid: (web search / speculation / etc.)
+- DONE WHEN:
+  - Stopping rules (clear, measurable):
+
+OUTPUT:
+- Structure:
+- Tone:
+- Citation style:
+```
+
+---
+
+## Default strategy loop (agent algorithm)
+
+Use this loop unless the mission explicitly asks otherwise.
+
+### Step 0 — Restate the mission as a plan
+- Convert the mission into: (a) query plan, (b) evidence plan, (c) stopping rules.
+- Decide starting parameters:
+  - breadth scan: `max_per_source=1`, `k_recall=50..200`
+  - deep dive: `no_diversity=true`, `k_recall=100..250`
+
+### Step 1 — Initial recall query (broad)
+Call `search_research_library` with:
+- query = user intent phrased descriptively (include attributes, not just keywords)
+- `k=10`
+- `k_recall=50` (increase if needed)
+- diversity on (default) unless deep dive
+
+### Step 2 — Identify candidate sources
+From the results, extract:
+- top titles/authors
+- any obvious primary sources
+- any `zotero_key` values (or infer from backlink if available)
+
+If the mission is author/work-specific:
+- move to Step 3 quickly (deep dive).
+
+### Step 3 — Deepen / tighten (iterate)
+Run 1–N follow-up searches. Examples:
+- add `source_type=zotero_fulltext` (primary)
+- add `author="Merleau-Ponty"` (post-filter; keep `k_recall` bounded)
+- once a work is identified: switch to `zotero_key=<key>` for precision
+- for depth: `no_diversity=true` or `max_per_source=10..50`
+
+Guideline: **prefer exact filters** (`zotero_key`, `source_type`, year bounds) over post-filters.
+
+### Step 4 — Expand context for the best evidence
+For fine chunks that look like quotable evidence:
+- call `get_chunk_context(chunk_id)` to fetch parent context
+- prefer quoting from the expanded parent if the fine chunk is clipped
+
+### Step 5 — Draft the output
+- Use mid/coarse chunks to frame the explanation.
+- Use fine chunks as evidence.
+- Every quote should include a backlink.
+
+### Step 6 — Check DONE WHEN rules
+Stop when the stopping rules are satisfied.
+If not satisfied:
+- increase `k_recall` slightly
+- loosen filters
+- run another targeted query
+
+### Step 7 — Report uncertainty
+If you cannot find enough primary quotes:
+- say so explicitly
+- show what you did try (queries + filters)
+- propose next best actions (e.g. ingest missing works)
+
+---
+
 ## Error handling (what to do if things go wrong)
 
 ### Reranker errors
