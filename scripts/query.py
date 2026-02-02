@@ -159,6 +159,44 @@ def main():
         help="Override diversity max_per_key (max results per source/title). Example: 1 for broad scan, 10 for deep dive.",
     )
 
+    # Filters (deep dives)
+    parser.add_argument(
+        "--source-type",
+        type=str,
+        default=None,
+        help="Restrict search to a source_type (e.g. zotero_fulltext, zotero_note, zotero_annotation, obsidian)",
+    )
+    parser.add_argument(
+        "--zotero-key",
+        type=str,
+        default=None,
+        help="Restrict search to a single Zotero item key (exact match)",
+    )
+    parser.add_argument(
+        "--author",
+        type=str,
+        default=None,
+        help="Post-filter results where 'authors' contains this string (case-insensitive)",
+    )
+    parser.add_argument(
+        "--title-contains",
+        type=str,
+        default=None,
+        help="Post-filter results where 'title' contains this string (case-insensitive)",
+    )
+    parser.add_argument(
+        "--year-min",
+        type=int,
+        default=None,
+        help="Restrict results to year >= year-min (when year metadata is available)",
+    )
+    parser.add_argument(
+        "--year-max",
+        type=int,
+        default=None,
+        help="Restrict results to year <= year-max (when year metadata is available)",
+    )
+
     args = parser.parse_args()
 
     # Check if config exists
@@ -187,6 +225,12 @@ def main():
                 rerank_enabled=(False if args.no_rerank else None),
                 diversity_enabled=(False if args.no_diversity else None),
                 diversity_max_per_key=args.max_per_source,
+                source_type=args.source_type,
+                zotero_key=args.zotero_key,
+                author_contains=args.author,
+                title_contains=args.title_contains,
+                year_min=args.year_min,
+                year_max=args.year_max,
             )
             print_results(results, show_full_text=args.full)
         else:

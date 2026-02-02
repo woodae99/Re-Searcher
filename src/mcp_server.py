@@ -109,6 +109,34 @@ class ResearchMCPServer:
                                 "minimum": 1,
                                 "maximum": 50,
                             },
+                            "source_type": {
+                                "type": "string",
+                                "description": "Restrict to a source_type (e.g. zotero_fulltext, zotero_note, zotero_annotation, obsidian)",
+                            },
+                            "zotero_key": {
+                                "type": "string",
+                                "description": "Restrict to a single Zotero item key (exact match)",
+                            },
+                            "author": {
+                                "type": "string",
+                                "description": "Post-filter results where 'authors' contains this string (case-insensitive)",
+                            },
+                            "title_contains": {
+                                "type": "string",
+                                "description": "Post-filter results where 'title' contains this string (case-insensitive)",
+                            },
+                            "year_min": {
+                                "type": "integer",
+                                "description": "Restrict results to year >= year_min (when year metadata is available)",
+                            },
+                            "year_max": {
+                                "type": "integer",
+                                "description": "Restrict results to year <= year_max (when year metadata is available)",
+                            },
+                            "where": {
+                                "type": "object",
+                                "description": "Advanced: raw Chroma 'where' dict to AND with other filters. Use sparingly.",
+                            },
                         },
                         "required": ["query"],
                     },
@@ -202,6 +230,14 @@ class ResearchMCPServer:
             no_diversity = bool(arguments.get("no_diversity", False))
             max_per_source = arguments.get("max_per_source")
 
+            source_type = arguments.get("source_type")
+            zotero_key = arguments.get("zotero_key")
+            author = arguments.get("author")
+            title_contains = arguments.get("title_contains")
+            year_min = arguments.get("year_min")
+            year_max = arguments.get("year_max")
+            where = arguments.get("where")
+
             if not query:
                 raise ValueError("Query parameter is required")
 
@@ -212,6 +248,13 @@ class ResearchMCPServer:
                 rerank_enabled=(False if no_rerank else None),
                 diversity_enabled=(False if no_diversity else None),
                 diversity_max_per_key=max_per_source,
+                source_type=source_type,
+                zotero_key=zotero_key,
+                year_min=year_min,
+                year_max=year_max,
+                author_contains=author,
+                title_contains=title_contains,
+                where=where,
             )
 
             # Format results using separate formatter

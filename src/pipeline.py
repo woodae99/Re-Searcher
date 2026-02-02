@@ -19,6 +19,7 @@ from .processing.oversize_guard import create_oversize_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
 from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
+from .retrieval.filters import apply_post_filters, build_where_filter
 from .sources.base import ProgressCallback
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
@@ -642,6 +643,14 @@ class ResearchRAGPipeline:
         rerank_enabled: Optional[bool] = None,
         diversity_enabled: Optional[bool] = None,
         diversity_max_per_key: Optional[int] = None,
+        # Filters (deep dives)
+        source_type: Optional[str] = None,
+        zotero_key: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        author_contains: Optional[str] = None,
+        title_contains: Optional[str] = None,
+        where: Optional[Dict[str, Any]] = None,
     ) -> List:
         """
         Query the vector store.
@@ -662,8 +671,30 @@ class ResearchRAGPipeline:
         k_recall = retrieval_config.get("k_recall", 50)
         k_return = k
 
+        # Build store-level filter (Chroma where)
+        where_filter = build_where_filter(
+            source_type=source_type,
+            zotero_key=zotero_key,
+            year_min=year_min,
+            year_max=year_max,
+            extra_where=where,
+        )
+
+        # If we're applying post-filters (contains), over-recall to preserve enough hits.
+        k_recall_eff = k_recall
+        if author_contains or title_contains:
+            k_recall_eff = min(max(k_recall * 5, k_recall), 500)
+
         # Search vector store
-        results = self.vector_store.search(query_embedding, k=k_recall)
+        results = self.vector_store.search(query_embedding, k=k_recall_eff, filter=where_filter)
+
+        # Post-filters (substring match)
+        if author_contains or title_contains:
+            results = apply_post_filters(
+                results,
+                author_contains=author_contains,
+                title_contains=title_contains,
+            )
 
         rerank_config = retrieval_config.get("rerank", {})
         rerank_on = rerank_config.get("enabled", False) if rerank_enabled is None else bool(rerank_enabled)

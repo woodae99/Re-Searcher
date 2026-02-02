@@ -7,6 +7,7 @@ This file is a lightweight board for things we don’t want to lose track of.
 - [ ] **Expose runtime overrides to agent tools**: ensure MCP tool schemas include diversity/rerank overrides and guidance (done for search tool; keep an eye if new tools are added).
 - [ ] **Stage 3 (noise reduction)**: mojibake + PDF extraction garbage; review existing filters and decide on a safer approach.
 - [ ] **Reranker tuning**: choose a small, reliable rerank model and confirm LM Studio loading/unloading works smoothly under real use.
+- [ ] **Stage 2.5 (filters)**: author/title/source_type/year/zotero_key filtering wired through CLI + MCP (in progress).
 
 ## Repo hygiene / tests
 - [ ] Several existing tests fail in this environment due to missing `config.yaml` and lack of local Chroma in CI context.

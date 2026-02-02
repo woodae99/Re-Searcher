@@ -29,6 +29,11 @@ Tip: if diversity/dedupe is hiding depth, run with:
 - `--no-diversity` (allow many chunks from the same source)
 - or `--max-per-source 10` (controlled depth)
 
+And if you want to focus on a single author/work:
+- `--author "Merleau-Ponty"` (post-filter, case-insensitive)
+- `--zotero-key ABC12345` (exact item deep dive)
+- `--source-type zotero_fulltext` (primary sources) or `--source-type zotero_note` (notes)
+
 **Use when:** you want a focused explanation of one author’s concept (e.g. “How does Deleuze conceive of intensities?”).
 
 **Steps**
