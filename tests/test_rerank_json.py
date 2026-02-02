@@ -19,19 +19,22 @@ def _make_reranker():
 
 def test_parse_scores_json_direct():
     r = _make_reranker()
-    txt = '{"scores": [{"id": "a", "score": 10}]}'
+    txt = '{"scores": [{"idx": 0, "score": 10}]}'
     parsed = r._parse_scores_json(txt)
-    assert parsed["scores"][0]["id"] == "a"
+    assert parsed["scores"][0]["idx"] == 0
 
 
 def test_parse_scores_json_wrapped_text():
     r = _make_reranker()
-    txt = 'nonsense prefix\n{"scores": [{"id": "a", "score": 10}]}\ntrailing'
+    txt = 'nonsense prefix\n{"scores": [{"idx": 0, "score": 10}]}\ntrailing'
     parsed = r._parse_scores_json(txt)
     assert parsed["scores"][0]["score"] == 10
 
 
-def test_parse_scores_json_truncated_returns_none():
+def test_parse_scores_json_truncated_extracts_pairs():
     r = _make_reranker()
-    txt = '{"scores": [{"id": "a", "score": 10}, {"id":'
-    assert r._parse_scores_json(txt) is None
+    # Missing closing brackets/braces, but contains at least one full pair
+    txt = '{"scores": [{"idx": 7, "score": 100}, {"idx":'
+    parsed = r._parse_scores_json(txt)
+    assert parsed is not None
+    assert parsed["scores"][0] == {"idx": 7, "score": 100}

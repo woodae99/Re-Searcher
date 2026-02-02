@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from typing import Any, Dict, List, Tuple, Optional
 
 from openai import OpenAI
@@ -76,21 +77,29 @@ class LLMReranker(BaseReranker):
         max_chars = int(self.max_chars_per_candidate) if self.max_chars_per_candidate else None
         candidates = results[:max_candidates]
 
-        payload = {
-            "query": query,
-            "results": [
+        # Use compact integer indices in the rerank payload to reduce output size
+        # and avoid JSON truncation when document IDs are long.
+        idx_to_id: Dict[int, str] = {}
+        compact_results = []
+        for idx, (doc_id, text, _, _) in enumerate(candidates):
+            idx_to_id[idx] = doc_id
+            compact_results.append(
                 {
-                    "id": doc_id,
+                    "idx": idx,
                     "text": (text[:max_chars] if (max_chars and isinstance(text, str)) else text),
                 }
-                for doc_id, text, _, _ in candidates
-            ],
+            )
+
+        payload = {
+            "query": query,
+            "results": compact_results,
         }
 
         prompt = (
             "You are a relevance reranker. "
             "Score each candidate from 0 to 100 based on relevance to the query. "
-            "Return strict JSON as {\"scores\": [{\"id\": ..., \"score\": ...}, ...]}."
+            "Return strict JSON as {\"scores\": [{\"idx\": <int>, \"score\": <int>}, ...]}. "
+            "Do not include any extra text."
         )
 
         response_text = self._invoke_model(prompt, payload)
@@ -99,10 +108,26 @@ class LLMReranker(BaseReranker):
         if parsed is None:
             raise ValueError(f"Invalid JSON from reranker: {response_text}")
 
-        scores = {item["id"]: item.get("score", 0) for item in parsed.get("scores", [])}
+        # Support either idx-based or id-based responses.
+        scores_by_id: Dict[str, int] = {}
+        for item in parsed.get("scores", []):
+            if not isinstance(item, dict):
+                continue
+            if "idx" in item:
+                try:
+                    idx = int(item["idx"])
+                except Exception:
+                    continue
+                doc_id = idx_to_id.get(idx)
+                if not doc_id:
+                    continue
+                scores_by_id[doc_id] = item.get("score", 0)
+            elif "id" in item:
+                scores_by_id[item["id"]] = item.get("score", 0)
+
         reranked = []
         for doc_id, text, score, metadata in results:
-            rerank_score = scores.get(doc_id, 0)
+            rerank_score = scores_by_id.get(doc_id, 0)
             new_metadata = dict(metadata)
             new_metadata["rerank_score"] = rerank_score
             reranked.append((doc_id, text, score, new_metadata))
@@ -127,13 +152,24 @@ class LLMReranker(BaseReranker):
 
         start = response_text.find("{")
         end = response_text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        candidate = response_text[start : end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            return None
+        if start != -1 and end != -1 and end > start:
+            candidate = response_text[start : end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+        # Last-resort: regex-extract (idx, score) pairs from partially-truncated output.
+        # This is intentionally narrow to the expected schema.
+        pairs = re.findall(r"\{\s*\"idx\"\s*:\s*(\d+)\s*,\s*\"score\"\s*:\s*(\d+)\s*\}", response_text)
+        if pairs:
+            return {
+                "scores": [
+                    {"idx": int(idx), "score": int(score)} for idx, score in pairs
+                ]
+            }
+
+        return None
 
     def _invoke_model(self, prompt: str, payload: Dict[str, Any]) -> str:
         if self.provider == "lmstudio":
