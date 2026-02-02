@@ -1,0 +1,17 @@
+# Tracking / Keep-an-eye-on list
+
+This file is a lightweight board for things we don’t want to lose track of.
+
+## Active
+- [ ] **Stage 2 (diversity/dedupe)**: prevent repeated near-identical chunks from same source in final top‑k.
+- [ ] **Stage 3 (noise reduction)**: mojibake + PDF extraction garbage; review existing filters and decide on a safer approach.
+- [ ] **Reranker tuning**: choose a small, reliable rerank model and confirm LM Studio loading/unloading works smoothly under real use.
+
+## Repo hygiene / tests
+- [ ] Several existing tests fail in this environment due to missing `config.yaml` and lack of local Chroma in CI context.
+  - Action: decide whether to (a) skip/integration-gate them, or (b) provide a test config + mock services.
+- [ ] Replace `rg` usage in local dev notes/scripts with `grep` (ripgrep not installed here) OR add a dev dependency note.
+
+## Environment / ops
+- [ ] Rotate LM Studio dev keys periodically; avoid pasting keys in chat.
+- [ ] Confirm Chroma Windows service binding/firewall stays stable over reboots.
