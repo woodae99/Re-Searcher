@@ -1,6 +1,7 @@
 """LM Studio embedding provider using OpenAI-compatible API."""
 
 from typing import List
+import os
 
 from openai import OpenAI
 
@@ -28,6 +29,9 @@ class LMStudioEmbedding(EmbeddingProvider):
         self.batch_size = lmstudio_config.get("batch_size", embedding_config.get("batch_size", 32))
         self.timeout = lmstudio_config.get("timeout_seconds", embedding_config.get("timeout", 30))
         self.api_key = lmstudio_config.get("api_key") or embedding_config.get("api_key")
+        # Allow ${ENV_VAR} style indirection (common in config files)
+        if isinstance(self.api_key, str) and self.api_key.startswith("${") and self.api_key.endswith("}"):
+            self.api_key = os.getenv(self.api_key[2:-1])
 
         # Initialize OpenAI client pointing to LM Studio
         client_kwargs = {"base_url": self.endpoint, "timeout": self.timeout}
