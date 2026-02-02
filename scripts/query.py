@@ -141,6 +141,11 @@ def main():
         action="store_true",
         help="Show full text instead of preview",
     )
+    parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Disable reranking for this run (overrides config)",
+    )
 
     args = parser.parse_args()
 
@@ -151,8 +156,23 @@ def main():
         sys.exit(1)
 
     try:
+        # If requested, override config without modifying the original file.
+        config_path = args.config
+        if args.no_rerank:
+            import tempfile
+            import yaml
+
+            cfg = yaml.safe_load(config_path.read_text())
+            cfg.setdefault("retrieval", {}).setdefault("rerank", {})
+            cfg["retrieval"]["rerank"]["enabled"] = False
+
+            tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+            yaml.safe_dump(cfg, tmp, sort_keys=False)
+            tmp.flush()
+            config_path = Path(tmp.name)
+
         # Initialize pipeline
-        pipeline = ResearchRAGPipeline(args.config)
+        pipeline = ResearchRAGPipeline(config_path)
 
         # Check if collection has any data
         stats = pipeline.vector_store.get_collection_stats()

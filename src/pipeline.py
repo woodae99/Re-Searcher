@@ -658,7 +658,11 @@ class ResearchRAGPipeline:
 
         rerank_config = retrieval_config.get("rerank", {})
         if rerank_config.get("enabled", False):
-            results = self.reranker.rerank(query_text, results)
+            try:
+                results = self.reranker.rerank(query_text, results)
+            except Exception as e:
+                # Never hard-fail a query because reranking failed.
+                print(f"[WARN] Rerank failed; returning un-reranked results. Error: {e}")
             top_n = rerank_config.get("top_n")
             limit = k_return if top_n is None else min(k_return, top_n)
             results = results[:limit]
