@@ -17,6 +17,7 @@ from .indexing import DocumentStatus, IndexingProgress
 from .processing.id_utils import attach_parent_ids, stable_chunk_id
 from .processing.oversize_guard import create_oversize_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
+from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
 from .sources.base import ProgressCallback
 from .sources.obsidian import ObsidianSource
@@ -663,6 +664,18 @@ class ResearchRAGPipeline:
             except Exception as e:
                 # Never hard-fail a query because reranking failed.
                 print(f"[WARN] Rerank failed; returning un-reranked results. Error: {e}")
+
+        # Stage 2: diversity / de-duplication (implicit-first)
+        diversity_cfg = retrieval_config.get("diversity", {})
+        if diversity_cfg.get("enabled", False):
+            key_priority = diversity_cfg.get(
+                "key_priority", ["source_id", "zotero_key", "title"]
+            )
+            max_per_key = int(diversity_cfg.get("max_per_key", 2))
+            results = apply_diversity(results, key_priority=key_priority, max_per_key=max_per_key)
+
+        # Final slicing
+        if rerank_config.get("enabled", False):
             top_n = rerank_config.get("top_n")
             limit = k_return if top_n is None else min(k_return, top_n)
             results = results[:limit]

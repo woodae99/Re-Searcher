@@ -141,6 +141,12 @@ retrieval:
       model: ibm/granite-4-micro
       max_tokens: 512
       temperature: 0.0
+  diversity:
+    enabled: true
+    # Grouping key preference for limiting repeats.
+    # source_id is added during indexing; zotero_key/title are fallbacks.
+    key_priority: ["source_id", "zotero_key", "title"]
+    max_per_key: 2
   expand:
     include_parent: true
     max_parents: 1
