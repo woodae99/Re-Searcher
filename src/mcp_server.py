@@ -93,6 +93,12 @@ class ResearchMCPServer:
                                 "minimum": 1,
                                 "maximum": 50,
                             },
+                            "k_recall": {
+                                "type": "integer",
+                                "description": "Override retrieval.k_recall (how many candidates to recall before rerank/diversity). Useful to bound post-filters.",
+                                "minimum": 1,
+                                "maximum": 1000,
+                            },
                             "no_rerank": {
                                 "type": "boolean",
                                 "description": "Disable reranking for this call (falls back to vector similarity ordering).",
@@ -226,6 +232,7 @@ class ResearchMCPServer:
             # Extract arguments
             query = arguments.get("query")
             k = arguments.get("k", 5)
+            k_recall = arguments.get("k_recall")
             no_rerank = bool(arguments.get("no_rerank", False))
             no_diversity = bool(arguments.get("no_diversity", False))
             max_per_source = arguments.get("max_per_source")
@@ -245,6 +252,7 @@ class ResearchMCPServer:
             results = self.pipeline.query(
                 query,
                 k=k,
+                k_recall_override=k_recall,
                 rerank_enabled=(False if no_rerank else None),
                 diversity_enabled=(False if no_diversity else None),
                 diversity_max_per_key=max_per_source,

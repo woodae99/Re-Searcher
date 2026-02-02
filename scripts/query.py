@@ -138,6 +138,12 @@ def main():
         help="Number of results to return (default: 5)",
     )
     parser.add_argument(
+        "--k-recall",
+        type=int,
+        default=None,
+        help="Override retrieval.k_recall (how many candidates to recall before rerank/diversity).",
+    )
+    parser.add_argument(
         "--full",
         action="store_true",
         help="Show full text instead of preview",
@@ -225,6 +231,7 @@ def main():
                 rerank_enabled=(False if args.no_rerank else None),
                 diversity_enabled=(False if args.no_diversity else None),
                 diversity_max_per_key=args.max_per_source,
+                k_recall_override=args.k_recall,
                 source_type=args.source_type,
                 zotero_key=args.zotero_key,
                 author_contains=args.author,

@@ -643,6 +643,8 @@ class ResearchRAGPipeline:
         rerank_enabled: Optional[bool] = None,
         diversity_enabled: Optional[bool] = None,
         diversity_max_per_key: Optional[int] = None,
+        # Retrieval knobs
+        k_recall_override: Optional[int] = None,
         # Filters (deep dives)
         source_type: Optional[str] = None,
         zotero_key: Optional[str] = None,
@@ -668,7 +670,8 @@ class ResearchRAGPipeline:
         query_embedding = self.embedder.embed_query(query_text)
 
         retrieval_config = self.config.get("retrieval", {})
-        k_recall = retrieval_config.get("k_recall", 50)
+        k_recall_cfg = retrieval_config.get("k_recall", 50)
+        k_recall = int(k_recall_override) if k_recall_override is not None else int(k_recall_cfg)
         k_return = k
 
         # Build store-level filter (Chroma where)

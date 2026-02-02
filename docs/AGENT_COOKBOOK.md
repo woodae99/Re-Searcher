@@ -1,0 +1,179 @@
+# Agent Cookbook — Re-Searcher (CLI + MCP)
+
+This document is written for an **agent** (human or automated) that needs to complete research/writing “missions” using this repo.
+
+It describes:
+- what tools exist,
+- how to choose parameters,
+- how to break a mission into steps,
+- what “done” means.
+
+---
+
+## Core idea
+
+The library is indexed into Chroma as **chunks** (coarse/mid/fine). A good mission usually follows a loop:
+
+1) **Recall** (semantic search): pull candidate chunks
+2) **Refine** (filters/diversity/rerank): improve precision and coverage
+3) **Expand** (context): fetch parent chunks for understanding
+4) **Synthesize** (optional): draft answer with citations/backlinks
+
+---
+
+## Available interfaces
+
+### 1) MCP tools (preferred for agents)
+
+Tool: `search_research_library`
+
+Inputs (key ones):
+- `query` (string, required)
+- `k` (int): how many results to return
+- `k_recall` (int): how many candidates to recall before rerank/diversity (useful to bound post-filters)
+
+Rerank/diversity controls:
+- `no_rerank` (bool): disable reranking for reliability/debugging
+- `no_diversity` (bool): allow many chunks from same source (deep dive)
+- `max_per_source` (int): controlled depth (1 for breadth, 10+ for deep)
+
+Filters (deep dives):
+- `source_type` (string): e.g. `zotero_fulltext`, `zotero_note`, `zotero_annotation`, `obsidian`
+- `zotero_key` (string): exact item deep dive
+- `author` (string): post-filter where metadata `authors` contains string
+- `title_contains` (string): post-filter where metadata `title` contains string
+- `year_min` / `year_max` (int)
+- `where` (object): advanced raw Chroma where dict (ANDed with other filters)
+
+Tool: `get_chunk_context`
+- `chunk_id` (string, required)
+- `include_parent` (bool, default true)
+
+
+### 2) CLI (good for humans / debugging)
+
+`scripts/query.py` supports the same concepts, plus:
+- `--no-rerank`
+- `--no-diversity`
+- `--max-per-source N`
+- `--k-recall N`
+- `--source-type ...`
+- `--zotero-key ...`
+- `--author ...`
+- `--title-contains ...`
+- `--year-min/--year-max`
+
+---
+
+## Parameter strategy (how to choose knobs)
+
+### k vs k_recall
+- `k` = how many you show to the user.
+- `k_recall` = how many candidates you consider before rerank/diversity.
+
+Rules of thumb:
+- Breadth scan: `k=10`, `k_recall=50`
+- Hard query / concept hunting: `k=10`, `k_recall=200`
+- Post-filter by author/title: start with `k_recall=100` (avoid 500 unless needed)
+
+### Diversity controls
+- Default (recommended): diversity ON, `max_per_source=2`
+- Breadth scan: `max_per_source=1`
+- Deep study: `no_diversity=true` OR `max_per_source=10..50`
+
+### Filters
+Prefer store-level filters when possible:
+- `zotero_key`, `source_type`, `year_min/max` are cheap (Chroma where).
+
+Use post-filters when needed:
+- `author`, `title_contains` (substring filters) can be slower; keep `k_recall` bounded.
+
+---
+
+## Mission patterns (templates)
+
+### Pattern A — Broad literature scan
+**Goal:** Find a diverse set of relevant sources.
+
+1) Query breadth-first:
+- `max_per_source=1`, `k=10`, `k_recall=50`
+2) If results are shallow, increase recall:
+- `k_recall=200`
+3) Extract candidate sources (titles/authors/backlinks) for shortlist.
+
+Done when:
+- at least 5–10 distinct sources are identified,
+- and you can name 2–4 clusters/themes.
+
+---
+
+### Pattern B — Deep study of a single author (e.g. Merleau-Ponty)
+**Goal:** Understand an author’s concept(s) and collect evidence.
+
+1) Start with author post-filter (bounded):
+- `author="Merleau-Ponty"`, `k_recall=100`, `no_diversity=true`, `k=10`
+2) From results, identify key works via `zotero_key`.
+3) Switch to exact deep dive:
+- `zotero_key=<key>`, `no_diversity=true`, `k=20`, `k_recall=200`
+4) Expand context for the best fine chunks:
+- call `get_chunk_context(chunk_id)` to fetch parent (mid/coarse) context.
+
+Done when:
+- you can write a 3–5 point outline of the author’s position,
+- you have 3–8 quotable passages (fine chunks) with backlinks,
+- you can cite which work(s) the claims come from.
+
+---
+
+### Pattern C — Notes-only scan (your own notes)
+**Goal:** Search only your authored notes/annotations.
+
+1) Restrict to notes:
+- `source_type=zotero_note` (and/or `obsidian`) and query
+2) Use diversity ON unless you want depth.
+
+Done when:
+- you’ve located the relevant note(s) and can link back.
+
+---
+
+### Pattern D — Concept hunting (analogues across vocabularies)
+**Goal:** Find conceptual equivalents where vocabulary differs.
+
+1) Definition-building query:
+- no author filter, diversity ON, `k_recall=200`
+2) Extract attributes/phrases from best hits.
+3) Run follow-up queries on those attributes.
+4) When a candidate author emerges, re-run with `author` post-filter.
+
+Done when:
+- you can propose at least 2–3 plausible analogues,
+- with evidence chunks for each.
+
+---
+
+## Error handling (what to do if things go wrong)
+
+### Reranker errors
+If rerank fails:
+- reranking is designed to fall back to un-reranked results.
+- If you suspect rerank is harming latency or relevance, set `no_rerank=true`.
+
+### Too slow / timeouts
+- Reduce `k_recall`.
+- Avoid broad post-filters (`author`, `title_contains`) unless necessary.
+- Prefer exact filters (`zotero_key`, `source_type`).
+
+### No results
+- Remove/loosen filters.
+- Increase `k_recall`.
+- Try a more descriptive query (attributes rather than keywords).
+
+---
+
+## Definition of “done”
+
+A mission is complete when:
+1) the user’s request is answered in the requested format (summary/outline/bibliography/etc.),
+2) claims are supported by retrieved evidence (quotes/snippets) with backlinks,
+3) any remaining uncertainty is stated clearly (what wasn’t found / what needs manual verification).
