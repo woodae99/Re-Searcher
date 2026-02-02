@@ -102,29 +102,40 @@ retrieval:
 
 ---
 
-## Stage 2 (Next): Diversity + De-duplication in Results
+## Stage 2 (Next): Diversity + De-duplication in Results (Implicit-first)
 
 ### Goal
-Avoid returning multiple near-identical chunks (often from the same source) in the final top‑k.
+Avoid returning multiple near-identical chunks (often from the same source) in the final top‑k **by default**, while preserving the ability for an agent (or a future CLI flag) to intentionally go deep on a single source when the task calls for it.
+
+### Design principle
+We are **not** introducing explicit “modes” (survey/deep/compare) yet. The CLI remains simple; advanced behaviours are achieved by:
+- running multiple queries iteratively (agent orchestration),
+- adjusting a small number of config knobs when needed.
 
 ### Proposed changes (spec)
 
-#### 1. Post-retrieval grouping
+#### 1. Post-retrieval grouping (minimal)
 **Where:** `src/pipeline.py` after recall (and after rerank if enabled)
 
 **Design options:**
-- `diversity.max_per_source_id` (default 2)
-- group by `metadata.source_id` (preferred) or `zotero_key`
+- `retrieval.diversity.enabled` (default true)
+- `retrieval.diversity.key` (default `source_id`)
+- `retrieval.diversity.max_per_key` (default 2)
 
-**Rationale:** Improves human usefulness of results.
+Grouping key priority:
+1) `metadata.source_id` (preferred)
+2) `metadata.zotero_key`
+3) fallback: `metadata.title`
 
-#### 2. Optional MMR selection
+**Rationale:** Improves human usefulness of results without constraining recall.
+
+#### 2. Optional MMR selection (defer)
 **Where:** new helper in `src/retrieval/`
 
 **Design:**
-- Implement Max Marginal Relevance using embeddings already available (or use distance proxy).
+- Implement Max Marginal Relevance only if the minimal grouping is insufficient.
 
-**Rationale:** Better coverage across concepts/sources.
+**Rationale:** Better coverage across concepts/sources, but keep the first iteration small.
 
 ---
 
