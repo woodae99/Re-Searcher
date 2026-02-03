@@ -74,74 +74,135 @@ class ResearchMCPServer:
                 Tool(
                     name="search_research_library",
                     description=(
-                        "Search the research library using semantic search. "
-                        "Searches across indexed chunks from Zotero references and Obsidian notes. "
-                        "Returns relevant passages with metadata including hierarchical context "
-                        "(chunk level, parent references, section headings)."
+                        "Search the research library using semantic search across Zotero references and Obsidian notes. "
+                        "Returns relevant passages with metadata. "
+                        "Supports hierarchical chunking (coarse/mid/fine), metadata filtering, diversity controls, and reranking."
                     ),
                     inputSchema={
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "Search query text",
+                                "description": "The search query text. Use natural language to describe what you're looking for.",
                             },
                             "k": {
                                 "type": "integer",
-                                "description": "Number of results to return (default: 5)",
+                                "description": (
+                                    "Number of final results to return after all filtering and reranking (default: 5). "
+                                    "This is your top-k output. Increase for broader exploration, decrease for focused results."
+                                ),
                                 "default": 5,
                                 "minimum": 1,
                                 "maximum": 50,
                             },
                             "k_recall": {
                                 "type": "integer",
-                                "description": "Override retrieval.k_recall (how many candidates to recall before rerank/diversity). Useful to bound post-filters.",
+                                "description": (
+                                    "How many candidates to retrieve from vector store before reranking and diversity filtering "
+                                    "(default: from config, typically 50). Use higher values when applying heavy post-filters "
+                                    "(e.g., k_recall=100 when filtering by specific author or year to ensure enough hits remain)."
+                                ),
                                 "minimum": 1,
                                 "maximum": 1000,
                             },
+                            "chunk_level": {
+                                "type": "string",
+                                "enum": ["coarse", "mid", "fine"],
+                                "description": (
+                                    "Filter by hierarchical chunk granularity: "
+                                    "'coarse' = large sections with broad context (~1500-2500 chars, good for overview/gist), "
+                                    "'mid' = medium sections with balanced context (~800-1500 chars, good for general queries), "
+                                    "'fine' = small focused segments like paragraphs/headings (good for precise matches but may lack context). "
+                                    "Omit to search all levels (default). Recommend 'coarse' or 'mid' for better context in results."
+                                ),
+                            },
                             "no_rerank": {
                                 "type": "boolean",
-                                "description": "Disable reranking for this call (falls back to vector similarity ordering).",
+                                "description": (
+                                    "Set to true to disable LLM-based reranking for this query (falls back to pure vector similarity). "
+                                    "Use when you want faster results or to debug embedding quality. Default: false (reranking enabled if configured)."
+                                ),
                                 "default": False,
                             },
                             "no_diversity": {
                                 "type": "boolean",
-                                "description": "Disable diversity/dedupe for this call (allows many chunks from the same source).",
+                                "description": (
+                                    "Set to true to disable diversity/deduplication filtering (allows multiple chunks from same source). "
+                                    "Use for deep dives into specific sources where you want all relevant chunks. "
+                                    "Default: false (diversity enabled if configured)."
+                                ),
                                 "default": False,
                             },
                             "max_per_source": {
                                 "type": "integer",
-                                "description": "Override diversity max_per_key (max results per source_id/zotero_key/title). Useful for deep dives.",
+                                "description": (
+                                    "Maximum results allowed per source document (auto-enables diversity if not already on). "
+                                    "Use max_per_source=1 for broad survey across many sources, "
+                                    "max_per_source=10 for deep dive into each relevant source. "
+                                    "Default from config is typically 2 results per source."
+                                ),
                                 "minimum": 1,
                                 "maximum": 50,
                             },
                             "source_type": {
                                 "type": "string",
-                                "description": "Restrict to a source_type (e.g. zotero_fulltext, zotero_note, zotero_annotation, obsidian)",
+                                "enum": ["zotero_fulltext", "zotero_note", "zotero_annotation", "obsidian"],
+                                "description": (
+                                    "Restrict search to a specific source type: "
+                                    "'zotero_fulltext' = PDF/document full text, "
+                                    "'zotero_note' = Zotero standalone notes, "
+                                    "'zotero_annotation' = PDF highlights and comments, "
+                                    "'obsidian' = Obsidian vault markdown notes. "
+                                    "Useful for focusing on specific content types."
+                                ),
                             },
                             "zotero_key": {
                                 "type": "string",
-                                "description": "Restrict to a single Zotero item key (exact match)",
+                                "description": (
+                                    "Restrict search to a single Zotero item by its key (exact match). "
+                                    "Use this for deep diving into one specific paper or book. "
+                                    "Example: 'XMN6HI9Y' to search only within that item."
+                                ),
                             },
                             "author": {
                                 "type": "string",
-                                "description": "Post-filter results where 'authors' contains this string (case-insensitive)",
+                                "description": (
+                                    "Filter results where author field contains this substring (case-insensitive). "
+                                    "Example: 'Smith' finds 'John Smith', 'Smith et al', etc. "
+                                    "Useful for finding all works by or involving a specific researcher."
+                                ),
                             },
                             "title_contains": {
                                 "type": "string",
-                                "description": "Post-filter results where 'title' contains this string (case-insensitive)",
+                                "description": (
+                                    "Filter results where title contains this substring (case-insensitive). "
+                                    "Example: 'coaching' finds any title mentioning coaching. "
+                                    "Useful for narrowing to specific topics or book titles."
+                                ),
                             },
                             "year_min": {
                                 "type": "integer",
-                                "description": "Restrict results to year >= year_min (when year metadata is available)",
+                                "description": (
+                                    "Restrict to publications from this year onwards (inclusive). "
+                                    "Example: 2020 for recent research only. "
+                                    "Combine with year_max for a range (e.g., year_min=2015, year_max=2020)."
+                                ),
                             },
                             "year_max": {
                                 "type": "integer",
-                                "description": "Restrict results to year <= year_max (when year metadata is available)",
+                                "description": (
+                                    "Restrict to publications up to this year (inclusive). "
+                                    "Example: 2010 for historical research. "
+                                    "Combine with year_min for a specific time period."
+                                ),
                             },
                             "where": {
                                 "type": "object",
-                                "description": "Advanced: raw Chroma 'where' dict to AND with other filters. Use sparingly.",
+                                "description": (
+                                    "Advanced: raw Chroma 'where' dict for custom filtering. "
+                                    "Use sparingly for edge cases not covered by explicit parameters. "
+                                    "Will be merged with other filters via AND logic."
+                                ),
                             },
                         },
                         "required": ["query"],
@@ -233,6 +294,7 @@ class ResearchMCPServer:
             query = arguments.get("query")
             k = arguments.get("k", 5)
             k_recall = arguments.get("k_recall")
+            chunk_level = arguments.get("chunk_level")
             no_rerank = bool(arguments.get("no_rerank", False))
             no_diversity = bool(arguments.get("no_diversity", False))
             max_per_source = arguments.get("max_per_source")
@@ -253,6 +315,7 @@ class ResearchMCPServer:
                 query,
                 k=k,
                 k_recall_override=k_recall,
+                chunk_level=chunk_level,
                 rerank_enabled=(False if no_rerank else None),
                 diversity_enabled=(False if no_diversity else None),
                 diversity_max_per_key=max_per_source,

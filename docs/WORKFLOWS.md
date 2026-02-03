@@ -10,41 +10,63 @@ The guiding principle is:
 
 ## Workflow 1 — Broad scan → shortlist (survey mode, implicitly)
 
-**Use when:** you want coverage across the literature (e.g. “coaching is a social process”).
+**Use when:** you want coverage across the literature (e.g. "coaching is a social process").
 
 **Steps**
 1) Run a broad semantic query with a moderately large recall:
    - set `retrieval.k_recall` high enough to cast the net (e.g. 50–200)
    - return a smaller top‑k (e.g. 10)
+   - use `--chunk-level coarse` for substantive context (~1500-2500 chars)
+   - use `--max-per-source 1` to enforce diversity across sources
 2) Skim the returned sources (titles/authors/source_type) and shortlist.
 3) Re-query using additional terms from the best hits (names, keywords, related theories).
 
-**Success looks like:** diversity of sources, not 10 chunks from the same paper.
+**Example:**
+```bash
+python scripts/query.py "coaching as a social process" -k 10 \
+  --chunk-level coarse --max-per-source 1
+```
+
+**Success looks like:** diversity of sources, substantive chunks not just headings, not 10 chunks from the same paper.
 
 ---
 
 ## Workflow 2 — Depth-first on a single author/work
 
-Tip: if diversity/dedupe is hiding depth, run with:
-- `--no-diversity` (allow many chunks from the same source)
-- or `--max-per-source 10` (controlled depth)
+**Use when:** you want a focused explanation of one author's concept (e.g. "How does Deleuze conceive of intensities?").
 
-And if you want to focus on a single author/work:
-- `--author "Merleau-Ponty"` (post-filter, case-insensitive)
-- `--zotero-key ABC12345` (exact item deep dive)
-- `--source-type zotero_fulltext` (primary sources) or `--source-type zotero_note` (notes)
-
-**Use when:** you want a focused explanation of one author’s concept (e.g. “How does Deleuze conceive of intensities?”).
+**Key parameters:**
+- Chunk granularity:
+  - `--chunk-level coarse` for overview/broad explanations
+  - `--chunk-level mid` for balanced context
+  - `--chunk-level fine` for precise definitions (may lack context)
+- Diversity control:
+  - `--no-diversity` (allow many chunks from the same source)
+  - `--max-per-source 10` (controlled depth, get multiple chunks per source)
+- Author/work filtering:
+  - `--author "Merleau-Ponty"` (post-filter, case-insensitive)
+  - `--zotero-key ABC12345` (exact item deep dive)
+  - `--source-type zotero_fulltext` (primary sources) or `--source-type zotero_note` (notes)
 
 **Steps**
-1) Query for the concept broadly (don’t over-filter initially).
+1) Query for the concept broadly (don't over-filter initially).
 2) Identify the most relevant primary works and/or high-quality commentaries from the results.
 3) Drill down by iterating queries with tighter phrasing and disambiguators:
    - include work titles / key terms
-   - include “definition”, “means”, “in Deleuze”, “Difference and Repetition”, etc.
-4) When you have the key passages, switch from “recall” to “evidence collection”:
+   - include "definition", "means", "in Deleuze", "Difference and Repetition", etc.
+4) When you have the key passages, switch from "recall" to "evidence collection":
    - gather multiple chunks from the same source
    - keep note of backlinks for citation/verification.
+
+**Example:**
+```bash
+# Broad exploration
+python scripts/query.py "Deleuze intensities" -k 10 --chunk-level coarse
+
+# Deep dive into specific work
+python scripts/query.py "intensities Difference and Repetition" -k 15 \
+  --chunk-level mid --max-per-source 5 --author Deleuze
+```
 
 **Success looks like:** multiple complementary passages, not just repeated headings.
 

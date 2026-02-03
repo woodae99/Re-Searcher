@@ -191,15 +191,45 @@ Claude: [Uses get_chunk_context to fetch parent chunk]
 
 Search the research library using semantic search.
 
-**Parameters:**
+**Basic Parameters:**
 - **query** (required): Search query text
-- **k** (optional): Number of results (1-50, default: 5)
+- **k** (optional): Number of final results (1-50, default: 5)
+- **chunk_level** (optional): Filter by chunk granularity - `"coarse"`, `"mid"`, or `"fine"`
+  - `coarse`: Large sections with broad context (~1500-2500 chars, best for overview)
+  - `mid`: Medium sections with balanced context (~800-1500 chars)
+  - `fine`: Small segments like paragraphs/headings (precise but may lack context)
+
+**Retrieval Controls:**
+- **k_recall** (optional): How many candidates to retrieve before filtering (default: from config, typically 50)
+- **no_rerank** (optional): Set `true` to disable LLM reranking (faster, uses pure vector similarity)
+- **no_diversity** (optional): Set `true` to disable deduplication (allows many chunks from same source)
+- **max_per_source** (optional): Max results per source document (auto-enables diversity, e.g., 1 for broad scan, 10 for deep dive)
+
+**Metadata Filters:**
+- **source_type** (optional): Filter by type - `"zotero_fulltext"`, `"zotero_note"`, `"zotero_annotation"`, or `"obsidian"`
+- **zotero_key** (optional): Filter to specific Zotero item (exact key match)
+- **author** (optional): Filter by author name (case-insensitive substring match)
+- **title_contains** (optional): Filter by title (case-insensitive substring match)
+- **year_min** (optional): Minimum publication year (inclusive)
+- **year_max** (optional): Maximum publication year (inclusive)
 
 **Returns:** Results with hierarchical metadata including:
 - Chunk level (coarse/mid/fine)
 - Parent chunk ID (for context expansion)
 - Section headings (for Obsidian notes)
 - Standard metadata (title, authors, DOI, backlinks)
+
+**Usage Examples:**
+```json
+// Broad overview across sources
+{"query": "dialectic in coaching", "k": 5, "chunk_level": "coarse", "max_per_source": 1}
+
+// Deep dive into specific author
+{"query": "process philosophy", "k": 10, "author": "Whitehead", "chunk_level": "mid", "max_per_source": 5}
+
+// Recent research only
+{"query": "coaching psychology", "year_min": 2020, "chunk_level": "coarse"}
+```
 
 ### get_chunk_context
 

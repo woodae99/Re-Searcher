@@ -22,12 +22,24 @@ def build_where_filter(
     zotero_key: Optional[str] = None,
     year_min: Optional[int] = None,
     year_max: Optional[int] = None,
+    chunk_level: Optional[str] = None,
     extra_where: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Build a Chroma 'where' filter.
 
     Note: Chroma where syntax supports operators like $gte/$lte for numeric fields.
     This function keeps things conservative.
+
+    Args:
+        source_type: Filter by source type (e.g., 'zotero_fulltext', 'obsidian')
+        zotero_key: Filter by exact Zotero item key
+        year_min: Minimum year (inclusive)
+        year_max: Maximum year (inclusive)
+        chunk_level: Filter by hierarchical chunk level ('coarse', 'mid', 'fine')
+        extra_where: Additional Chroma where clauses to merge
+
+    Returns:
+        Chroma where filter dict, or None if no filters specified
     """
 
     where: Dict[str, Any] = {}
@@ -46,6 +58,9 @@ def build_where_filter(
         if year_max is not None:
             cond["$lte"] = int(year_max)
         where["year"] = cond
+
+    if chunk_level:
+        where["chunk_level"] = chunk_level
 
     if extra_where:
         # Shallow merge: extra_where wins on key collisions.

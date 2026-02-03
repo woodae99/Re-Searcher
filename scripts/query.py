@@ -62,12 +62,23 @@ def interactive_mode(pipeline):
     print("\n" + "=" * 80)
     print("Research RAG - Interactive Query Mode")
     print("=" * 80)
-    print("\nCommands:")
-    print("  <query text>  - Search for documents")
-    print("  :full         - Toggle full text display")
-    print("  :k <number>   - Set number of results (default: 5)")
-    print("  :stats        - Show collection statistics")
-    print("  :quit or :q   - Exit")
+    print("\nBasic Commands:")
+    print("  <query text>     - Search for documents using natural language")
+    print("  :k <number>      - Set number of results (default: 5)")
+    print("  :full            - Toggle full text display (on/off)")
+    print("  :stats           - Show collection statistics")
+    print("  :help            - Show this help message")
+    print("  :quit or :q      - Exit interactive mode")
+    print("\nAdvanced Filtering (use CLI mode with arguments):")
+    print("  --chunk-level    - Filter by chunk size (coarse/mid/fine)")
+    print("  --max-per-source - Limit results per source (diversity control)")
+    print("  --author         - Filter by author name")
+    print("  --year-min/max   - Filter by publication year range")
+    print("  --source-type    - Filter by source type (zotero/obsidian)")
+    print("  --no-rerank      - Disable reranking")
+    print("\nTip: For advanced options, use CLI mode:")
+    print("  python scripts/query.py \"your query\" --chunk-level coarse -k 5")
+    print("  python scripts/query.py --help  (for all options)")
     print("=" * 80 + "\n")
 
     k = 5
@@ -85,6 +96,25 @@ def interactive_mode(pipeline):
                 if query in [":quit", ":q", ":exit"]:
                     print("Goodbye!")
                     break
+                elif query == ":help":
+                    # Show help message
+                    print("\nBasic Commands:")
+                    print("  <query text>     - Search for documents using natural language")
+                    print("  :k <number>      - Set number of results (default: 5)")
+                    print("  :full            - Toggle full text display (on/off)")
+                    print("  :stats           - Show collection statistics")
+                    print("  :help            - Show this help message")
+                    print("  :quit or :q      - Exit interactive mode")
+                    print("\nAdvanced Filtering (use CLI mode with arguments):")
+                    print("  --chunk-level    - Filter by chunk size (coarse/mid/fine)")
+                    print("  --max-per-source - Limit results per source (diversity control)")
+                    print("  --author         - Filter by author name")
+                    print("  --year-min/max   - Filter by publication year range")
+                    print("  --source-type    - Filter by source type (zotero/obsidian)")
+                    print("  --no-rerank      - Disable reranking")
+                    print("\nTip: For advanced options, use CLI mode:")
+                    print("  python scripts/query.py \"your query\" --chunk-level coarse -k 5")
+                    print("  python scripts/query.py --help  (for all options)\n")
                 elif query == ":full":
                     show_full_text = not show_full_text
                     print(f"Full text display: {'ON' if show_full_text else 'OFF'}")
@@ -102,6 +132,7 @@ def interactive_mode(pipeline):
                     print()
                 else:
                     print(f"Unknown command: {query}")
+                    print("Type :help to see available commands")
                 continue
 
             # Run query
@@ -135,72 +166,104 @@ def main():
         "-k",
         type=int,
         default=5,
-        help="Number of results to return (default: 5)",
+        help="Number of final results to return after all filtering and reranking (default: 5). "
+             "This is your top-k output size.",
     )
     parser.add_argument(
         "--k-recall",
         type=int,
         default=None,
-        help="Override retrieval.k_recall (how many candidates to recall before rerank/diversity).",
+        help="Override how many candidates to retrieve from vector store before reranking/diversity "
+             "(default: from config, typically 50). Use higher values when applying heavy post-filters. "
+             "Example: --k-recall 100 to get more candidates when filtering by author or year.",
     )
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Show full text instead of preview",
+        help="Show full text of results instead of truncated preview. Useful for detailed analysis.",
     )
     parser.add_argument(
         "--no-rerank",
         action="store_true",
-        help="Disable reranking for this run (overrides config)",
+        help="Disable LLM-based reranking for this query (falls back to pure vector similarity). "
+             "Use when you want faster results or to debug embedding quality.",
     )
     parser.add_argument(
         "--no-diversity",
         action="store_true",
-        help="Disable diversity/dedupe for this run (allows many chunks per source)",
+        help="Disable diversity/deduplication filtering (allows multiple chunks from same source). "
+             "Use for deep dives into specific sources where you want all relevant chunks.",
     )
     parser.add_argument(
         "--max-per-source",
         type=int,
         default=None,
-        help="Override diversity max_per_key (max results per source/title). Example: 1 for broad scan, 10 for deep dive.",
+        help="Maximum results allowed per source document (auto-enables diversity if not already on). "
+             "Examples: --max-per-source 1 for broad survey across sources, "
+             "--max-per-source 10 for deep dive into each relevant source. "
+             "Default from config is typically 2.",
     )
 
     # Filters (deep dives)
     parser.add_argument(
+        "--chunk-level",
+        type=str,
+        choices=["coarse", "mid", "fine"],
+        default=None,
+        help="Filter by hierarchical chunk granularity level. "
+             "COARSE: Large sections with broad context (good for overview/gist, ~1500-2500 chars). "
+             "MID: Medium sections with balanced context (good for general queries, ~800-1500 chars). "
+             "FINE: Small focused segments like paragraphs/headings (good for precise matches, may lack context). "
+             "Omit to search all levels (default). Use coarse/mid for better context in results.",
+    )
+    parser.add_argument(
         "--source-type",
         type=str,
         default=None,
-        help="Restrict search to a source_type (e.g. zotero_fulltext, zotero_note, zotero_annotation, obsidian)",
+        help="Restrict search to a specific source type. "
+             "Options: 'zotero_fulltext' (PDF/doc full text), 'zotero_note' (Zotero notes), "
+             "'zotero_annotation' (PDF highlights/comments), 'obsidian' (vault markdown notes). "
+             "Useful for focusing on specific content types.",
     )
     parser.add_argument(
         "--zotero-key",
         type=str,
         default=None,
-        help="Restrict search to a single Zotero item key (exact match)",
+        help="Restrict search to a single Zotero item by its key (exact match). "
+             "Use this for deep diving into one specific paper/book. "
+             "Example: --zotero-key XMN6HI9Y to search only within that item.",
     )
     parser.add_argument(
         "--author",
         type=str,
         default=None,
-        help="Post-filter results where 'authors' contains this string (case-insensitive)",
+        help="Filter results where author field contains this substring (case-insensitive). "
+             "Example: --author 'Smith' finds 'John Smith', 'Smith et al', etc. "
+             "Useful for finding all works by or involving a specific researcher.",
     )
     parser.add_argument(
         "--title-contains",
         type=str,
         default=None,
-        help="Post-filter results where 'title' contains this string (case-insensitive)",
+        help="Filter results where title contains this substring (case-insensitive). "
+             "Example: --title-contains 'coaching' finds any title mentioning coaching. "
+             "Useful for narrowing to specific topics or book titles.",
     )
     parser.add_argument(
         "--year-min",
         type=int,
         default=None,
-        help="Restrict results to year >= year-min (when year metadata is available)",
+        help="Restrict to publications from this year onwards (inclusive). "
+             "Example: --year-min 2020 for recent research only. "
+             "Combine with --year-max for a range (e.g., --year-min 2015 --year-max 2020).",
     )
     parser.add_argument(
         "--year-max",
         type=int,
         default=None,
-        help="Restrict results to year <= year-max (when year metadata is available)",
+        help="Restrict to publications up to this year (inclusive). "
+             "Example: --year-max 2010 for historical research. "
+             "Combine with --year-min for a specific time period.",
     )
 
     args = parser.parse_args()
@@ -232,6 +295,7 @@ def main():
                 diversity_enabled=(False if args.no_diversity else None),
                 diversity_max_per_key=args.max_per_source,
                 k_recall_override=args.k_recall,
+                chunk_level=args.chunk_level,
                 source_type=args.source_type,
                 zotero_key=args.zotero_key,
                 author_contains=args.author,

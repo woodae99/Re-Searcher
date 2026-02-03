@@ -650,6 +650,7 @@ class ResearchRAGPipeline:
         zotero_key: Optional[str] = None,
         year_min: Optional[int] = None,
         year_max: Optional[int] = None,
+        chunk_level: Optional[str] = None,
         author_contains: Optional[str] = None,
         title_contains: Optional[str] = None,
         where: Optional[Dict[str, Any]] = None,
@@ -660,9 +661,21 @@ class ResearchRAGPipeline:
         Args:
             query_text: Query string
             k: Number of results to return
+            rerank_enabled: Override config to enable/disable reranking
+            diversity_enabled: Override config to enable/disable diversity filtering
+            diversity_max_per_key: Max results per source (enables diversity if set)
+            k_recall_override: Override how many candidates to recall before filtering
+            source_type: Filter by source type (zotero_fulltext, zotero_note, obsidian, etc.)
+            zotero_key: Filter by specific Zotero item key
+            year_min: Filter results published on or after this year
+            year_max: Filter results published on or before this year
+            chunk_level: Filter by chunk granularity (coarse/mid/fine for context control)
+            author_contains: Filter results where author field contains this string
+            title_contains: Filter results where title field contains this string
+            where: Advanced Chroma where clause for custom filtering
 
         Returns:
-            List of search results
+            List of search results as (doc_id, text, score, metadata) tuples
         """
         print(f"\nQuery: {query_text}\n")
 
@@ -680,6 +693,7 @@ class ResearchRAGPipeline:
             zotero_key=zotero_key,
             year_min=year_min,
             year_max=year_max,
+            chunk_level=chunk_level,
             extra_where=where,
         )
 
@@ -710,7 +724,11 @@ class ResearchRAGPipeline:
 
         # Stage 2: diversity / de-duplication (implicit-first)
         diversity_cfg = retrieval_config.get("diversity", {})
-        diversity_on = diversity_cfg.get("enabled", False) if diversity_enabled is None else bool(diversity_enabled)
+        # Auto-enable diversity if max_per_key is explicitly set via parameter
+        if diversity_enabled is None and diversity_max_per_key is not None:
+            diversity_on = True
+        else:
+            diversity_on = diversity_cfg.get("enabled", False) if diversity_enabled is None else bool(diversity_enabled)
         if diversity_on:
             key_priority = diversity_cfg.get(
                 "key_priority", ["source_id", "zotero_key", "title"]
