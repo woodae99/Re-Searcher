@@ -156,6 +156,9 @@ config.yaml
 # mkdocs documentation
 /site
 
+# Local run outputs
+output/
+
 # mypy
 .mypy_cache/
 .dmypy.json
