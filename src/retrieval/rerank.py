@@ -3,8 +3,7 @@
 import json
 import os
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 from openai import OpenAI
 
@@ -43,7 +42,15 @@ class LLMReranker(BaseReranker):
         self.max_tokens = llm_config.get("max_tokens", 256)
         self.temperature = llm_config.get("temperature", 0.0)
 
+        # Bound rerank input size
+        self.max_candidates = rerank_config.get("max_candidates", 30)
+        self.max_chars_per_candidate = rerank_config.get("max_chars_per_candidate", 1200)
+
         if self.provider == "lmstudio":
+            if not self.model:
+                raise ValueError(
+                    "LM Studio reranker requires retrieval.rerank.llm.model when rerank is enabled."
+                )
             self.client = LMStudioClient(config)
         elif self.provider == "openai":
             embedding_config = config.get("embedding", {})
@@ -65,62 +72,62 @@ class LLMReranker(BaseReranker):
         if not results:
             return results
 
+        # Bound reranker work to avoid context blowups and truncation.
+        max_candidates = int(self.max_candidates) if self.max_candidates else len(results)
+        max_chars = int(self.max_chars_per_candidate) if self.max_chars_per_candidate else None
+        candidates = results[:max_candidates]
+
+        # Use compact integer indices in the rerank payload to reduce output size
+        # and avoid JSON truncation when document IDs are long.
+        idx_to_id: Dict[int, str] = {}
+        compact_results = []
+        for idx, (doc_id, text, _, _) in enumerate(candidates):
+            idx_to_id[idx] = doc_id
+            compact_results.append(
+                {
+                    "idx": idx,
+                    "text": (text[:max_chars] if (max_chars and isinstance(text, str)) else text),
+                }
+            )
+
         payload = {
             "query": query,
-            "results": [
-                {
-                    "id": doc_id,
-                    "text": text,
-                }
-                for doc_id, text, _, _ in results
-            ],
+            "results": compact_results,
         }
 
         prompt = (
             "You are a relevance reranker. "
             "Score each candidate from 0 to 100 based on relevance to the query. "
-            "Return strict JSON as {\"scores\": [{\"id\": ..., \"score\": ...}, ...]}."
-        )
-
-        payload_text = json.dumps(payload, ensure_ascii=True)
-        self._log_debug(
-            "rerank_request",
-            {
-                "model": self.model,
-                "results_count": len(results),
-                "query": query,
-                "prompt": prompt,
-                "payload_chars": len(payload_text),
-                "payload_preview": self._truncate(payload_text),
-            },
+            "Return strict JSON as {\"scores\": [{\"idx\": <int>, \"score\": <int>}, ...]}. "
+            "Do not include any extra text."
         )
 
         response_text = self._invoke_model(prompt, payload)
-        self._log_debug(
-            "rerank_response_raw",
-            {
-                "response_chars": len(response_text or ""),
-                "response_preview": self._truncate(response_text or ""),
-            },
-        )
-        response_text = self._clean_response_text(response_text)
 
-        try:
-            parsed = json.loads(response_text)
-        except json.JSONDecodeError as exc:
-            self._log_debug(
-                "rerank_parse_error",
-                {
-                    "error": str(exc),
-                    "response_preview": self._truncate(response_text),
-                },
-            )
-            raise ValueError(f"Invalid JSON from reranker: {response_text}") from exc
+        parsed = self._parse_scores_json(response_text)
+        if parsed is None:
+            raise ValueError(f"Invalid JSON from reranker: {response_text}")
 
-        scores = {item["id"]: item.get("score", 0) for item in parsed.get("scores", [])}
+        # Support either idx-based or id-based responses.
+        scores_by_id: Dict[str, int] = {}
+        for item in parsed.get("scores", []):
+            if not isinstance(item, dict):
+                continue
+            if "idx" in item:
+                try:
+                    idx = int(item["idx"])
+                except Exception:
+                    continue
+                doc_id = idx_to_id.get(idx)
+                if not doc_id:
+                    continue
+                scores_by_id[doc_id] = item.get("score", 0)
+            elif "id" in item:
+                scores_by_id[item["id"]] = item.get("score", 0)
+
         reranked = []
         for doc_id, text, score, metadata in results:
-            rerank_score = scores.get(doc_id, 0)
+            rerank_score = scores_by_id.get(doc_id, 0)
             new_metadata = dict(metadata)
             new_metadata["rerank_score"] = rerank_score
             reranked.append((doc_id, text, score, new_metadata))
@@ -128,21 +135,41 @@ class LLMReranker(BaseReranker):
         reranked.sort(key=lambda item: item[3].get("rerank_score", 0), reverse=True)
         return reranked
 
-    def _clean_response_text(self, response_text: str) -> str:
-        """Strip reasoning tags and isolate JSON payload."""
+    def _parse_scores_json(self, response_text: str) -> Optional[Dict[str, Any]]:
+        """Best-effort parse of reranker JSON.
+
+        Some models/endpoints may prepend/append text or truncate output.
+        We try:
+        1) direct json.loads
+        2) extract substring between first '{' and last '}' and parse
+        """
         if not response_text:
-            return response_text
+            return None
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError:
+            pass
 
-        # Remove <think>...</think> blocks used by some models.
-        cleaned = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL)
-
-        # Extract the first JSON object if extra text remains.
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
+        start = response_text.find("{")
+        end = response_text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return cleaned[start:end + 1].strip()
+            candidate = response_text[start : end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
 
-        return cleaned.strip()
+        # Last-resort: regex-extract (idx, score) pairs from partially-truncated output.
+        # This is intentionally narrow to the expected schema.
+        pairs = re.findall(r"\{\s*\"idx\"\s*:\s*(\d+)\s*,\s*\"score\"\s*:\s*(\d+)\s*\}", response_text)
+        if pairs:
+            return {
+                "scores": [
+                    {"idx": int(idx), "score": int(score)} for idx, score in pairs
+                ]
+            }
+
+        return None
 
     def _invoke_model(self, prompt: str, payload: Dict[str, Any]) -> str:
         if self.provider == "lmstudio":
@@ -164,21 +191,3 @@ class LLMReranker(BaseReranker):
             temperature=self.temperature,
         )
         return response.choices[0].message.content
-
-    def _log_debug(self, event: str, payload: Dict[str, Any]) -> None:
-        log_path = os.getenv("RERANK_DEBUG_LOG")
-        if not log_path:
-            return
-        record = {"ts": datetime.utcnow().isoformat() + "Z", "event": event}
-        record.update(payload)
-        try:
-            with open(log_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
-
-    @staticmethod
-    def _truncate(text: str, limit: int = 2000) -> str:
-        if len(text) <= limit:
-            return text
-        return text[:limit] + "...(truncated)"

@@ -106,6 +106,7 @@ def interactive_mode(pipeline):
 
             # Run query
             results = pipeline.query(query, k=k)
+            # Note: interactive mode does not currently expose rerank/diversity overrides.
             print_results(results, show_full_text=show_full_text)
 
         except KeyboardInterrupt:
@@ -137,9 +138,69 @@ def main():
         help="Number of results to return (default: 5)",
     )
     parser.add_argument(
+        "--k-recall",
+        type=int,
+        default=None,
+        help="Override retrieval.k_recall (how many candidates to recall before rerank/diversity).",
+    )
+    parser.add_argument(
         "--full",
         action="store_true",
         help="Show full text instead of preview",
+    )
+    parser.add_argument(
+        "--no-rerank",
+        action="store_true",
+        help="Disable reranking for this run (overrides config)",
+    )
+    parser.add_argument(
+        "--no-diversity",
+        action="store_true",
+        help="Disable diversity/dedupe for this run (allows many chunks per source)",
+    )
+    parser.add_argument(
+        "--max-per-source",
+        type=int,
+        default=None,
+        help="Override diversity max_per_key (max results per source/title). Example: 1 for broad scan, 10 for deep dive.",
+    )
+
+    # Filters (deep dives)
+    parser.add_argument(
+        "--source-type",
+        type=str,
+        default=None,
+        help="Restrict search to a source_type (e.g. zotero_fulltext, zotero_note, zotero_annotation, obsidian)",
+    )
+    parser.add_argument(
+        "--zotero-key",
+        type=str,
+        default=None,
+        help="Restrict search to a single Zotero item key (exact match)",
+    )
+    parser.add_argument(
+        "--author",
+        type=str,
+        default=None,
+        help="Post-filter results where 'authors' contains this string (case-insensitive)",
+    )
+    parser.add_argument(
+        "--title-contains",
+        type=str,
+        default=None,
+        help="Post-filter results where 'title' contains this string (case-insensitive)",
+    )
+    parser.add_argument(
+        "--year-min",
+        type=int,
+        default=None,
+        help="Restrict results to year >= year-min (when year metadata is available)",
+    )
+    parser.add_argument(
+        "--year-max",
+        type=int,
+        default=None,
+        help="Restrict results to year <= year-max (when year metadata is available)",
     )
 
     args = parser.parse_args()
@@ -164,7 +225,20 @@ def main():
         if args.query:
             # Single query mode
             query_text = " ".join(args.query)
-            results = pipeline.query(query_text, k=args.k)
+            results = pipeline.query(
+                query_text,
+                k=args.k,
+                rerank_enabled=(False if args.no_rerank else None),
+                diversity_enabled=(False if args.no_diversity else None),
+                diversity_max_per_key=args.max_per_source,
+                k_recall_override=args.k_recall,
+                source_type=args.source_type,
+                zotero_key=args.zotero_key,
+                author_contains=args.author,
+                title_contains=args.title_contains,
+                year_min=args.year_min,
+                year_max=args.year_max,
+            )
             print_results(results, show_full_text=args.full)
         else:
             # Interactive mode

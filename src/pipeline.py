@@ -2,10 +2,7 @@
 
 import hashlib
 import queue
-import json
-import os
 import threading
-import time
 import time
 import traceback
 from pathlib import Path
@@ -19,9 +16,10 @@ from .factories.reranker_factory import create_reranker
 from .indexing import DocumentStatus, IndexingProgress
 from .processing.id_utils import attach_parent_ids, stable_chunk_id
 from .processing.oversize_guard import create_oversize_guard
-from .processing.quality_filter import create_quality_filter_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
+from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
+from .retrieval.filters import apply_post_filters, build_where_filter
 from .sources.base import ProgressCallback
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
@@ -49,7 +47,6 @@ class ResearchRAGPipeline:
         self.sources = self._initialize_sources()
         self.chunker = create_chunker(self.config)
         self.oversize_guard = create_oversize_guard(self.config)
-        self.quality_filter = create_quality_filter_guard(self.config)
         self.embedder = create_embedder(self.config)
         self.reranker = create_reranker(self.config)
         self.vector_store = ChromaVectorStore(self.config)
@@ -225,21 +222,7 @@ class ResearchRAGPipeline:
                 # Step 1: Chunk documents
                 self.progress_display.set_stage(IndexingStage.CHUNKING, 3, 4)
                 self.progress_display.set_activity(f"Chunking batch {batch_num}/{total_batches}...")
-                chunk_start = time.perf_counter()
                 chunks, chunk_metadatas, chunk_ids = self._chunk_batch(pending_docs)
-                chunk_seconds = time.perf_counter() - chunk_start
-
-                quality_seconds = 0.0
-                if self.quality_filter.is_active():
-                    quality_start = time.perf_counter()
-                    chunks, chunk_metadatas, chunk_ids = self.quality_filter.process_with_ids(
-                        chunks,
-                        chunk_metadatas,
-                        chunk_ids,
-                        batch_label=f"batch {batch_num}/{total_batches}",
-                    )
-                    self.quality_filter.write_report()
-                    quality_seconds = time.perf_counter() - quality_start
 
                 if not chunks:
                     continue
@@ -260,15 +243,11 @@ class ResearchRAGPipeline:
 
                 # Step 2: Generate embeddings (+ store, if pipelined)
                 self.progress_display.set_stage(IndexingStage.EMBEDDING, 3, 4)
-                embed_seconds = 0.0
-                store_seconds = 0.0
-                embed_store_seconds = 0.0
                 if self._should_use_embed_store_pipeline():
                     self.progress_display.set_activity(
                         f"Batch {batch_num} of {total_batches} Embedding + storing {len(chunks)} chunks"
                     )
                     try:
-                        embed_store_start = time.perf_counter()
                         self._process_embeddings_and_store(
                             chunks,
                             chunk_metadatas,
@@ -276,7 +255,6 @@ class ResearchRAGPipeline:
                             batch_num,
                             total_batches,
                         )
-                        embed_store_seconds = time.perf_counter() - embed_store_start
                     except Exception as e:
                         for doc in pending_docs:
                             self.progress.set_document_status(
@@ -297,9 +275,7 @@ class ResearchRAGPipeline:
                         f"Batch {batch_num} of {total_batches} Embedding {len(chunks)} chunks"
                     )
                     try:
-                        embed_start = time.perf_counter()
                         embeddings = self._generate_embeddings(chunks)
-                        embed_seconds = time.perf_counter() - embed_start
                     except Exception as e:
                         for doc in pending_docs:
                             self.progress.set_document_status(
@@ -322,9 +298,7 @@ class ResearchRAGPipeline:
                         f"Batch {batch_num} of {total_batches} Storing {len(chunks)} chunks"
                     )
                     try:
-                        store_start = time.perf_counter()
                         self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
-                        store_seconds = time.perf_counter() - store_start
                     except Exception as e:
                         for doc in pending_docs:
                             self.progress.set_document_status(
@@ -340,18 +314,6 @@ class ResearchRAGPipeline:
                         doc.doc_id,
                         DocumentStatus.STORED,
                     )
-
-                self._log_batch_metrics(
-                    batch_num=batch_num,
-                    total_batches=total_batches,
-                    doc_count=len(pending_docs),
-                    chunk_count=len(chunks),
-                    chunk_seconds=chunk_seconds,
-                    quality_seconds=quality_seconds,
-                    embed_seconds=embed_seconds,
-                    store_seconds=store_seconds,
-                    embed_store_seconds=embed_store_seconds,
-                )
 
             except Exception as e:
                 for doc in pending_docs:
@@ -442,60 +404,6 @@ class ResearchRAGPipeline:
         except Exception as e:
             print(f"[ERROR] Error generating embeddings: {e}")
             raise
-
-    def _log_batch_metrics(
-        self,
-        batch_num: int,
-        total_batches: int,
-        doc_count: int,
-        chunk_count: int,
-        chunk_seconds: float,
-        quality_seconds: float,
-        embed_seconds: float,
-        store_seconds: float,
-        embed_store_seconds: float,
-    ) -> None:
-        total_seconds = chunk_seconds + quality_seconds
-        if embed_store_seconds > 0:
-            total_seconds += embed_store_seconds
-        else:
-            total_seconds += embed_seconds + store_seconds
-
-        msg = (
-            f"[METRICS] Batch {batch_num}/{total_batches} "
-            f"docs={doc_count} chunks={chunk_count} "
-            f"chunk={chunk_seconds:.2f}s quality={quality_seconds:.2f}s "
-        )
-        if embed_store_seconds > 0:
-            msg += f"embed_store={embed_store_seconds:.2f}s "
-        else:
-            msg += f"embed={embed_seconds:.2f}s store={store_seconds:.2f}s "
-
-        msg += f"total={total_seconds:.2f}s"
-        print(msg)
-
-        log_path = os.getenv("PIPELINE_METRICS_LOG")
-        if not log_path:
-            return
-
-        record = {
-            "batch_num": batch_num,
-            "total_batches": total_batches,
-            "doc_count": doc_count,
-            "chunk_count": chunk_count,
-            "chunk_seconds": round(chunk_seconds, 6),
-            "quality_seconds": round(quality_seconds, 6),
-            "embed_seconds": round(embed_seconds, 6),
-            "store_seconds": round(store_seconds, 6),
-            "embed_store_seconds": round(embed_store_seconds, 6),
-            "total_seconds": round(total_seconds, 6),
-        }
-
-        try:
-            with open(log_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
 
     def _should_use_embed_store_pipeline(self) -> bool:
         """Check if embed/store pipelining is enabled."""
@@ -728,20 +636,30 @@ class ResearchRAGPipeline:
             self.vector_store.collection = self.vector_store._get_or_create_collection()
 
     def query(
-        self, 
-        query_text: str, 
+        self,
+        query_text: str,
         k: int = 5,
-        expand_parents: Optional[int] = None,
-        top_n: Optional[int] = None,
-    ) -> List[Any]:
+        *,
+        rerank_enabled: Optional[bool] = None,
+        diversity_enabled: Optional[bool] = None,
+        diversity_max_per_key: Optional[int] = None,
+        # Retrieval knobs
+        k_recall_override: Optional[int] = None,
+        # Filters (deep dives)
+        source_type: Optional[str] = None,
+        zotero_key: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        author_contains: Optional[str] = None,
+        title_contains: Optional[str] = None,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> List:
         """
         Query the vector store.
 
         Args:
             query_text: Query string
             k: Number of results to return
-            expand_parents: Optional override for max_parents in context expansion (None = use config)
-            top_n: Optional override for rerank top_n (None = use config)
 
         Returns:
             List of search results
@@ -752,34 +670,67 @@ class ResearchRAGPipeline:
         query_embedding = self.embedder.embed_query(query_text)
 
         retrieval_config = self.config.get("retrieval", {})
-        k_recall = retrieval_config.get("k_recall", 50)
+        k_recall_cfg = retrieval_config.get("k_recall", 50)
+        k_recall = int(k_recall_override) if k_recall_override is not None else int(k_recall_cfg)
         k_return = k
 
+        # Build store-level filter (Chroma where)
+        where_filter = build_where_filter(
+            source_type=source_type,
+            zotero_key=zotero_key,
+            year_min=year_min,
+            year_max=year_max,
+            extra_where=where,
+        )
+
+        # If we're applying post-filters (contains), over-recall to preserve enough hits.
+        k_recall_eff = k_recall
+        if author_contains or title_contains:
+            k_recall_eff = min(max(k_recall * 5, k_recall), 500)
+
         # Search vector store
-        results = self.vector_store.search(query_embedding, k=k_recall)
+        results = self.vector_store.search(query_embedding, k=k_recall_eff, filter=where_filter)
+
+        # Post-filters (substring match)
+        if author_contains or title_contains:
+            results = apply_post_filters(
+                results,
+                author_contains=author_contains,
+                title_contains=title_contains,
+            )
 
         rerank_config = retrieval_config.get("rerank", {})
-        if rerank_config.get("enabled", False):
-            results = self.reranker.rerank(query_text, results)
-            # Use query-time top_n override if provided, otherwise config value
-            rerank_top_n = top_n if top_n is not None else rerank_config.get("top_n")
-            limit = k_return if rerank_top_n is None else min(k_return, rerank_top_n)
+        rerank_on = rerank_config.get("enabled", False) if rerank_enabled is None else bool(rerank_enabled)
+        if rerank_on:
+            try:
+                results = self.reranker.rerank(query_text, results)
+            except Exception as e:
+                # Never hard-fail a query because reranking failed.
+                print(f"[WARN] Rerank failed; returning un-reranked results. Error: {e}")
+
+        # Stage 2: diversity / de-duplication (implicit-first)
+        diversity_cfg = retrieval_config.get("diversity", {})
+        diversity_on = diversity_cfg.get("enabled", False) if diversity_enabled is None else bool(diversity_enabled)
+        if diversity_on:
+            key_priority = diversity_cfg.get(
+                "key_priority", ["source_id", "zotero_key", "title"]
+            )
+            max_per_key = int(diversity_cfg.get("max_per_key", 2))
+            if diversity_max_per_key is not None:
+                max_per_key = int(diversity_max_per_key)
+            results = apply_diversity(results, key_priority=key_priority, max_per_key=max_per_key)
+
+        # Final slicing
+        if rerank_on:
+            top_n = rerank_config.get("top_n")
+            limit = k_return if top_n is None else min(k_return, top_n)
             results = results[:limit]
         else:
             results = results[:k_return]
 
         expand_config = retrieval_config.get("expand", {})
-        # Use query-time expand_parents override if provided
-        if expand_parents is not None:
-            # If expand_parents is 0, skip expansion entirely
-            should_expand = expand_parents > 0
-            actual_max_parents = expand_parents
-        else:
-            # Use config values
-            should_expand = expand_config.get("include_parent", False)
-            actual_max_parents = expand_config.get("max_parents", 1)
-        
-        if should_expand:
-            results = attach_parent_context(results, self.vector_store, max_parents=actual_max_parents)
+        if expand_config.get("include_parent", False):
+            max_parents = expand_config.get("max_parents", 1)
+            results = attach_parent_context(results, self.vector_store, max_parents=max_parents)
 
         return results

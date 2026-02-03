@@ -154,12 +154,23 @@ retrieval:
   rerank:
     enabled: true
     type: llm  # none | llm | cross_encoder
+    # If set, limit reranked list before final k-return slice.
     top_n: 8
+    # Bound reranker input to avoid context blowups / truncation
+    max_candidates: 30
+    max_chars_per_candidate: 1200
     llm:
       provider: lmstudio  # lmstudio | openai
-      model: null
-      max_tokens: 256
+      # Must be set when rerank.enabled=true
+      model: ibm/granite-4-micro
+      max_tokens: 512
       temperature: 0.0
+  diversity:
+    enabled: true
+    # Grouping key preference for limiting repeats.
+    # source_id is added during indexing; zotero_key/title are fallbacks.
+    key_priority: ["source_id", "zotero_key", "title"]
+    max_per_key: 2
   expand:
     include_parent: true
     max_parents: 1

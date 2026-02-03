@@ -1,17 +1,31 @@
-# Welcome to MkDocs
+# Re-Searcher
 
-For full documentation visit [mkdocs.org](https://www.mkdocs.org).
+Re-Searcher is a local-first research indexing + retrieval toolkit.
 
-## Commands
+It’s designed to:
+- ingest a research library (Zotero + Obsidian + local files)
+- chunk + embed content
+- store vectors + rich metadata
+- support practical research workflows: “find sources”, “deep dive”, “build a brief”, and RAG-style answering
 
-* `mkdocs new [dir-name]` - Create a new project.
-* `mkdocs serve` - Start the live-reloading docs server.
-* `mkdocs build` - Build the documentation site.
-* `mkdocs -h` - Print help message and exit.
+## Where to start
 
-## Project layout
+- **Quick start / day-to-day usage** → [Usage Guide](USAGE_GUIDE.md)
+- **Research workflows** → [Workflows](WORKFLOWS.md)
+- **MCP server** (connect tools/agents to Re-Searcher) → [MCP Server](MCP_SERVER.md)
+- **Integrations** (Zotero, Obsidian, etc.) → [Integrations](integrations.md)
+- **System design / query & indexing pipeline** → [Specification](specification.md)
 
-    mkdocs.yml    # The configuration file.
-    docs/
-        index.md  # The documentation homepage.
-        ...       # Other markdown pages, images and other files.
+## Documentation site
+
+Run the docs locally:
+
+```bash
+mkdocs serve
+```
+
+Build a static site:
+
+```bash
+mkdocs build
+```

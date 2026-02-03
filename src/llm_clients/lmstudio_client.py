@@ -1,6 +1,7 @@
 """LM Studio chat-completions client."""
 
 from typing import Any, Dict, Optional
+import os
 
 from openai import OpenAI
 
@@ -17,6 +18,9 @@ class LMStudioClient:
         base_url = lmstudio_config.get("base_url") or embedding_config.get("endpoint")
         timeout = lmstudio_config.get("timeout_seconds") or embedding_config.get("timeout") or 60
         api_key = lmstudio_config.get("api_key") or embedding_config.get("api_key")
+        # Allow ${ENV_VAR} style indirection
+        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
+            api_key = os.getenv(api_key[2:-1])
 
         if not base_url:
             base_url = "http://localhost:1234/v1"

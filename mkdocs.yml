@@ -16,5 +16,10 @@ theme:
 
 nav:
   - Home: index.md
+  - Usage Guide: USAGE_GUIDE.md
+  - Workflows: WORKFLOWS.md
+  - MCP Server: MCP_SERVER.md
   - Specification: specification.md
   - Integrations: integrations.md
+  - Testing (at a glance): TESTING_AT_A_GLANCE.md
+  - Tracking: TRACKING.md

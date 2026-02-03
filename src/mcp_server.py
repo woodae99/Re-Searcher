@@ -9,11 +9,8 @@ It's designed as a thin wrapper around the existing pipeline to ensure:
 """
 
 import asyncio
-import json
-import os
 import sys
-import time
-from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -96,26 +93,55 @@ class ResearchMCPServer:
                                 "minimum": 1,
                                 "maximum": 50,
                             },
-                            "expand_parents": {
+                            "k_recall": {
                                 "type": "integer",
-                                "description": (
-                                    "Number of parent levels to expand for context. "
-                                    "0 = no expansion, 1 = immediate parent, 2 = parent + grandparent. "
-                                    "If not specified, uses config default. "
-                                    "Use 0 for quick lookups, 1-2 for detailed context."
-                                ),
-                                "minimum": 0,
-                                "maximum": 3,
+                                "description": "Override retrieval.k_recall (how many candidates to recall before rerank/diversity). Useful to bound post-filters.",
+                                "minimum": 1,
+                                "maximum": 1000,
                             },
-                            "top_n": {
+                            "no_rerank": {
+                                "type": "boolean",
+                                "description": "Disable reranking for this call (falls back to vector similarity ordering).",
+                                "default": False,
+                            },
+                            "no_diversity": {
+                                "type": "boolean",
+                                "description": "Disable diversity/dedupe for this call (allows many chunks from the same source).",
+                                "default": False,
+                            },
+                            "max_per_source": {
                                 "type": "integer",
-                                "description": (
-                                    "Override reranking top_n limit. "
-                                    "If not specified, uses config default. "
-                                    "Useful to get more or fewer reranked results."
-                                ),
+                                "description": "Override diversity max_per_key (max results per source_id/zotero_key/title). Useful for deep dives.",
                                 "minimum": 1,
                                 "maximum": 50,
+                            },
+                            "source_type": {
+                                "type": "string",
+                                "description": "Restrict to a source_type (e.g. zotero_fulltext, zotero_note, zotero_annotation, obsidian)",
+                            },
+                            "zotero_key": {
+                                "type": "string",
+                                "description": "Restrict to a single Zotero item key (exact match)",
+                            },
+                            "author": {
+                                "type": "string",
+                                "description": "Post-filter results where 'authors' contains this string (case-insensitive)",
+                            },
+                            "title_contains": {
+                                "type": "string",
+                                "description": "Post-filter results where 'title' contains this string (case-insensitive)",
+                            },
+                            "year_min": {
+                                "type": "integer",
+                                "description": "Restrict results to year >= year_min (when year metadata is available)",
+                            },
+                            "year_max": {
+                                "type": "integer",
+                                "description": "Restrict results to year <= year_max (when year metadata is available)",
+                            },
+                            "where": {
+                                "type": "object",
+                                "description": "Advanced: raw Chroma 'where' dict to AND with other filters. Use sparingly.",
                             },
                         },
                         "required": ["query"],
@@ -206,30 +232,37 @@ class ResearchMCPServer:
             # Extract arguments
             query = arguments.get("query")
             k = arguments.get("k", 5)
-            expand_parents = arguments.get("expand_parents")
-            top_n = arguments.get("top_n")
+            k_recall = arguments.get("k_recall")
+            no_rerank = bool(arguments.get("no_rerank", False))
+            no_diversity = bool(arguments.get("no_diversity", False))
+            max_per_source = arguments.get("max_per_source")
+
+            source_type = arguments.get("source_type")
+            zotero_key = arguments.get("zotero_key")
+            author = arguments.get("author")
+            title_contains = arguments.get("title_contains")
+            year_min = arguments.get("year_min")
+            year_max = arguments.get("year_max")
+            where = arguments.get("where")
 
             if not query:
                 raise ValueError("Query parameter is required")
 
-            self._log_debug(
-                "mcp_tool_call",
-                {
-                    "tool": "search_research_library", 
-                    "query": query, 
-                    "k": k,
-                    "expand_parents": expand_parents,
-                    "top_n": top_n,
-                },
-            )
-            start_time = time.perf_counter()
-
-            # Execute search using existing pipeline with optional overrides
+            # Execute search using existing pipeline
             results = self.pipeline.query(
-                query, 
+                query,
                 k=k,
-                expand_parents=expand_parents,
-                top_n=top_n,
+                k_recall_override=k_recall,
+                rerank_enabled=(False if no_rerank else None),
+                diversity_enabled=(False if no_diversity else None),
+                diversity_max_per_key=max_per_source,
+                source_type=source_type,
+                zotero_key=zotero_key,
+                year_min=year_min,
+                year_max=year_max,
+                author_contains=author,
+                title_contains=title_contains,
+                where=where,
             )
 
             # Format results using separate formatter
@@ -281,48 +314,14 @@ class ResearchMCPServer:
 
                 # The actual text
                 response_parts.append(f"\nText:\n{result['text']}")
-
-                # Parent context if expanded
-                if "parent_text" in result:
-                    response_parts.append("\n--- Parent Context ---")
-                    parent_meta = result.get("parent_metadata", {})
-                    if "chunk_level" in parent_meta:
-                        response_parts.append(f"Parent Level: {parent_meta['chunk_level']}")
-                    if "parent_id" in parent_meta:
-                        response_parts.append(f"Grandparent: {parent_meta['parent_id']}")
-                    response_parts.append(f"\n{result['parent_text']}")
-                
-                # Multiple parent contexts (for list-based parent_id)
-                if "parent_contexts" in result:
-                    for idx, parent_ctx in enumerate(result["parent_contexts"], 1):
-                        response_parts.append(f"\n--- Parent Context #{idx} ---")
-                        p_meta = parent_ctx.get("metadata", {})
-                        if "chunk_level" in p_meta:
-                            response_parts.append(f"Parent Level: {p_meta['chunk_level']}")
-                        response_parts.append(f"Parent ID: {parent_ctx['id']}")
-                        response_parts.append(f"\n{parent_ctx['text']}")
-
                 response_parts.append("")  # blank line
 
             response_text = "\n".join(response_parts)
 
-            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-            self._log_debug(
-                "mcp_tool_result",
-                {
-                    "tool": "search_research_library",
-                    "results_count": len(formatted_results),
-                    "elapsed_ms": elapsed_ms,
-                },
-            )
             return [TextContent(type="text", text=response_text)]
 
         except Exception as e:
             error_info = format_error_response(e)
-            self._log_debug(
-                "mcp_tool_error",
-                {"tool": "search_research_library", "error": str(e)},
-            )
             error_text = (
                 f"Error executing search: {error_info['error']}\n"
                 f"Message: {error_info['message']}"
@@ -346,15 +345,6 @@ class ResearchMCPServer:
 
             chunk_id = arguments.get("chunk_id")
             include_parent = arguments.get("include_parent", True)
-
-            self._log_debug(
-                "mcp_tool_call",
-                {
-                    "tool": "get_chunk_context",
-                    "chunk_id": chunk_id,
-                    "include_parent": include_parent,
-                },
-            )
 
             if not chunk_id:
                 raise ValueError("chunk_id parameter is required")
@@ -427,27 +417,11 @@ class ResearchMCPServer:
 
         except Exception as e:
             error_info = format_error_response(e)
-            self._log_debug(
-                "mcp_tool_error",
-                {"tool": "get_chunk_context", "error": str(e)},
-            )
             error_text = (
                 f"Error getting chunk context: {error_info['error']}\n"
                 f"Message: {error_info['message']}"
             )
             return [TextContent(type="text", text=error_text)]
-
-    def _log_debug(self, event: str, payload: Dict[str, Any]) -> None:
-        log_path = os.getenv("MCP_DEBUG_LOG")
-        if not log_path:
-            return
-        record = {"ts": datetime.utcnow().isoformat() + "Z", "event": event}
-        record.update(payload)
-        try:
-            with open(log_path, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=True) + "\n")
-        except Exception:
-            pass
 
     async def run(self):
         """Run the MCP server using stdio transport."""
