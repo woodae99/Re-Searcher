@@ -1,5 +1,7 @@
 """LM Studio embedding provider using OpenAI-compatible API."""
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from typing import List
 import os
 
@@ -26,7 +28,15 @@ class LMStudioEmbedding(EmbeddingProvider):
             or embedding_config.get("model")
             or "text-embedding-bge-m3"
         )
-        self.batch_size = lmstudio_config.get("batch_size", embedding_config.get("batch_size", 32))
+        self.batch_size = int(lmstudio_config.get("batch_size", embedding_config.get("batch_size", 32)))
+        self.batch_size = max(1, self.batch_size)
+        self.max_concurrent_requests = int(
+            lmstudio_config.get(
+                "max_concurrent_requests",
+                embedding_config.get("max_concurrent_requests", 1),
+            )
+        )
+        self.max_concurrent_requests = max(1, self.max_concurrent_requests)
         self.timeout = lmstudio_config.get("timeout_seconds", embedding_config.get("timeout", 30))
         self.api_key = lmstudio_config.get("api_key") or embedding_config.get("api_key")
         # Allow ${ENV_VAR} style indirection (common in config files)
@@ -41,6 +51,34 @@ class LMStudioEmbedding(EmbeddingProvider):
 
         # Cache dimension after first embedding
         self._dimension = None
+        self._dimension_lock = Lock()
+
+    def _cache_dimension(self, embeddings: List[List[float]]) -> None:
+        """Cache the embedding dimension from the first successful response."""
+        if not embeddings:
+            return
+        with self._dimension_lock:
+            if self._dimension is None:
+                self._dimension = len(embeddings[0])
+
+    def _embed_batch(self, batch: List[str]) -> List[List[float]]:
+        response = self.client.embeddings.create(
+            model=self.model,
+            input=batch,
+        )
+
+        response_data = response.data
+        if response_data and hasattr(response_data[0], "index"):
+            response_data = sorted(response_data, key=lambda item: item.index)
+
+        batch_embeddings = [item.embedding for item in response_data]
+        if len(batch_embeddings) != len(batch):
+            raise RuntimeError(
+                f"Embedding response length mismatch: expected {len(batch)}, got {len(batch_embeddings)}"
+            )
+
+        self._cache_dimension(batch_embeddings)
+        return batch_embeddings
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """
@@ -55,31 +93,47 @@ class LMStudioEmbedding(EmbeddingProvider):
         if not texts:
             return []
 
+        batches = [
+            (batch_idx, texts[i : i + self.batch_size])
+            for batch_idx, i in enumerate(range(0, len(texts), self.batch_size))
+        ]
+        batch_results: List[List[List[float]] | None] = [None] * len(batches)
+        failed_batches = []
+
+        if self.max_concurrent_requests == 1 or len(batches) == 1:
+            for batch_idx, batch in batches:
+                try:
+                    batch_results[batch_idx] = self._embed_batch(batch)
+                except Exception as e:
+                    print(f"❌ Error generating embeddings for batch {batch_idx}: {e}")
+                    failed_batches.append((batch_idx, batch, e))
+        else:
+            worker_count = min(self.max_concurrent_requests, len(batches))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_to_batch = {
+                    executor.submit(self._embed_batch, batch): (batch_idx, batch)
+                    for batch_idx, batch in batches
+                }
+                for future in as_completed(future_to_batch):
+                    batch_idx, batch = future_to_batch[future]
+                    try:
+                        batch_results[batch_idx] = future.result()
+                    except Exception as e:
+                        print(f"❌ Error generating embeddings for batch {batch_idx}: {e}")
+                        failed_batches.append((batch_idx, batch, e))
+
+        if failed_batches:
+            if self._dimension is None:
+                first_error = failed_batches[0][2]
+                raise RuntimeError("Cannot determine embedding dimension") from first_error
+            zero_vector = [0.0] * self._dimension
+            for batch_idx, batch, _ in failed_batches:
+                batch_results[batch_idx] = [zero_vector.copy() for _ in batch]
+
         embeddings = []
-
-        # Process in batches
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            try:
-                response = self.client.embeddings.create(
-                    model=self.model,
-                    input=batch,
-                )
-
-                batch_embeddings = [item.embedding for item in response.data]
+        for batch_embeddings in batch_results:
+            if batch_embeddings is not None:
                 embeddings.extend(batch_embeddings)
-
-                # Cache dimension from first response
-                if self._dimension is None and batch_embeddings:
-                    self._dimension = len(batch_embeddings[0])
-
-            except Exception as e:
-                print(f"❌ Error generating embeddings for batch {i // self.batch_size}: {e}")
-                # Return zero vectors for failed batch
-                if self._dimension:
-                    embeddings.extend([[0.0] * self._dimension] * len(batch))
-                else:
-                    raise RuntimeError("Cannot determine embedding dimension") from e
 
         return embeddings
 
@@ -102,8 +156,7 @@ class LMStudioEmbedding(EmbeddingProvider):
             embedding = response.data[0].embedding
 
             # Cache dimension
-            if self._dimension is None:
-                self._dimension = len(embedding)
+            self._cache_dimension([embedding])
 
             return embedding
 

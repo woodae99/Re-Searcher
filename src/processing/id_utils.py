@@ -1,13 +1,21 @@
 """Utilities for stable chunk ID generation."""
 
 import hashlib
+from typing import Optional
 
 
-def stable_chunk_id(source_id: str, level: str, ordinal: int, chunk_text: str) -> str:
+def stable_chunk_id(
+    source_id: str,
+    level: str,
+    ordinal: int,
+    chunk_text: str,
+    variant: Optional[str] = None,
+) -> str:
     """Generate stable chunk ID using content-derived hash."""
     snippet = chunk_text[:256]
     snippet_hash = hashlib.sha1(snippet.encode("utf-8")).hexdigest()
-    composite = f"{source_id}|{level}|{ordinal}|{snippet_hash}"
+    variant_part = "" if variant is None else str(variant)
+    composite = f"{source_id}|{level}|{ordinal}|{variant_part}|{snippet_hash}"
     digest = hashlib.sha1(composite.encode("utf-8")).hexdigest()
     return f"{source_id}-{level}-{ordinal}-{digest}"
 

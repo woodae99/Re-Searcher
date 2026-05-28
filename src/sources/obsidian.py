@@ -1,5 +1,7 @@
 """Obsidian vault data source for extracting markdown notes."""
 
+import fnmatch
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
@@ -36,11 +38,11 @@ class ObsidianSource(DataSource):
             return True
 
         if not self.vault_path:
-            print("⚠️  Obsidian vault path not configured")
+            print("[WARN] Obsidian vault path not configured")
             return False
 
         if not self.vault_path.exists():
-            print(f"⚠️  Obsidian vault not found: {self.vault_path}")
+            print(f"[WARN] Obsidian vault not found: {self.vault_path}")
             return False
 
         return True
@@ -55,13 +57,15 @@ class ObsidianSource(DataSource):
         if not self.validate_config():
             return
 
-        include_folders = self.obsidian_config.get("include_folders", [])
-        exclude_folders = set(self.obsidian_config.get("exclude_folders", []))
+        include_folders = self._normalize_folder_list(
+            self.obsidian_config.get("include_folders", [])
+        )
+        exclude_patterns = self._get_exclude_patterns()
 
         # Find all markdown files
-        md_files = self._find_markdown_files(include_folders, exclude_folders)
+        md_files = self._find_markdown_files(include_folders, exclude_patterns)
         total_files = len(md_files)
-        print(f"📔 Found {total_files} markdown files in Obsidian vault")
+        print(f"[INFO] Found {total_files} markdown files in Obsidian vault")
 
         # Emit source initialization
         self._emit_progress("source_init", total=total_files)
@@ -102,7 +106,7 @@ class ObsidianSource(DataSource):
         self._emit_progress("source_complete")
 
     def _find_markdown_files(
-        self, include_folders: List[str], exclude_folders: set
+        self, include_folders: List[str], exclude_patterns: List[str]
     ) -> List[Path]:
         """Find all markdown files in the vault."""
         md_files = []
@@ -120,20 +124,80 @@ class ObsidianSource(DataSource):
         # Filter out excluded folders
         filtered_files = []
         for md_file in md_files:
-            # Check if any part of the path is in excluded folders
             relative_path = md_file.relative_to(self.vault_path)
-            parts = relative_path.parts
-
-            excluded = False
-            for part in parts:
-                if part in exclude_folders:
-                    excluded = True
-                    break
-
-            if not excluded:
+            if not self._is_excluded(relative_path, exclude_patterns):
                 filtered_files.append(md_file)
 
         return filtered_files
+
+    def _normalize_folder_list(self, folders: Any) -> List[str]:
+        """Normalize configured folder lists and ignore blank entries."""
+        if not folders:
+            return []
+        if isinstance(folders, str):
+            folders = [folders]
+
+        normalized = []
+        for folder in folders:
+            value = str(folder).strip().replace("\\", "/").strip("/")
+            if value:
+                normalized.append(value)
+        return normalized
+
+    def _get_exclude_patterns(self) -> List[str]:
+        """Return configured excludes plus optional Obsidian user ignore filters."""
+        exclude_patterns = self._normalize_folder_list(
+            self.obsidian_config.get("exclude_folders", [])
+        )
+
+        if self.obsidian_config.get("use_obsidian_ignore_filters", False):
+            exclude_patterns.extend(self._load_obsidian_user_ignore_filters())
+
+        return list(dict.fromkeys(exclude_patterns))
+
+    def _load_obsidian_user_ignore_filters(self) -> List[str]:
+        """Load Obsidian's userIgnoreFilters from .obsidian/app.json."""
+        if not self.vault_path:
+            return []
+
+        app_json_path = self.vault_path / ".obsidian" / "app.json"
+        if not app_json_path.exists():
+            print(f"[WARN] Obsidian app.json not found: {app_json_path}")
+            return []
+
+        try:
+            with open(app_json_path, "r", encoding="utf-8") as f:
+                app_config = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[WARN] Could not read Obsidian userIgnoreFilters: {e}")
+            return []
+
+        ignore_filters = app_config.get("userIgnoreFilters", [])
+        if not isinstance(ignore_filters, list):
+            return []
+        return self._normalize_folder_list(ignore_filters)
+
+    def _is_excluded(self, relative_path: Path, exclude_patterns: List[str]) -> bool:
+        """Return True when a vault-relative path matches an exclude pattern."""
+        relative_posix = relative_path.as_posix()
+        path_parts = set(relative_path.parts)
+
+        for raw_pattern in exclude_patterns:
+            pattern = str(raw_pattern).strip().replace("\\", "/")
+            normalized = pattern.strip("/")
+            if not normalized:
+                continue
+
+            if normalized in path_parts:
+                return True
+
+            if relative_posix == normalized or relative_posix.startswith(f"{normalized}/"):
+                return True
+
+            if fnmatch.fnmatch(relative_posix, normalized):
+                return True
+
+        return False
 
     def _process_markdown_file(
         self, md_file: Path, link_map: Dict[str, str]

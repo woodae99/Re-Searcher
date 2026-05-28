@@ -80,6 +80,10 @@ def _contains(haystack: Any, needle: str) -> bool:
 def apply_post_filters(
     results: List[ResultTuple],
     *,
+    source_type: Optional[str] = None,
+    chunk_level: Optional[str] = None,
+    year_min: Optional[int] = None,
+    year_max: Optional[int] = None,
     author_contains: Optional[str] = None,
     title_contains: Optional[str] = None,
 ) -> List[ResultTuple]:
@@ -97,6 +101,23 @@ def apply_post_filters(
     out: List[ResultTuple] = []
     for doc_id, text, score, metadata in results:
         md = metadata or {}
+
+        if source_type and md.get("source_type") != source_type:
+            continue
+
+        if chunk_level and md.get("chunk_level") != chunk_level:
+            continue
+
+        if year_min is not None or year_max is not None:
+            year_value = md.get("year")
+            try:
+                year_int = int(str(year_value)[:4])
+            except (TypeError, ValueError):
+                continue
+            if year_min is not None and year_int < int(year_min):
+                continue
+            if year_max is not None and year_int > int(year_max):
+                continue
 
         if author_contains and not _contains(md.get("authors"), author_contains):
             continue

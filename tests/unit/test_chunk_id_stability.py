@@ -19,6 +19,13 @@ def test_stable_chunk_id_changes_with_text():
     assert base_id != changed_id
 
 
+def test_stable_chunk_id_changes_with_variant():
+    base_id = stable_chunk_id("doc-1", "mid", 0, "hello world", variant="0")
+    changed_id = stable_chunk_id("doc-1", "mid", 0, "hello world", variant="1")
+
+    assert base_id != changed_id
+
+
 @pytest.mark.unit
 def test_attach_parent_ids_sets_parent_id():
     # source_id is required for document-scoped parent lookups

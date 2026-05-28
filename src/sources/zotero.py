@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import html2text
+import requests
 
 from ..extract_text import extract_text
 from .base import DataSource, Document, ProgressCallback
@@ -58,6 +59,15 @@ class ZoteroSource(DataSource):
         # Legacy fallback: zotero.max_extraction_threads -> extraction.workers
         legacy_threads = self.zotero_config.get("max_extraction_threads")
         self.configured_workers = self.extraction_config.get("workers", legacy_threads or "auto")
+        self.local_api_base = self.zotero_config.get("local_api_base", "http://localhost:23119/api/users/0")
+        self.local_api_timeout = float(self.zotero_config.get("local_api_timeout", 20))
+        self.prefer_local_api_fulltext = bool(self.zotero_config.get("prefer_local_api_fulltext", True))
+        self.fulltext_min_chars = int(self.zotero_config.get("fulltext_min_chars", 200))
+        self.fulltext_large_pdf_mb = float(self.zotero_config.get("fulltext_large_pdf_mb", 20))
+        self.fulltext_large_pdf_min_chars = int(
+            self.zotero_config.get("fulltext_large_pdf_min_chars", 20000)
+        )
+        self.fulltext_bootstrap_scan = bool(self.zotero_config.get("fulltext_bootstrap_scan", False))
 
         if self.is_enabled():
             self.data_dir = Path(self.zotero_config.get("data_directory", "")).expanduser()
@@ -89,7 +99,7 @@ class ZoteroSource(DataSource):
 
         return True
 
-    def fetch_documents(self) -> Iterator[Document]:
+    def fetch_documents(self, item_keys: Optional[List[str]] = None) -> Iterator[Document]:
         """
         Fetch all documents from Zotero library.
 
@@ -109,12 +119,18 @@ class ZoteroSource(DataSource):
             return
 
         try:
-            items = self._get_all_items(conn)
+            if item_keys is not None:
+                items = self._get_items_by_keys(conn, item_keys)
+            else:
+                items = self._get_all_items(conn)
             limit = self.zotero_config.get("limit_items")
             if isinstance(limit, int) and limit > 0:
                 items = items[:limit]
             total_items = len(items)
-            print(f"📚 Found {total_items} items in Zotero library")
+            if item_keys is not None:
+                print(f"[INFO] Found {total_items} changed Zotero items to process")
+            else:
+                print(f"[INFO] Found {total_items} items in Zotero library")
 
             # Emit source initialization
             self._emit_progress("source_init", total=total_items)
@@ -284,8 +300,9 @@ class ZoteroSource(DataSource):
         """Establish read-only connection to Zotero SQLite database."""
         try:
             uri = f"{self.db_path.as_uri()}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True)
+            conn = sqlite3.connect(uri, uri=True, timeout=30)
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout = 30000")
             return conn
         except sqlite3.Error as e:
             print(f"❌ Database connection error: {e}")
@@ -303,6 +320,564 @@ class ZoteroSource(DataSource):
             """
         )
         return cursor.fetchall()
+
+    def _get_items_by_keys(self, conn: sqlite3.Connection, keys: List[str]) -> List[sqlite3.Row]:
+        """Get non-deleted items by Zotero item key."""
+        if not keys:
+            return []
+        placeholders = ",".join("?" for _ in keys)
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT itemID, itemTypeID, dateAdded, dateModified, key
+            FROM items
+            WHERE key IN ({placeholders})
+              AND itemID NOT IN (SELECT itemID FROM deletedItems)
+            ORDER BY itemID
+            """,
+            tuple(keys),
+        )
+        return cursor.fetchall()
+
+    def get_delta_changes(
+        self,
+        *,
+        last_item_version: int = 0,
+        last_fulltext_version: int = 0,
+        last_sqlite_date_modified: str = "",
+        last_sqlite_date_deleted: str = "",
+        last_sqlite_attachment_storage_mod_time: int = 0,
+    ) -> Dict[str, Any]:
+        """Fetch changed Zotero item keys since the given versions.
+
+        Returns:
+            {
+                "changed_item_keys": [...],
+                "item_version": <int>,
+                "fulltext_version": <int>,
+            }
+        """
+        sqlite_max_date_modified = last_sqlite_date_modified
+        sqlite_max_date_deleted = last_sqlite_date_deleted
+        sqlite_max_attachment_storage_mod_time = int(last_sqlite_attachment_storage_mod_time or 0)
+        if self._is_local_api_available():
+            item_keys, item_version = self._fetch_changed_item_keys(last_item_version)
+            fulltext_attachment_keys, fulltext_version = self._fetch_changed_fulltext_keys(last_fulltext_version)
+            sqlite_watermarks = self._get_current_sqlite_delta_watermarks()
+            sqlite_max_date_modified = sqlite_watermarks["sqlite_max_date_modified"]
+            sqlite_max_date_deleted = sqlite_watermarks["sqlite_max_date_deleted"]
+            sqlite_max_attachment_storage_mod_time = sqlite_watermarks[
+                "sqlite_max_attachment_storage_mod_time"
+            ]
+        else:
+            # Zotero closed => local API unavailable; use SQLite item-level
+            # effective modification/deletion watermarks.
+            (
+                item_keys,
+                sqlite_max_date_modified,
+                deleted_item_keys,
+                sqlite_max_date_deleted,
+                attachment_parent_keys,
+                sqlite_max_attachment_storage_mod_time,
+            ) = self._fetch_changed_parent_item_keys_sqlite(
+                last_sqlite_date_modified,
+                last_sqlite_date_deleted,
+                int(last_sqlite_attachment_storage_mod_time or 0),
+            )
+            item_version = int(last_item_version)
+            fulltext_attachment_keys = []
+            fulltext_version = int(last_fulltext_version)
+            if deleted_item_keys:
+                item_keys = list(dict.fromkeys([*item_keys, *deleted_item_keys]))
+            if attachment_parent_keys:
+                item_keys = list(dict.fromkeys([*item_keys, *attachment_parent_keys]))
+
+        changed = set(self._resolve_parent_keys_for_any_item_keys(item_keys))
+        if fulltext_attachment_keys:
+            changed.update(self._resolve_parent_item_keys(fulltext_attachment_keys))
+
+        return {
+            "changed_item_keys": sorted(changed),
+            "item_version": item_version,
+            "fulltext_version": fulltext_version,
+            "sqlite_max_date_modified": sqlite_max_date_modified,
+            "sqlite_max_date_deleted": sqlite_max_date_deleted,
+            "sqlite_max_attachment_storage_mod_time": sqlite_max_attachment_storage_mod_time,
+        }
+
+    def _is_local_api_available(self) -> bool:
+        """Check whether Zotero local API is reachable."""
+        url = f"{self.local_api_base}/items"
+        try:
+            response = requests.get(
+                url,
+                params={"limit": 1, "format": "keys"},
+                headers={"Zotero-Allowed-Request": "1"},
+                timeout=3,
+            )
+            return response.status_code == 200
+        except Exception:
+            return False
+
+    def _fetch_changed_item_keys(self, since_version: int) -> tuple[List[str], int]:
+        """Fetch item keys changed since the given Zotero library version."""
+        url = f"{self.local_api_base}/items"
+        try:
+            response = requests.get(
+                url,
+                params={"since": max(0, int(since_version)), "format": "keys"},
+                headers={"Zotero-Allowed-Request": "1"},
+                timeout=self.local_api_timeout,
+            )
+            response.raise_for_status()
+            keys = [line.strip() for line in response.text.splitlines() if line.strip()]
+            version = int(response.headers.get("Last-Modified-Version", since_version))
+            return keys, version
+        except Exception as e:
+            print(f"[WARN] Failed to fetch changed item keys from Zotero API: {e}")
+            return [], int(since_version)
+
+    def _fetch_changed_item_keys_sqlite(self, since_date_modified: str) -> tuple[List[str], str]:
+        """Fetch changed item keys from SQLite using dateModified watermark."""
+        conn = self._get_db_connection()
+        if not conn:
+            return [], since_date_modified
+        try:
+            cursor = conn.cursor()
+            if since_date_modified:
+                cursor.execute(
+                    """
+                    SELECT key, dateModified
+                    FROM items
+                    WHERE itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND dateModified > ?
+                    ORDER BY dateModified
+                    """,
+                    (since_date_modified,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT key, dateModified
+                    FROM items
+                    WHERE itemID NOT IN (SELECT itemID FROM deletedItems)
+                    ORDER BY dateModified
+                    """
+                )
+            rows = cursor.fetchall()
+            keys = [row["key"] for row in rows if row["key"]]
+            if rows:
+                max_modified = rows[-1]["dateModified"] or since_date_modified
+            else:
+                max_modified = since_date_modified
+            return keys, max_modified
+        except Exception as e:
+            print(f"[WARN] Failed to fetch changed item keys from SQLite: {e}")
+            return [], since_date_modified
+        finally:
+            conn.close()
+
+    def _fetch_changed_parent_item_keys_sqlite(
+        self,
+        since_date_modified: str,
+        since_date_deleted: str,
+        since_attachment_storage_mod_time: int,
+    ) -> tuple[List[str], str, List[str], str, List[str], int]:
+        """Fetch changed top-level Zotero item keys using SQLite only.
+
+        This is the closed-Zotero fallback path. Unlike the raw items.dateModified
+        query, it tracks changes at the parent item level by considering:
+        - the top-level item's own dateModified
+        - child note item dateModified
+        - child attachment item dateModified
+        - child annotation item dateModified
+        - deletions of top-level items and child records via deletedItems.dateDeleted
+        """
+        conn = self._get_db_connection()
+        if not conn:
+            return [], since_date_modified, [], since_date_deleted, [], since_attachment_storage_mod_time
+
+        deleted_item_keys: List[str] = []
+        attachment_parent_keys: List[str] = []
+        try:
+            cursor = conn.cursor()
+
+            modified_sql = """
+                SELECT effective_key, MAX(changed_at) AS effective_modified
+                FROM (
+                    SELECT parent.key AS effective_key, parent.dateModified AS changed_at
+                    FROM items parent
+                    JOIN itemTypes it ON it.itemTypeID = parent.itemTypeID
+                    WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT parent.key AS effective_key, child.dateModified AS changed_at
+                    FROM items child
+                    JOIN itemNotes n ON n.itemID = child.itemID
+                    JOIN items parent ON parent.itemID = n.parentItemID
+                    WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT parent.key AS effective_key, child.dateModified AS changed_at
+                    FROM items child
+                    JOIN itemAttachments ia ON ia.itemID = child.itemID
+                    JOIN items parent ON parent.itemID = ia.parentItemID
+                    WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT parent.key AS effective_key, child.dateModified AS changed_at
+                    FROM items child
+                    JOIN itemAnnotations an ON an.itemID = child.itemID
+                    JOIN itemAttachments att ON att.itemID = an.parentItemID
+                    JOIN items parent ON parent.itemID = att.parentItemID
+                    WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND att.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                )
+                {where_clause}
+                GROUP BY effective_key
+                ORDER BY effective_modified
+            """
+
+            if since_date_modified:
+                cursor.execute(
+                    modified_sql.format(where_clause="WHERE changed_at > ?"),
+                    (since_date_modified,),
+                )
+            else:
+                cursor.execute(modified_sql.format(where_clause=""))
+
+            modified_rows = cursor.fetchall()
+            changed_item_keys = [row["effective_key"] for row in modified_rows if row["effective_key"]]
+            if modified_rows:
+                max_modified = modified_rows[-1]["effective_modified"] or since_date_modified
+            else:
+                max_modified = since_date_modified
+
+            deleted_sql = """
+                SELECT effective_key, MAX(date_deleted) AS effective_deleted
+                FROM (
+                    SELECT child.key AS effective_key, d.dateDeleted AS date_deleted
+                    FROM deletedItems d
+                    JOIN items child ON child.itemID = d.itemID
+                    JOIN itemTypes it ON it.itemTypeID = child.itemTypeID
+                    WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
+
+                    UNION ALL
+
+                    SELECT parent.key AS effective_key, d.dateDeleted AS date_deleted
+                    FROM deletedItems d
+                    JOIN itemNotes n ON n.itemID = d.itemID
+                    JOIN items parent ON parent.itemID = n.parentItemID
+                    WHERE parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT parent.key AS effective_key, d.dateDeleted AS date_deleted
+                    FROM deletedItems d
+                    JOIN itemAttachments ia ON ia.itemID = d.itemID
+                    JOIN items parent ON parent.itemID = ia.parentItemID
+                    WHERE parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT parent.key AS effective_key, d.dateDeleted AS date_deleted
+                    FROM deletedItems d
+                    JOIN itemAnnotations an ON an.itemID = d.itemID
+                    JOIN itemAttachments att ON att.itemID = an.parentItemID
+                    JOIN items parent ON parent.itemID = att.parentItemID
+                    WHERE att.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                )
+                {where_clause}
+                GROUP BY effective_key
+                ORDER BY effective_deleted
+            """
+
+            if since_date_deleted:
+                cursor.execute(
+                    deleted_sql.format(where_clause="WHERE date_deleted > ?"),
+                    (since_date_deleted,),
+                )
+            else:
+                cursor.execute(deleted_sql.format(where_clause=""))
+
+            deleted_rows = cursor.fetchall()
+            deleted_item_keys = [row["effective_key"] for row in deleted_rows if row["effective_key"]]
+            if deleted_rows:
+                max_deleted = deleted_rows[-1]["effective_deleted"] or since_date_deleted
+            else:
+                max_deleted = since_date_deleted
+
+            attachment_sql = """
+                SELECT parent.key AS effective_key, MAX(ia.storageModTime) AS max_storage_mod_time
+                FROM itemAttachments ia
+                JOIN items parent ON parent.itemID = ia.parentItemID
+                WHERE ia.parentItemID IS NOT NULL
+                  AND ia.storageModTime IS NOT NULL
+                  AND ia.storageModTime > ?
+                  AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                GROUP BY parent.key
+                ORDER BY max_storage_mod_time
+            """
+            cursor.execute(
+                attachment_sql,
+                (int(since_attachment_storage_mod_time or 0),),
+            )
+            attachment_rows = cursor.fetchall()
+            attachment_parent_keys = [
+                row["effective_key"] for row in attachment_rows if row["effective_key"]
+            ]
+            if attachment_rows:
+                max_attachment_storage_mod_time = int(
+                    attachment_rows[-1]["max_storage_mod_time"] or since_attachment_storage_mod_time
+                )
+            else:
+                max_attachment_storage_mod_time = int(since_attachment_storage_mod_time or 0)
+
+            return (
+                list(dict.fromkeys(changed_item_keys)),
+                max_modified,
+                list(dict.fromkeys(deleted_item_keys)),
+                max_deleted,
+                list(dict.fromkeys(attachment_parent_keys)),
+                max_attachment_storage_mod_time,
+            )
+        except Exception as e:
+            print(f"[WARN] Failed to fetch changed parent item keys from SQLite: {e}")
+            return (
+                [],
+                since_date_modified,
+                [],
+                since_date_deleted,
+                [],
+                int(since_attachment_storage_mod_time or 0),
+            )
+        finally:
+            conn.close()
+
+    def _get_current_sqlite_delta_watermarks(self) -> Dict[str, Any]:
+        """Return current SQLite-side watermarks for future closed-Zotero delta runs."""
+        conn = self._get_db_connection()
+        if not conn:
+            return {
+                "sqlite_max_date_modified": "",
+                "sqlite_max_date_deleted": "",
+                "sqlite_max_attachment_storage_mod_time": 0,
+            }
+        try:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                SELECT MAX(effective_modified) AS max_effective_modified
+                FROM (
+                    SELECT parent.dateModified AS effective_modified
+                    FROM items parent
+                    JOIN itemTypes it ON it.itemTypeID = parent.itemTypeID
+                    WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT child.dateModified AS effective_modified
+                    FROM items child
+                    JOIN itemNotes n ON n.itemID = child.itemID
+                    JOIN items parent ON parent.itemID = n.parentItemID
+                    WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT child.dateModified AS effective_modified
+                    FROM items child
+                    JOIN itemAttachments ia ON ia.itemID = child.itemID
+                    JOIN items parent ON parent.itemID = ia.parentItemID
+                    WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+
+                    UNION ALL
+
+                    SELECT child.dateModified AS effective_modified
+                    FROM items child
+                    JOIN itemAnnotations an ON an.itemID = child.itemID
+                    JOIN itemAttachments att ON att.itemID = an.parentItemID
+                    JOIN items parent ON parent.itemID = att.parentItemID
+                    WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND att.itemID NOT IN (SELECT itemID FROM deletedItems)
+                      AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                )
+                """
+            )
+            modified_row = cursor.fetchone()
+            max_modified = (
+                modified_row["max_effective_modified"]
+                if modified_row and modified_row["max_effective_modified"]
+                else ""
+            )
+
+            cursor.execute("SELECT MAX(dateDeleted) AS max_date_deleted FROM deletedItems")
+            deleted_row = cursor.fetchone()
+            max_deleted = (
+                deleted_row["max_date_deleted"]
+                if deleted_row and deleted_row["max_date_deleted"]
+                else ""
+            )
+
+            cursor.execute(
+                """
+                SELECT MAX(storageModTime) AS max_storage_mod_time
+                FROM itemAttachments
+                WHERE storageModTime IS NOT NULL
+                """
+            )
+            attachment_row = cursor.fetchone()
+            max_attachment_storage_mod_time = int(
+                attachment_row["max_storage_mod_time"]
+                if attachment_row and attachment_row["max_storage_mod_time"]
+                else 0
+            )
+
+            return {
+                "sqlite_max_date_modified": max_modified,
+                "sqlite_max_date_deleted": max_deleted,
+                "sqlite_max_attachment_storage_mod_time": max_attachment_storage_mod_time,
+            }
+        except Exception as e:
+            print(f"[WARN] Failed to fetch current SQLite delta watermarks: {e}")
+            return {
+                "sqlite_max_date_modified": "",
+                "sqlite_max_date_deleted": "",
+                "sqlite_max_attachment_storage_mod_time": 0,
+            }
+        finally:
+            conn.close()
+
+    def _fetch_changed_fulltext_keys(self, since_version: int) -> tuple[List[str], int]:
+        """Fetch attachment keys with changed fulltext since given Zotero version."""
+        if since_version <= 0 and not self.fulltext_bootstrap_scan:
+            # First delta bootstrap can be extremely expensive for large libraries.
+            return [], 0
+
+        url = f"{self.local_api_base}/fulltext"
+        try:
+            response = requests.get(
+                url,
+                params={"since": max(0, int(since_version))},
+                headers={"Zotero-Allowed-Request": "1"},
+                timeout=self.local_api_timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            keys = list(payload.keys()) if isinstance(payload, dict) else []
+            version_header = response.headers.get("Last-Modified-Version")
+            if version_header:
+                version = int(version_header)
+            elif isinstance(payload, dict) and payload:
+                version_candidates = []
+                for value in payload.values():
+                    try:
+                        version_candidates.append(int(value))
+                    except (TypeError, ValueError):
+                        continue
+                version = max(version_candidates) if version_candidates else int(since_version)
+            else:
+                version = int(since_version)
+            return keys, version
+        except Exception as e:
+            print(f"[WARN] Failed to fetch changed fulltext keys from Zotero API: {e}")
+            return [], int(since_version)
+
+    def _resolve_parent_item_keys(self, attachment_keys: List[str]) -> List[str]:
+        """Resolve parent item keys for changed attachment keys."""
+        if not attachment_keys:
+            return []
+        conn = self._get_db_connection()
+        if not conn:
+            return []
+        try:
+            placeholders = ",".join("?" for _ in attachment_keys)
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT parent.key AS parent_key
+                FROM items attach
+                JOIN itemAttachments ia ON ia.itemID = attach.itemID
+                JOIN items parent ON parent.itemID = ia.parentItemID
+                WHERE attach.key IN ({placeholders})
+                """,
+                tuple(attachment_keys),
+            )
+            parent_keys = [row["parent_key"] for row in cursor.fetchall() if row["parent_key"]]
+            return list(dict.fromkeys(parent_keys))
+        except Exception as e:
+            print(f"[WARN] Failed to resolve parent item keys from attachment keys: {e}")
+            resolved = []
+            for key in attachment_keys:
+                parent_key = self._resolve_parent_key_via_api(key)
+                if parent_key:
+                    resolved.append(parent_key)
+            return list(dict.fromkeys(resolved))
+        finally:
+            conn.close()
+
+    def _resolve_parent_keys_for_any_item_keys(self, item_keys: List[str]) -> List[str]:
+        """Normalize changed Zotero keys to top-level parent item keys."""
+        if not item_keys:
+            return []
+        conn = self._get_db_connection()
+        if not conn:
+            return item_keys
+        try:
+            placeholders = ",".join("?" for _ in item_keys)
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                  child.key AS child_key,
+                  COALESCE(parent.key, child.key) AS effective_key
+                FROM items child
+                LEFT JOIN itemAttachments ia ON ia.itemID = child.itemID
+                LEFT JOIN itemNotes n ON n.itemID = child.itemID
+                LEFT JOIN itemAnnotations an ON an.itemID = child.itemID
+                LEFT JOIN items parent
+                  ON parent.itemID = COALESCE(ia.parentItemID, n.parentItemID, an.parentItemID)
+                WHERE child.key IN ({placeholders})
+                """,
+                tuple(item_keys),
+            )
+            normalized = [row["effective_key"] for row in cursor.fetchall() if row["effective_key"]]
+            return list(dict.fromkeys(normalized))
+        except Exception:
+            return item_keys
+        finally:
+            conn.close()
+
+    def _resolve_parent_key_via_api(self, item_key: str) -> Optional[str]:
+        """Best-effort parent-key resolution via local API."""
+        url = f"{self.local_api_base}/items/{item_key}"
+        try:
+            response = requests.get(
+                url,
+                params={"format": "json"},
+                headers={"Zotero-Allowed-Request": "1"},
+                timeout=self.local_api_timeout,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            parent = data.get("parentItem")
+            return parent if isinstance(parent, str) and parent else item_key
+        except Exception:
+            return None
 
     def _process_item(self, conn: sqlite3.Connection, item_id: int) -> Iterator[Document]:
         """Process a single Zotero item and yield documents."""
@@ -493,6 +1068,38 @@ class ZoteroSource(DataSource):
             elapsed = time.time() - start_time
             return ExtractionResult(task=task, text=None, error=str(e), elapsed_seconds=elapsed)
 
+    def _fetch_local_api_fulltext(self, attachment_key: str) -> Optional[str]:
+        """Fetch indexed fulltext for an attachment from Zotero local API."""
+        url = f"{self.local_api_base}/items/{attachment_key}/fulltext"
+        try:
+            response = requests.get(
+                url,
+                headers={"Zotero-Allowed-Request": "1"},
+                timeout=self.local_api_timeout,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return None
+            content = payload.get("content")
+            if not isinstance(content, str):
+                return None
+            content = content.strip()
+            if len(content) < self.fulltext_min_chars:
+                return None
+            return content
+        except Exception:
+            return None
+
+    def _is_likely_partial_fulltext(self, task: ExtractionTask, text: str) -> bool:
+        """Heuristic for partial Zotero fulltext on very large PDFs."""
+        if not text:
+            return True
+        if task.file_size_mb < self.fulltext_large_pdf_mb:
+            return False
+        return len(text) < self.fulltext_large_pdf_min_chars
+
     def _process_attachments(
         self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
     ) -> Iterator[Document]:
@@ -515,7 +1122,21 @@ class ZoteroSource(DataSource):
         error_count = 0
 
         for task in tasks:
-            result = self._extract_single_attachment(task)
+            fulltext = None
+            text_source = "pdf_extraction"
+            partial_fulltext = False
+
+            if self.prefer_local_api_fulltext:
+                fulltext = self._fetch_local_api_fulltext(task.attachment_key)
+                if fulltext:
+                    partial_fulltext = self._is_likely_partial_fulltext(task, fulltext)
+
+            if fulltext and not partial_fulltext:
+                result = ExtractionResult(task=task, text=fulltext, error=None, elapsed_seconds=0.0)
+                text_source = "zotero_local_api_fulltext"
+            else:
+                result = self._extract_single_attachment(task)
+                text_source = "pdf_extraction"
 
             if result.text:
                 metadata = metadata_base.copy()
@@ -527,6 +1148,9 @@ class ZoteroSource(DataSource):
                         "file_name": task.filename,
                         "file_path": str(task.file_path),
                         "content_type": task.content_type,
+                        "text_source": text_source,
+                        "fulltext_available": bool(fulltext),
+                        "fulltext_partial_fallback": bool(partial_fulltext),
                     }
                 )
 

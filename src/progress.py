@@ -3,8 +3,13 @@
 This module provides thread-safe progress tracking with two display modes:
 - RichProgressDisplay: Interactive terminal with live updates (rich.Live)
 - PlainProgressDisplay: Simple line-based output for CI/non-TTY environments
+
+All display modes can also write a lightweight JSON snapshot for external
+watchers, which is useful when the indexing process is running in a separate
+terminal window.
 """
 
+import json
 import sys
 import threading
 import time
@@ -13,6 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any, Deque, Dict, Optional
 
 from rich.console import Console
@@ -92,6 +98,41 @@ class CurrentActivity:
     progress_pct: float = 0.0  # For large file progress
 
 
+class ProgressSnapshotWriter:
+    """Persist a lightweight live progress snapshot to disk."""
+
+    def __init__(self, snapshot_file: Optional[Path], min_interval: float = 1.0):
+        self.snapshot_file = Path(snapshot_file) if snapshot_file else None
+        self.min_interval = min_interval
+        self._last_update = 0.0
+
+        if self.snapshot_file:
+            self.snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(self, payload: Dict[str, Any], force: bool = False) -> None:
+        """Write a snapshot if enough time has elapsed."""
+        if not self.snapshot_file:
+            return
+
+        now = time.time()
+        if not force and (now - self._last_update) < self.min_interval:
+            return
+
+        self._last_update = now
+        snapshot = dict(payload)
+        snapshot["updated_at"] = datetime.now().isoformat()
+        tmp_file = self.snapshot_file.with_suffix(self.snapshot_file.suffix + ".tmp")
+
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+                f.flush()
+            tmp_file.replace(self.snapshot_file)
+        except Exception:
+            # Snapshot updates are best-effort and should never break indexing.
+            pass
+
+
 class ProgressDisplay(ABC):
     """Abstract base class for progress displays."""
 
@@ -148,10 +189,15 @@ class ProgressDisplay(ABC):
 class RichProgressDisplay(ProgressDisplay):
     """Interactive progress display using rich.Live."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        snapshot_file: Optional[Path] = None,
+        snapshot_interval: float = 1.0,
+    ):
         self.console = Console()
         self._lock = threading.Lock()
         self._live: Optional[Live] = None
+        self.snapshot_writer = ProgressSnapshotWriter(snapshot_file, snapshot_interval)
 
         # State
         self.stage = IndexingStage.INITIALIZING
@@ -170,9 +216,11 @@ class RichProgressDisplay(ProgressDisplay):
             transient=False,
         )
         self._live.start()
+        self._write_snapshot(force=True)
 
     def stop(self) -> None:
         """Stop the live display."""
+        self._write_snapshot(force=True)
         if self._live:
             self._live.stop()
             self._live = None
@@ -239,6 +287,56 @@ class RichProgressDisplay(ProgressDisplay):
         """Refresh the display."""
         if self._live:
             self._live.update(self._render())
+        self._write_snapshot()
+
+    def _build_snapshot_payload(self) -> Dict[str, Any]:
+        """Build a serializable snapshot of current progress state."""
+        total_new = sum(s.new for s in self.sources.values())
+        total_updated = sum(s.updated for s in self.sources.values())
+        total_skipped = sum(s.skipped for s in self.sources.values())
+        total_errors = sum(s.errors for s in self.sources.values())
+        total_items = sum(s.total for s in self.sources.values())
+        processed_items = sum(s.processed for s in self.sources.values())
+        elapsed = self.timing.elapsed()
+
+        return {
+            "stage": self.stage.value,
+            "stage_num": self.stage_num,
+            "total_stages": self.total_stages,
+            "sources": {
+                name: {
+                    "total": stats.total,
+                    "processed": stats.processed,
+                    "new": stats.new,
+                    "updated": stats.updated,
+                    "skipped": stats.skipped,
+                    "errors": stats.errors,
+                    "progress_pct": round(stats.progress_pct, 2),
+                }
+                for name, stats in self.sources.items()
+            },
+            "activity": {
+                "message": self.activity.message,
+                "detail": self.activity.detail,
+                "file_name": self.activity.file_name,
+                "file_size_mb": self.activity.file_size_mb,
+                "progress_pct": self.activity.progress_pct,
+            },
+            "summary": {
+                "total_items": total_items,
+                "processed_items": processed_items,
+                "remaining_items": max(total_items - processed_items, 0),
+                "new": total_new,
+                "updated": total_updated,
+                "skipped": total_skipped,
+                "errors": total_errors,
+                "elapsed_seconds": round(elapsed.total_seconds(), 1),
+            },
+        }
+
+    def _write_snapshot(self, force: bool = False) -> None:
+        """Persist a live snapshot for external watchers."""
+        self.snapshot_writer.write(self._build_snapshot_payload(), force=force)
 
     def _render(self) -> Panel:
         """Render the progress display."""
@@ -370,7 +468,12 @@ class RichProgressDisplay(ProgressDisplay):
 class PlainProgressDisplay(ProgressDisplay):
     """Simple line-based progress display for non-TTY environments."""
 
-    def __init__(self, update_interval: float = 5.0):
+    def __init__(
+        self,
+        update_interval: float = 5.0,
+        snapshot_file: Optional[Path] = None,
+        snapshot_interval: float = 1.0,
+    ):
         """
         Initialize plain progress display.
 
@@ -380,6 +483,7 @@ class PlainProgressDisplay(ProgressDisplay):
         self._lock = threading.Lock()
         self.update_interval = update_interval
         self._last_update = 0.0
+        self.snapshot_writer = ProgressSnapshotWriter(snapshot_file, snapshot_interval)
 
         # State
         self.stage = IndexingStage.INITIALIZING
@@ -394,9 +498,11 @@ class PlainProgressDisplay(ProgressDisplay):
         print("=" * 65)
         print("Re-Searcher Indexing Pipeline")
         print("=" * 65)
+        self._write_snapshot(force=True)
 
     def stop(self) -> None:
         """Stop the progress display."""
+        self._write_snapshot(force=True)
         self._print_final_summary()
 
     def set_stage(self, stage: IndexingStage, stage_num: int, total_stages: int) -> None:
@@ -406,12 +512,14 @@ class PlainProgressDisplay(ProgressDisplay):
             self.stage_num = stage_num
             self.total_stages = total_stages
             print(f"\n[Stage {stage_num}/{total_stages}] {stage.value}")
+            self._write_snapshot()
 
     def init_source(self, name: str, total: int) -> None:
         """Initialize a source with its total item count."""
         with self._lock:
             self.sources[name] = SourceStats(name=name, total=total)
             print(f"  {name}: {total} items")
+            self._write_snapshot()
 
     def update_source(
         self,
@@ -450,12 +558,63 @@ class PlainProgressDisplay(ProgressDisplay):
             self.activity.file_name = file_name
             self.activity.file_size_mb = file_size_mb
             # Don't print every activity in plain mode - too noisy
+            self._write_snapshot()
 
     def update_file_progress(self, progress_pct: float) -> None:
         """Update progress for current large file."""
         with self._lock:
             self.activity.progress_pct = progress_pct
             # Don't print file progress in plain mode
+            self._write_snapshot()
+
+    def _build_snapshot_payload(self) -> Dict[str, Any]:
+        """Build a serializable snapshot of current progress state."""
+        total_new = sum(s.new for s in self.sources.values())
+        total_updated = sum(s.updated for s in self.sources.values())
+        total_skipped = sum(s.skipped for s in self.sources.values())
+        total_errors = sum(s.errors for s in self.sources.values())
+        total_items = sum(s.total for s in self.sources.values())
+        processed_items = sum(s.processed for s in self.sources.values())
+        elapsed = self.timing.elapsed()
+
+        return {
+            "stage": self.stage.value,
+            "stage_num": self.stage_num,
+            "total_stages": self.total_stages,
+            "sources": {
+                name: {
+                    "total": stats.total,
+                    "processed": stats.processed,
+                    "new": stats.new,
+                    "updated": stats.updated,
+                    "skipped": stats.skipped,
+                    "errors": stats.errors,
+                    "progress_pct": round(stats.progress_pct, 2),
+                }
+                for name, stats in self.sources.items()
+            },
+            "activity": {
+                "message": self.activity.message,
+                "detail": self.activity.detail,
+                "file_name": self.activity.file_name,
+                "file_size_mb": self.activity.file_size_mb,
+                "progress_pct": self.activity.progress_pct,
+            },
+            "summary": {
+                "total_items": total_items,
+                "processed_items": processed_items,
+                "remaining_items": max(total_items - processed_items, 0),
+                "new": total_new,
+                "updated": total_updated,
+                "skipped": total_skipped,
+                "errors": total_errors,
+                "elapsed_seconds": round(elapsed.total_seconds(), 1),
+            },
+        }
+
+    def _write_snapshot(self, force: bool = False) -> None:
+        """Persist a live snapshot for external watchers."""
+        self.snapshot_writer.write(self._build_snapshot_payload(), force=force)
 
     def _maybe_print_progress(self) -> None:
         """Print progress if enough time has passed."""
@@ -511,46 +670,39 @@ class PlainProgressDisplay(ProgressDisplay):
         print("=" * 65)
 
 
-class QuietProgressDisplay(ProgressDisplay):
-    """No-op progress display for quiet mode."""
+class QuietProgressDisplay(PlainProgressDisplay):
+    """Silent progress display that still maintains live snapshot state."""
 
     def start(self) -> None:
-        pass
+        self._write_snapshot(force=True)
 
     def stop(self) -> None:
-        pass
+        self._write_snapshot(force=True)
 
     def set_stage(self, stage: IndexingStage, stage_num: int, total_stages: int) -> None:
-        pass
+        with self._lock:
+            self.stage = stage
+            self.stage_num = stage_num
+            self.total_stages = total_stages
+            self._write_snapshot()
 
     def init_source(self, name: str, total: int) -> None:
-        pass
+        with self._lock:
+            self.sources[name] = SourceStats(name=name, total=total)
+            self._write_snapshot()
 
-    def update_source(
-        self,
-        name: str,
-        processed: int = 0,
-        new: int = 0,
-        updated: int = 0,
-        skipped: int = 0,
-        errors: int = 0,
-    ) -> None:
-        pass
+    def _maybe_print_progress(self) -> None:
+        return
 
-    def set_activity(
-        self,
-        message: str,
-        file_name: str = "",
-        file_size_mb: float = 0.0,
-        detail: str = "",
-    ) -> None:
-        pass
-
-    def update_file_progress(self, progress_pct: float) -> None:
-        pass
+    def _print_final_summary(self) -> None:
+        return
 
 
-def create_progress_display(mode: str = "auto") -> ProgressDisplay:
+def create_progress_display(
+    mode: str = "auto",
+    snapshot_file: Optional[Path] = None,
+    snapshot_interval: float = 1.0,
+) -> ProgressDisplay:
     """
     Create a progress display based on the specified mode.
 
@@ -561,16 +713,31 @@ def create_progress_display(mode: str = "auto") -> ProgressDisplay:
         Appropriate ProgressDisplay instance
     """
     if mode == "quiet":
-        return QuietProgressDisplay()
+        return QuietProgressDisplay(
+            snapshot_file=snapshot_file,
+            snapshot_interval=snapshot_interval,
+        )
     elif mode == "plain":
-        return PlainProgressDisplay()
+        return PlainProgressDisplay(
+            snapshot_file=snapshot_file,
+            snapshot_interval=snapshot_interval,
+        )
     elif mode == "rich":
-        return RichProgressDisplay()
+        return RichProgressDisplay(
+            snapshot_file=snapshot_file,
+            snapshot_interval=snapshot_interval,
+        )
     elif mode == "auto":
         # Auto-detect based on TTY
         if sys.stdout.isatty():
-            return RichProgressDisplay()
+            return RichProgressDisplay(
+                snapshot_file=snapshot_file,
+                snapshot_interval=snapshot_interval,
+            )
         else:
-            return PlainProgressDisplay()
+            return PlainProgressDisplay(
+                snapshot_file=snapshot_file,
+                snapshot_interval=snapshot_interval,
+            )
     else:
         raise ValueError(f"Unknown progress display mode: {mode}")

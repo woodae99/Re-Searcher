@@ -194,6 +194,9 @@ Search the research library using semantic search.
 **Basic Parameters:**
 - **query** (required): Search query text
 - **k** (optional): Number of final results (1-50, default: 5)
+- **mode** (optional): Retrieval filter strategy - `"fast"` or `"strict"`
+  - `fast`: Broad vector recall followed by post-filtering (usually better for large corpora)
+  - `strict`: Apply compatible metadata filters in Chroma before retrieval (useful for exact scoped searches)
 - **chunk_level** (optional): Filter by chunk granularity - `"coarse"`, `"mid"`, or `"fine"`
   - `coarse`: Large sections with broad context (~1500-2500 chars, best for overview)
   - `mid`: Medium sections with balanced context (~800-1500 chars)
@@ -206,7 +209,7 @@ Search the research library using semantic search.
 - **max_per_source** (optional): Max results per source document (auto-enables diversity, e.g., 1 for broad scan, 10 for deep dive)
 
 **Metadata Filters:**
-- **source_type** (optional): Filter by type - `"zotero_fulltext"`, `"zotero_note"`, `"zotero_annotation"`, or `"obsidian"`
+- **source_type** (optional): Filter by type - `"zotero"`, `"zotero_fulltext"`, `"zotero_note"`, `"zotero_annotation"`, or `"obsidian"`
 - **zotero_key** (optional): Filter to specific Zotero item (exact key match)
 - **author** (optional): Filter by author name (case-insensitive substring match)
 - **title_contains** (optional): Filter by title (case-insensitive substring match)
@@ -229,6 +232,9 @@ Search the research library using semantic search.
 
 // Recent research only
 {"query": "coaching psychology", "year_min": 2020, "chunk_level": "coarse"}
+
+// Exact scoped metadata filtering in Chroma
+{"query": "coaching psychology", "mode": "strict", "source_type": "zotero_fulltext", "year_min": 2020}
 ```
 
 ### get_chunk_context

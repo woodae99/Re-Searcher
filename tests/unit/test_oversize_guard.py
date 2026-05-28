@@ -4,8 +4,11 @@ Module: src/processing/oversize_guard.py
 Tests the OversizeGuard class that prevents oversized chunks from reaching the embedder.
 """
 
+from collections import Counter
+
 import pytest
 
+from src.processing.id_utils import stable_chunk_id
 from src.processing.oversize_guard import OversizeGuard, create_oversize_guard
 
 
@@ -122,6 +125,33 @@ class TestOversizeGuardSplitting:
             assert metadata.get("source_id") == "doc-1"
             assert metadata.get("source_type") == "pdf"
             assert metadata.get("custom_field") == "preserved"
+
+    def test_split_chunks_get_unique_id_variants(self):
+        """Oversize split fragments should produce unique stable IDs."""
+        guard = OversizeGuard(max_tokens=10, policy="split")
+        text = " ".join(["alpha"] * 120)
+        metadata = {"source_id": "doc-1", "chunk_level": "mid", "chunk_index": 0}
+
+        result = guard.process([(text, metadata)])
+        ids = [
+            stable_chunk_id(
+                "doc-1",
+                chunk_metadata["chunk_level"],
+                chunk_metadata["chunk_index"],
+                chunk_text,
+                variant=chunk_metadata.get("chunk_id_variant"),
+            )
+            for chunk_text, chunk_metadata in result
+        ]
+
+        counts = Counter(ids)
+
+        assert result
+        assert all(
+            chunk_metadata.get("chunk_id_variant") is not None
+            for _, chunk_metadata in result
+        )
+        assert all(count == 1 for count in counts.values())
 
 
 @pytest.mark.unit

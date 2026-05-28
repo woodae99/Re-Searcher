@@ -61,6 +61,34 @@ while ($true) {
 }
 ```
 
+Or open the live watcher in a second terminal:
+
+```bash
+python scripts/watch_progress.py
+```
+
+This reads the live dashboard snapshot (`output/indexing_dashboard.json`) plus the
+checkpoint file and renders a small monitoring dashboard without touching the
+running ingestion terminal.
+
+### 3.1 Safe Stop After Current Batch
+
+To ask a running ingestion job to stop cleanly at the next batch boundary:
+
+```bash
+python scripts/index.py --request-stop
+```
+
+That creates a stop-request flag file which the running pipeline checks before
+starting each new batch. The current batch is allowed to finish; the next batch
+will not start.
+
+To clear a pending stop request before it is consumed:
+
+```bash
+python scripts/index.py --clear-stop-request
+```
+
 ### 4. Resume After Failure
 
 If indexing is interrupted (crash, power loss, etc.):

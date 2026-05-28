@@ -37,9 +37,18 @@ class IndexingProgress:
         """Load progress from JSON file or create new structure."""
         if self.progress_file.exists():
             try:
-                with open(self.progress_file, "r") as f:
+                with open(self.progress_file, "r", encoding="utf-8") as f:
                     return json.load(f)
             except (json.JSONDecodeError, IOError):
+                # Preserve corrupt checkpoint for debugging, then start fresh.
+                try:
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    backup = self.progress_file.with_suffix(
+                        self.progress_file.suffix + f".corrupt-{stamp}"
+                    )
+                    self.progress_file.replace(backup)
+                except Exception:
+                    pass
                 return self._create_new_progress()
         return self._create_new_progress()
 
@@ -171,10 +180,55 @@ class IndexingProgress:
     def _save(self):
         """Save progress to JSON file."""
         self.data["updated_at"] = datetime.now().isoformat()
-        with open(self.progress_file, "w") as f:
-            json.dump(self.data, f, indent=2)
+        tmp_file = self.progress_file.with_suffix(self.progress_file.suffix + ".tmp")
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2)
+                f.flush()
+            tmp_file.replace(self.progress_file)
+        except PermissionError:
+            # Some environments block temp sidecar writes in certain dirs.
+            # Fall back to direct write rather than failing indexing progress.
+            with open(self.progress_file, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2)
 
     def clear(self):
         """Clear all progress (for testing)."""
         self.data = self._create_new_progress()
+        self._save()
+
+    def has_incomplete_work(self) -> bool:
+        """Return True when checkpoint contains documents not yet stored."""
+        docs = self.data.get("documents", {})
+        if not docs:
+            return False
+        for info in docs.values():
+            if info.get("status") != DocumentStatus.STORED.value:
+                return True
+        return False
+
+    def forget_document(self, doc_id: str):
+        """Forget a document's stored progress record.
+
+        Useful when a source changed and must be re-indexed even if it was
+        previously marked STORED.
+        """
+        doc_info = self.data["documents"].pop(doc_id, None)
+        if not doc_info:
+            return
+
+        old_status = doc_info.get("status")
+        if old_status == "chunked":
+            self.data["stats"]["documents_chunked"] = max(
+                0, self.data["stats"]["documents_chunked"] - 1
+            )
+        elif old_status == "embedded":
+            self.data["stats"]["documents_embedded"] = max(
+                0, self.data["stats"]["documents_embedded"] - 1
+            )
+        elif old_status == "stored":
+            self.data["stats"]["documents_stored"] = max(
+                0, self.data["stats"]["documents_stored"] - 1
+            )
+
         self._save()

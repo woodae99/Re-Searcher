@@ -14,6 +14,16 @@ from src.pipeline import ResearchRAGPipeline
 from src.preflight import run_preflight, check_services
 
 
+def resolve_stop_flag_path(config: dict) -> Path:
+    """Resolve the stop-after-batch flag path from config."""
+    output_dir = Path(config.get("output_folder", "./output"))
+    stop_cfg = config.get("indexing", {}).get("stop_after_batch", {}) or {}
+    flag_path = Path(stop_cfg.get("flag_file", "stop_after_batch.flag"))
+    if not flag_path.is_absolute():
+        flag_path = output_dir / flag_path
+    return flag_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Index your research library (Zotero + Obsidian) into ChromaDB"
@@ -76,6 +86,16 @@ def main():
         action="store_true",
         help="Disable Obsidian source (for test runs)",
     )
+    parser.add_argument(
+        "--request-stop",
+        action="store_true",
+        help="Request that a running indexer stop cleanly after the current batch",
+    )
+    parser.add_argument(
+        "--clear-stop-request",
+        action="store_true",
+        help="Clear any pending stop-after-batch request and exit",
+    )
 
     args = parser.parse_args()
 
@@ -118,6 +138,25 @@ def main():
         obsidian = config.setdefault("obsidian", {})
         obsidian["enabled"] = False
         overrides_applied = True
+
+    if args.request_stop and args.clear_stop_request:
+        print("[ERROR] Choose either --request-stop or --clear-stop-request, not both.")
+        sys.exit(1)
+
+    if args.request_stop or args.clear_stop_request:
+        stop_flag = resolve_stop_flag_path(config)
+        stop_flag.parent.mkdir(parents=True, exist_ok=True)
+
+        if args.request_stop:
+            stop_flag.write_text("stop_after_batch=true\n", encoding="utf-8")
+            print(f"[OK] Stop-after-batch requested via {stop_flag}")
+        else:
+            if stop_flag.exists():
+                stop_flag.unlink()
+                print(f"[OK] Cleared stop-after-batch request: {stop_flag}")
+            else:
+                print(f"[INFO] No stop-after-batch request present: {stop_flag}")
+        sys.exit(0)
 
     config_path = args.config
     if overrides_applied:

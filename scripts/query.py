@@ -9,8 +9,9 @@ from pathlib import Path
 # Fix Unicode encoding for Windows console
 if sys.platform == "win32":
     import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -29,11 +30,9 @@ def print_results(results, show_full_text=False):
     print(f"{'=' * 80}\n")
 
     for rank, (doc_id, text, score, metadata) in enumerate(results, 1):
-        # Header
         print(f"#{rank} - Score: {score:.4f}")
         print(f"ID: {doc_id}")
 
-        # Metadata
         title = metadata.get("title", "Untitled")
         authors = metadata.get("authors", "Unknown")
         source_type = metadata.get("source_type", "unknown")
@@ -42,11 +41,9 @@ def print_results(results, show_full_text=False):
         print(f"Authors: {authors}")
         print(f"Source: {source_type}")
 
-        # Backlink
         if "backlink" in metadata:
             print(f"Link: {metadata['backlink']}")
 
-        # Text preview
         print("\nText:")
         if show_full_text:
             print(text)
@@ -69,52 +66,47 @@ def interactive_mode(pipeline):
     print("  :stats           - Show collection statistics")
     print("  :help            - Show this help message")
     print("  :quit or :q      - Exit interactive mode")
-    print("\nAdvanced Filtering (use CLI mode with arguments):")
-    print("  --chunk-level    - Filter by chunk size (coarse/mid/fine)")
-    print("  --max-per-source - Limit results per source (diversity control)")
-    print("  --author         - Filter by author name")
-    print("  --year-min/max   - Filter by publication year range")
-    print("  --source-type    - Filter by source type (zotero/obsidian)")
-    print("  --no-rerank      - Disable reranking")
-    print("\nTip: For advanced options, use CLI mode:")
-    print("  python scripts/query.py \"your query\" --chunk-level coarse -k 5")
-    print("  python scripts/query.py --help  (for all options)")
+    print("\nLive Controls:")
+    print("  :mode <fast|strict>         - Retrieval mode")
+    print("  :krecall <number|clear>     - Override recall candidate count")
+    print("  :source <type|clear>        - source_type filter")
+    print("  :chunk <coarse|mid|fine|clear>")
+    print("  :author <name|clear>        - Author contains filter")
+    print("  :title <text|clear>         - Title contains filter")
+    print("  :year <min> [max] | clear   - Year range filter")
+    print("  :rerank <on|off>            - Toggle reranking")
+    print("  :diversity <on|off>         - Toggle diversity")
+    print("  :maxsource <n|clear>        - Diversity max per source")
+    print("  :filters                    - Show active query settings")
     print("=" * 80 + "\n")
 
     k = 5
     show_full_text = False
+    retrieval_mode = "fast"
+    k_recall = None
+    source_type = None
+    chunk_level = None
+    author_contains = None
+    title_contains = None
+    year_min = None
+    year_max = None
+    rerank_enabled = None
+    diversity_enabled = None
+    max_per_source = None
 
     while True:
         try:
-            query = input("🔍 > ").strip()
+            query = input("search > ").strip()
 
             if not query:
                 continue
 
-            # Handle commands
             if query.startswith(":"):
                 if query in [":quit", ":q", ":exit"]:
                     print("Goodbye!")
                     break
                 elif query == ":help":
-                    # Show help message
-                    print("\nBasic Commands:")
-                    print("  <query text>     - Search for documents using natural language")
-                    print("  :k <number>      - Set number of results (default: 5)")
-                    print("  :full            - Toggle full text display (on/off)")
-                    print("  :stats           - Show collection statistics")
-                    print("  :help            - Show this help message")
-                    print("  :quit or :q      - Exit interactive mode")
-                    print("\nAdvanced Filtering (use CLI mode with arguments):")
-                    print("  --chunk-level    - Filter by chunk size (coarse/mid/fine)")
-                    print("  --max-per-source - Limit results per source (diversity control)")
-                    print("  --author         - Filter by author name")
-                    print("  --year-min/max   - Filter by publication year range")
-                    print("  --source-type    - Filter by source type (zotero/obsidian)")
-                    print("  --no-rerank      - Disable reranking")
-                    print("\nTip: For advanced options, use CLI mode:")
-                    print("  python scripts/query.py \"your query\" --chunk-level coarse -k 5")
-                    print("  python scripts/query.py --help  (for all options)\n")
+                    print("\nType :filters to show active settings.\n")
                 elif query == ":full":
                     show_full_text = not show_full_text
                     print(f"Full text display: {'ON' if show_full_text else 'OFF'}")
@@ -130,14 +122,143 @@ def interactive_mode(pipeline):
                     for key, value in stats.items():
                         print(f"  {key}: {value}")
                     print()
+                elif query.startswith(":mode "):
+                    mode = query.split(maxsplit=1)[1].strip().lower()
+                    if mode in {"fast", "strict"}:
+                        retrieval_mode = mode
+                        print(f"Retrieval mode set to: {retrieval_mode}")
+                    else:
+                        print("Usage: :mode <fast|strict>")
+                elif query.startswith(":krecall "):
+                    value = query.split(maxsplit=1)[1].strip()
+                    if value.lower() == "clear":
+                        k_recall = None
+                        print("k_recall override cleared")
+                    else:
+                        try:
+                            k_recall = int(value)
+                            print(f"k_recall override set to: {k_recall}")
+                        except ValueError:
+                            print("Usage: :krecall <number|clear>")
+                elif query.startswith(":source "):
+                    value = query.split(maxsplit=1)[1].strip()
+                    if value.lower() == "clear":
+                        source_type = None
+                        print("source_type filter cleared")
+                    else:
+                        source_type = value
+                        print(f"source_type filter set to: {source_type}")
+                elif query.startswith(":chunk "):
+                    value = query.split(maxsplit=1)[1].strip().lower()
+                    if value == "clear":
+                        chunk_level = None
+                        print("chunk_level filter cleared")
+                    elif value in {"coarse", "mid", "fine"}:
+                        chunk_level = value
+                        print(f"chunk_level filter set to: {chunk_level}")
+                    else:
+                        print("Usage: :chunk <coarse|mid|fine|clear>")
+                elif query.startswith(":author "):
+                    value = query.split(maxsplit=1)[1].strip()
+                    author_contains = None if value.lower() == "clear" else value
+                    print(
+                        "author filter cleared"
+                        if author_contains is None
+                        else f"author filter set to: {author_contains}"
+                    )
+                elif query.startswith(":title "):
+                    value = query.split(maxsplit=1)[1].strip()
+                    title_contains = None if value.lower() == "clear" else value
+                    print(
+                        "title filter cleared"
+                        if title_contains is None
+                        else f"title filter set to: {title_contains}"
+                    )
+                elif query.startswith(":year "):
+                    value = query.split(maxsplit=1)[1].strip()
+                    if value.lower() == "clear":
+                        year_min = None
+                        year_max = None
+                        print("year range filter cleared")
+                    else:
+                        parts = value.split()
+                        try:
+                            if len(parts) == 1:
+                                year_min = int(parts[0])
+                                year_max = None
+                            elif len(parts) == 2:
+                                year_min = int(parts[0])
+                                year_max = int(parts[1])
+                            else:
+                                raise ValueError()
+                            print(f"year range set to: {year_min}..{year_max if year_max else 'max'}")
+                        except ValueError:
+                            print("Usage: :year <min> [max] | clear")
+                elif query.startswith(":rerank "):
+                    value = query.split(maxsplit=1)[1].strip().lower()
+                    if value == "on":
+                        rerank_enabled = True
+                        print("rerank enabled")
+                    elif value == "off":
+                        rerank_enabled = False
+                        print("rerank disabled")
+                    else:
+                        print("Usage: :rerank <on|off>")
+                elif query.startswith(":diversity "):
+                    value = query.split(maxsplit=1)[1].strip().lower()
+                    if value == "on":
+                        diversity_enabled = True
+                        print("diversity enabled")
+                    elif value == "off":
+                        diversity_enabled = False
+                        print("diversity disabled")
+                    else:
+                        print("Usage: :diversity <on|off>")
+                elif query.startswith(":maxsource "):
+                    value = query.split(maxsplit=1)[1].strip()
+                    if value.lower() == "clear":
+                        max_per_source = None
+                        print("max-per-source cleared")
+                    else:
+                        try:
+                            max_per_source = int(value)
+                            print(f"max-per-source set to: {max_per_source}")
+                        except ValueError:
+                            print("Usage: :maxsource <number|clear>")
+                elif query == ":filters":
+                    print("\nActive Query Settings:")
+                    print(f"  mode: {retrieval_mode}")
+                    print(f"  k: {k}")
+                    print(f"  k_recall: {k_recall}")
+                    print(f"  source_type: {source_type}")
+                    print(f"  chunk_level: {chunk_level}")
+                    print(f"  author_contains: {author_contains}")
+                    print(f"  title_contains: {title_contains}")
+                    print(f"  year_min: {year_min}")
+                    print(f"  year_max: {year_max}")
+                    print(f"  rerank_enabled: {rerank_enabled}")
+                    print(f"  diversity_enabled: {diversity_enabled}")
+                    print(f"  max_per_source: {max_per_source}\n")
                 else:
                     print(f"Unknown command: {query}")
                     print("Type :help to see available commands")
                 continue
 
-            # Run query
-            results = pipeline.query(query, k=k)
-            # Note: interactive mode does not currently expose rerank/diversity overrides.
+            results = pipeline.query(
+                query,
+                k=k,
+                retrieval_mode=retrieval_mode,
+                rerank_enabled=rerank_enabled,
+                diversity_enabled=diversity_enabled,
+                diversity_max_per_key=max_per_source,
+                k_recall_override=k_recall,
+                source_type=source_type,
+                chunk_level=chunk_level,
+                author_contains=author_contains,
+                title_contains=title_contains,
+                year_min=year_min,
+                year_max=year_max,
+            )
             print_results(results, show_full_text=show_full_text)
 
         except KeyboardInterrupt:
@@ -148,9 +269,7 @@ def interactive_mode(pipeline):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Query your research library"
-    )
+    parser = argparse.ArgumentParser(description="Query your research library")
     parser.add_argument(
         "--config",
         type=Path,
@@ -166,16 +285,31 @@ def main():
         "-k",
         type=int,
         default=5,
-        help="Number of final results to return after all filtering and reranking (default: 5). "
-             "This is your top-k output size.",
+        help=(
+            "Number of final results to return after all filtering and reranking "
+            "(default: 5). This is your top-k output size."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["fast", "strict"],
+        default=None,
+        help=(
+            "Retrieval mode. 'fast' performs broad vector recall followed by post-filtering "
+            "(better latency on large corpora). 'strict' applies metadata filters directly in "
+            "the vector-store query path."
+        ),
     )
     parser.add_argument(
         "--k-recall",
         type=int,
         default=None,
-        help="Override how many candidates to retrieve from vector store before reranking/diversity "
-             "(default: from config, typically 50). Use higher values when applying heavy post-filters. "
-             "Example: --k-recall 100 to get more candidates when filtering by author or year.",
+        help=(
+            "Override how many candidates to retrieve from vector store before reranking/diversity "
+            "(default: from config, typically 50). Use higher values when applying heavy post-filters. "
+            "Example: --k-recall 100 to get more candidates when filtering by author or year."
+        ),
     )
     parser.add_argument(
         "--full",
@@ -185,112 +319,103 @@ def main():
     parser.add_argument(
         "--no-rerank",
         action="store_true",
-        help="Disable LLM-based reranking for this query (falls back to pure vector similarity). "
-             "Use when you want faster results or to debug embedding quality.",
+        help=(
+            "Disable LLM-based reranking for this query (falls back to pure vector similarity). "
+            "Use when you want faster results or to debug embedding quality."
+        ),
     )
     parser.add_argument(
         "--no-diversity",
         action="store_true",
-        help="Disable diversity/deduplication filtering (allows multiple chunks from same source). "
-             "Use for deep dives into specific sources where you want all relevant chunks.",
+        help=(
+            "Disable diversity/deduplication filtering (allows multiple chunks from same source). "
+            "Use for deep dives into specific sources where you want all relevant chunks."
+        ),
     )
     parser.add_argument(
         "--max-per-source",
         type=int,
         default=None,
-        help="Maximum results allowed per source document (auto-enables diversity if not already on). "
-             "Examples: --max-per-source 1 for broad survey across sources, "
-             "--max-per-source 10 for deep dive into each relevant source. "
-             "Default from config is typically 2.",
+        help=(
+            "Maximum results allowed per source document (auto-enables diversity if not already on). "
+            "Examples: --max-per-source 1 for broad survey across sources, "
+            "--max-per-source 10 for deep dive into each relevant source. Default from config is typically 2."
+        ),
     )
-
-    # Filters (deep dives)
     parser.add_argument(
         "--chunk-level",
         type=str,
         choices=["coarse", "mid", "fine"],
         default=None,
-        help="Filter by hierarchical chunk granularity level. "
-             "COARSE: Large sections with broad context (good for overview/gist, ~1500-2500 chars). "
-             "MID: Medium sections with balanced context (good for general queries, ~800-1500 chars). "
-             "FINE: Small focused segments like paragraphs/headings (good for precise matches, may lack context). "
-             "Omit to search all levels (default). Use coarse/mid for better context in results.",
+        help=(
+            "Filter by hierarchical chunk granularity level. COARSE: large sections "
+            "(~1500-2500 chars). MID: medium sections (~800-1500 chars). FINE: small focused "
+            "segments (~paragraph-sized)."
+        ),
     )
     parser.add_argument(
         "--source-type",
         type=str,
         default=None,
-        help="Restrict search to a specific source type. "
-             "Options: 'zotero_fulltext' (PDF/doc full text), 'zotero_note' (Zotero notes), "
-             "'zotero_annotation' (PDF highlights/comments), 'obsidian' (vault markdown notes). "
-             "Useful for focusing on specific content types.",
+        help=(
+            "Restrict search to a specific source type. Options: 'zotero' (base item metadata), "
+            "'zotero_fulltext', 'zotero_note', 'zotero_annotation', 'obsidian'."
+        ),
     )
     parser.add_argument(
         "--zotero-key",
         type=str,
         default=None,
-        help="Restrict search to a single Zotero item by its key (exact match). "
-             "Use this for deep diving into one specific paper/book. "
-             "Example: --zotero-key XMN6HI9Y to search only within that item.",
+        help=(
+            "Restrict search to a single Zotero item by its key (exact match). "
+            "Example: --zotero-key XMN6HI9Y."
+        ),
     )
     parser.add_argument(
         "--author",
         type=str,
         default=None,
-        help="Filter results where author field contains this substring (case-insensitive). "
-             "Example: --author 'Smith' finds 'John Smith', 'Smith et al', etc. "
-             "Useful for finding all works by or involving a specific researcher.",
+        help="Filter results where author field contains this substring (case-insensitive).",
     )
     parser.add_argument(
         "--title-contains",
         type=str,
         default=None,
-        help="Filter results where title contains this substring (case-insensitive). "
-             "Example: --title-contains 'coaching' finds any title mentioning coaching. "
-             "Useful for narrowing to specific topics or book titles.",
+        help="Filter results where title contains this substring (case-insensitive).",
     )
     parser.add_argument(
         "--year-min",
         type=int,
         default=None,
-        help="Restrict to publications from this year onwards (inclusive). "
-             "Example: --year-min 2020 for recent research only. "
-             "Combine with --year-max for a range (e.g., --year-min 2015 --year-max 2020).",
+        help="Restrict to publications from this year onwards (inclusive).",
     )
     parser.add_argument(
         "--year-max",
         type=int,
         default=None,
-        help="Restrict to publications up to this year (inclusive). "
-             "Example: --year-max 2010 for historical research. "
-             "Combine with --year-min for a specific time period.",
+        help="Restrict to publications up to this year (inclusive).",
     )
 
     args = parser.parse_args()
 
-    # Check if config exists
     if not args.config.exists():
         print(f"[ERROR] Configuration file not found: {args.config}")
         print("\nPlease create config.yaml from config.example.yaml")
         sys.exit(1)
 
     try:
-        # Initialize pipeline
         pipeline = ResearchRAGPipeline(args.config)
-
-        # Check if collection has any data
         stats = pipeline.vector_store.get_collection_stats()
         if stats.get("document_count", 0) == 0:
             print("[WARN] Collection is empty! Run 'python scripts/index.py' first.")
             sys.exit(1)
 
-        # Run query or interactive mode
         if args.query:
-            # Single query mode
             query_text = " ".join(args.query)
             results = pipeline.query(
                 query_text,
                 k=args.k,
+                retrieval_mode=args.mode,
                 rerank_enabled=(False if args.no_rerank else None),
                 diversity_enabled=(False if args.no_diversity else None),
                 diversity_max_per_key=args.max_per_source,
@@ -305,7 +430,6 @@ def main():
             )
             print_results(results, show_full_text=args.full)
         else:
-            # Interactive mode
             interactive_mode(pipeline)
 
     except KeyboardInterrupt:
@@ -314,6 +438,7 @@ def main():
     except Exception as e:
         print(f"\n[ERROR] {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

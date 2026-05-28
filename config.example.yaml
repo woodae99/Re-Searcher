@@ -19,6 +19,18 @@ zotero:
   include_notes: true
   # Whether to include annotations
   include_annotations: true
+  # Local API base for incremental change detection and indexed fulltext retrieval
+  local_api_base: "http://localhost:23119/api/users/0"
+  local_api_timeout: 20
+  # Prefer Zotero indexed fulltext for attachments before fallback extraction
+  prefer_local_api_fulltext: true
+  # Ignore tiny fulltext payloads
+  fulltext_min_chars: 200
+  # Heuristic: large PDFs with tiny indexed fulltext are likely partial-indexed
+  fulltext_large_pdf_mb: 20
+  fulltext_large_pdf_min_chars: 20000
+  # Set true to scan /fulltext?since=0 on first delta bootstrap (can be very slow on large libraries)
+  fulltext_bootstrap_scan: false
 
 # Obsidian vault configuration
 obsidian:
@@ -36,6 +48,8 @@ obsidian:
   exclude_folders:
     - "Templates"
     - ".obsidian"
+  # Also exclude paths from .obsidian/app.json userIgnoreFilters
+  use_obsidian_ignore_filters: false
 
 # Local file sources (for backward compatibility)
 local_files:
@@ -58,7 +72,9 @@ embedding:
   # Model name for LM Studio
   model: "text-embedding-bge-m3"
   # Batch size for embedding requests
-  batch_size: 32
+  batch_size: 128
+  # Maximum parallel embedding API requests
+  max_concurrent_requests: 2
   # Timeout for API requests (seconds)
   timeout: 30
   # Model context length (for oversize guard calculations)
@@ -67,6 +83,8 @@ embedding:
   lmstudio:
     base_url: "http://localhost:1234/v1"
     model: "text-embedding-model-name"
+    batch_size: 128
+    max_concurrent_requests: 2
     timeout_seconds: 120
   openai:
     api_key: "${OPENAI_API_KEY}"
@@ -151,6 +169,9 @@ chunking:
 
 retrieval:
   k_recall: 50
+  mode_default: fast  # fast | strict
+  telemetry:
+    enabled: true
   rerank:
     enabled: true
     type: llm  # none | llm | cross_encoder
@@ -183,6 +204,16 @@ log_progress: true
 indexing:
   # Documents per batch for resumable indexing
   batch_size: 50
+  dashboard:
+    enabled: true
+    snapshot_file: "indexing_dashboard.json"
+    snapshot_interval_seconds: 1.0
+  stop_after_batch:
+    flag_file: "stop_after_batch.flag"
+  delta:
+    enabled: true
+    state_file: "zotero_delta_state.json"
+    max_delete_keys_per_run: 500
   # Optional: pipeline embed/store overlap to reduce idle time
   embed_store_pipeline:
     enabled: false

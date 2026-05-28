@@ -211,6 +211,14 @@ class ChromaVectorStore(VectorStore):
         except Exception as e:
             print(f"[ERROR] Error deleting collection: {e}")
 
+    def delete_where(self, where: Dict[str, Any]) -> None:
+        """Delete documents matching a Chroma where filter."""
+        try:
+            self.collection.delete(where=where)
+        except Exception as e:
+            print(f"[ERROR] Error deleting documents by filter {where}: {e}")
+            raise
+
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the collection."""
         try:

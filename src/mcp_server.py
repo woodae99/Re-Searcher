@@ -11,8 +11,11 @@ It's designed as a thin wrapper around the existing pipeline to ensure:
 import asyncio
 import sys
 import os
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List
+
+import yaml
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -47,6 +50,10 @@ from src.mcp_formatters.formatters import (
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 
 
+class MCPServerBusyError(RuntimeError):
+    """Raised when the MCP server is already handling its search capacity."""
+
+
 class ResearchMCPServer:
     """MCP Server wrapper for Re-Searcher pipeline."""
 
@@ -60,9 +67,33 @@ class ResearchMCPServer:
         self.config_path = config_path
         self.server = Server("research-mcp")
         self.pipeline = None
+        self._init_lock = asyncio.Lock()
+
+        runtime_config = self._load_runtime_config()
+        mcp_config = runtime_config.get("mcp", {}) or {}
+        self.max_concurrent_searches = max(
+            1, int(mcp_config.get("max_concurrent_searches", 1))
+        )
+        self.search_acquire_timeout_seconds = float(
+            mcp_config.get("search_acquire_timeout_seconds", 900)
+        )
+        self._search_semaphore = asyncio.Semaphore(self.max_concurrent_searches)
 
         # Register request handlers
         self._register_handlers()
+
+    def _load_runtime_config(self) -> Dict[str, Any]:
+        """Load lightweight runtime config used by the MCP wrapper itself."""
+        if not self.config_path.exists():
+            return {}
+
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            loaded = yaml.safe_load(f) or {}
+
+        if not isinstance(loaded, dict):
+            return {}
+
+        return loaded
 
     def _register_handlers(self):
         """Register MCP protocol handlers."""
@@ -76,7 +107,9 @@ class ResearchMCPServer:
                     description=(
                         "Search the research library using semantic search across Zotero references and Obsidian notes. "
                         "Returns relevant passages with metadata. "
-                        "Supports hierarchical chunking (coarse/mid/fine), metadata filtering, diversity controls, and reranking."
+                        "Supports hierarchical chunking (coarse/mid/fine), metadata filtering, diversity controls, and reranking. "
+                        "Cold-start note: if ChromaDB has been idle or recently started, the first call can take several minutes "
+                        "while the database wakes up; later calls are usually much faster."
                     ),
                     inputSchema={
                         "type": "object",
@@ -104,6 +137,16 @@ class ResearchMCPServer:
                                 ),
                                 "minimum": 1,
                                 "maximum": 1000,
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["fast", "strict"],
+                                "description": (
+                                    "Retrieval filter strategy. 'fast' performs broad vector recall and applies most metadata filters "
+                                    "after retrieval, which is usually better for large corpora. 'strict' applies compatible metadata "
+                                    "filters directly in Chroma before retrieval, which can be useful for exact scoped searches. "
+                                    "Omit to use retrieval.mode_default from config.yaml."
+                                ),
                             },
                             "chunk_level": {
                                 "type": "string",
@@ -146,9 +189,10 @@ class ResearchMCPServer:
                             },
                             "source_type": {
                                 "type": "string",
-                                "enum": ["zotero_fulltext", "zotero_note", "zotero_annotation", "obsidian"],
+                                "enum": ["zotero", "zotero_fulltext", "zotero_note", "zotero_annotation", "obsidian"],
                                 "description": (
                                     "Restrict search to a specific source type: "
+                                    "'zotero' = base Zotero item metadata, "
                                     "'zotero_fulltext' = PDF/document full text, "
                                     "'zotero_note' = Zotero standalone notes, "
                                     "'zotero_annotation' = PDF highlights and comments, "
@@ -213,7 +257,8 @@ class ResearchMCPServer:
                     description=(
                         "Get the parent chunk for a given chunk ID. "
                         "Use this to expand context when a fine-grained chunk needs more surrounding text. "
-                        "Fine chunks link to mid chunks, mid chunks link to coarse chunks."
+                        "Fine chunks link to mid chunks, mid chunks link to coarse chunks. "
+                        "Cold-start note: if ChromaDB has been idle or recently started, the first call can take several minutes."
                     ),
                     inputSchema={
                         "type": "object",
@@ -253,26 +298,56 @@ class ResearchMCPServer:
         if self.pipeline is not None:
             return
 
-        # Check config exists
-        if not self.config_path.exists():
-            raise FileNotFoundError(
-                f"Configuration file not found: {self.config_path}\n"
-                f"Please create config.yaml from config.example.yaml"
-            )
+        async with self._init_lock:
+            if self.pipeline is not None:
+                return
 
-        # Initialize pipeline - this is where all the real work happens
-        # Any pipeline changes (new sources, different embeddings, etc.)
-        # automatically work here without modifying MCP server code
-        self.pipeline = ResearchRAGPipeline(self.config_path)
+            # Check config exists
+            if not self.config_path.exists():
+                raise FileNotFoundError(
+                    f"Configuration file not found: {self.config_path}\n"
+                    f"Please create config.yaml from config.example.yaml"
+                )
 
-        # Verify collection has data
-        stats = self.pipeline.vector_store.get_collection_stats()
-        doc_count = stats.get("document_count", 0)
-        if doc_count == 0:
-            raise RuntimeError(
-                "Collection is empty! Run indexing first:\n"
-                "  python scripts/index.py"
-            )
+            # Initialize pipeline - this is where all the real work happens
+            # Any pipeline changes (new sources, different embeddings, etc.)
+            # automatically work here without modifying MCP server code
+            self.pipeline = ResearchRAGPipeline(self.config_path)
+
+            # Verify collection has data
+            stats = self.pipeline.vector_store.get_collection_stats()
+            doc_count = stats.get("document_count", 0)
+            if doc_count == 0:
+                raise RuntimeError(
+                    "Collection is empty! Run indexing first:\n"
+                    "  python scripts/index.py"
+                )
+
+    async def _run_search_query(self, **query_kwargs):
+        """Run a blocking pipeline query without blocking the async MCP loop."""
+        await self._initialize_pipeline()
+
+        timeout = self.search_acquire_timeout_seconds
+        try:
+            if timeout <= 0:
+                await self._search_semaphore.acquire()
+            else:
+                await asyncio.wait_for(
+                    self._search_semaphore.acquire(),
+                    timeout=timeout,
+                )
+        except asyncio.TimeoutError as exc:
+            raise MCPServerBusyError(
+                "research-mcp is still busy with earlier queued search requests. "
+                "This can happen during a cold ChromaDB start or a burst of reranked searches; "
+                "retry later or send no_rerank=true for faster targeted follow-ups."
+            ) from exc
+
+        try:
+            query_call = partial(self.pipeline.query, **query_kwargs)
+            return await asyncio.to_thread(query_call)
+        finally:
+            self._search_semaphore.release()
 
     async def _search_research_library(
         self, arguments: Dict[str, Any]
@@ -288,12 +363,11 @@ class ResearchMCPServer:
         """
         try:
             # Ensure pipeline is initialized
-            await self._initialize_pipeline()
-
             # Extract arguments
             query = arguments.get("query")
             k = arguments.get("k", 5)
             k_recall = arguments.get("k_recall")
+            mode = arguments.get("mode")
             chunk_level = arguments.get("chunk_level")
             no_rerank = bool(arguments.get("no_rerank", False))
             no_diversity = bool(arguments.get("no_diversity", False))
@@ -311,9 +385,10 @@ class ResearchMCPServer:
                 raise ValueError("Query parameter is required")
 
             # Execute search using existing pipeline
-            results = self.pipeline.query(
-                query,
+            results = await self._run_search_query(
+                query_text=query,
                 k=k,
+                retrieval_mode=mode,
                 k_recall_override=k_recall,
                 chunk_level=chunk_level,
                 rerank_enabled=(False if no_rerank else None),

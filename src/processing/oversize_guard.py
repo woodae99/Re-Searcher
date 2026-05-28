@@ -191,6 +191,9 @@ class OversizeGuard:
             if not part:
                 continue
 
+            parent_variant = metadata.get("chunk_id_variant")
+            chunk_variant = str(i) if parent_variant is None else f"{parent_variant}.{i}"
+
             # Create new metadata for split chunk
             new_metadata = {
                 **metadata,
@@ -198,6 +201,7 @@ class OversizeGuard:
                 "split_from_chunk_id": original_chunk_id,
                 "split_part": i,
                 "split_total": len(parts),
+                "chunk_id_variant": chunk_variant,
             }
 
             # Recursively process if still too large
