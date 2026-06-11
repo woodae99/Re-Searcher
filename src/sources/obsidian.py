@@ -47,12 +47,17 @@ class ObsidianSource(DataSource):
 
         return True
 
-    def fetch_documents(self) -> Iterator[Document]:
+    def fetch_documents(self, relative_paths: Optional[List[str]] = None) -> Iterator[Document]:
         """
-        Fetch all markdown documents from Obsidian vault.
+        Fetch markdown documents from the Obsidian vault.
+
+        Args:
+            relative_paths: When given, only these vault-relative paths are
+                processed (delta mode). The wikilink map is still built from
+                the whole vault so links resolve correctly.
 
         Yields:
-            Document objects for each markdown file in the vault.
+            Document objects for each processed markdown file.
         """
         if not self.validate_config():
             return
@@ -63,14 +68,28 @@ class ObsidianSource(DataSource):
         exclude_patterns = self._get_exclude_patterns()
 
         # Find all markdown files
-        md_files = self._find_markdown_files(include_folders, exclude_patterns)
-        total_files = len(md_files)
-        print(f"[INFO] Found {total_files} markdown files in Obsidian vault")
+        all_md_files = self._find_markdown_files(include_folders, exclude_patterns)
+        link_map = self._build_link_map(all_md_files)
+
+        if relative_paths is not None:
+            wanted = {str(path) for path in relative_paths}
+            md_files = [
+                md_file
+                for md_file in all_md_files
+                if str(md_file.relative_to(self.vault_path)) in wanted
+            ]
+            total_files = len(md_files)
+            print(
+                f"[INFO] Obsidian delta: processing {total_files} of "
+                f"{len(all_md_files)} markdown files"
+            )
+        else:
+            md_files = all_md_files
+            total_files = len(md_files)
+            print(f"[INFO] Found {total_files} markdown files in Obsidian vault")
 
         # Emit source initialization
         self._emit_progress("source_init", total=total_files)
-
-        link_map = self._build_link_map(md_files)
 
         for idx, md_file in enumerate(md_files):
             self._emit_progress("item_start", file_path=str(md_file), index=idx, total=total_files)
@@ -104,6 +123,35 @@ class ObsidianSource(DataSource):
                 )
 
         self._emit_progress("source_complete")
+
+    def get_file_states(self) -> Dict[str, tuple[float, int]]:
+        """Snapshot of vault files: relative path -> (mtime, size).
+
+        Used by the pipeline's Obsidian delta to detect new, changed, and
+        deleted notes without reading file contents.
+        """
+        if not self.validate_config():
+            return {}
+
+        include_folders = self._normalize_folder_list(
+            self.obsidian_config.get("include_folders", [])
+        )
+        exclude_patterns = self._get_exclude_patterns()
+        states: Dict[str, tuple[float, int]] = {}
+        for md_file in self._find_markdown_files(include_folders, exclude_patterns):
+            try:
+                stat = md_file.stat()
+            except OSError:
+                continue
+            relative = str(md_file.relative_to(self.vault_path))
+            states[relative] = (stat.st_mtime, stat.st_size)
+        return states
+
+    @staticmethod
+    def content_version_for_state(state: tuple[float, int]) -> str:
+        """Stable content-version string from a (mtime, size) state."""
+        mtime, size = state
+        return f"{mtime:.6f}-{size}"
 
     def _find_markdown_files(
         self, include_folders: List[str], exclude_patterns: List[str]
@@ -232,12 +280,19 @@ class ObsidianSource(DataSource):
         # Get relative path from vault root
         relative_path = md_file.relative_to(self.vault_path)
 
+        try:
+            stat = md_file.stat()
+            content_version = self.content_version_for_state((stat.st_mtime, stat.st_size))
+        except OSError:
+            content_version = ""
+
         # Build metadata
         metadata = {
             "source_type": "obsidian",
             "vault_path": str(self.vault_path),
             "file_path": str(md_file),
             "relative_path": str(relative_path),
+            "content_version": content_version,
             "file_name": md_file.name,
             "title": frontmatter.get("title", md_file.stem),
             "wikilinks": wikilinks,

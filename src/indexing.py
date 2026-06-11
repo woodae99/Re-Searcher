@@ -80,6 +80,7 @@ class IndexingProgress:
         status: DocumentStatus,
         chunk_count: Optional[int] = None,
         error_msg: Optional[str] = None,
+        content_version: Optional[str] = None,
     ):
         """
         Update document status.
@@ -89,6 +90,8 @@ class IndexingProgress:
             status: New status
             chunk_count: Number of chunks (when status is CHUNKED)
             error_msg: Error message (when status is ERROR)
+            content_version: Source content version (mtime/dateModified) so
+                "stored" means "this version stored"
         """
         # Get old status for stats update
         old_status = None
@@ -111,6 +114,9 @@ class IndexingProgress:
 
         if error_msg:
             self.data["documents"][doc_id]["error_msg"] = error_msg
+
+        if content_version is not None:
+            self.data["documents"][doc_id]["content_version"] = str(content_version)
 
         self._save()
 
@@ -152,10 +158,26 @@ class IndexingProgress:
                 return DocumentStatus(status_str)
         return None
 
-    def has_completed_status(self, doc_id: str) -> bool:
-        """Check if document is fully indexed (status == STORED)."""
+    def has_completed_status(
+        self, doc_id: str, content_version: Optional[str] = None
+    ) -> bool:
+        """Check if the current version of a document is fully indexed.
+
+        When both the caller and the stored record carry a content version,
+        the versions must match — a changed document is never skipped as
+        already-stored. Records without a version (pre-upgrade) are trusted
+        as stored, so the upgrade does not trigger a mass re-index.
+        """
         status = self.get_status(doc_id)
-        return status == DocumentStatus.STORED
+        if status != DocumentStatus.STORED:
+            return False
+
+        if content_version is None:
+            return True
+        stored_version = self.data["documents"].get(doc_id, {}).get("content_version")
+        if stored_version is None:
+            return True
+        return str(stored_version) == str(content_version)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get current statistics."""

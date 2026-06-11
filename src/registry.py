@@ -111,6 +111,11 @@ class SourceRegistry:
                     ON chunks(identity_field, identity_value);
                 CREATE INDEX IF NOT EXISTS idx_chunks_source_id
                     ON chunks(source_id);
+                CREATE TABLE IF NOT EXISTS vault_files (
+                    relative_path TEXT PRIMARY KEY,
+                    mtime REAL NOT NULL,
+                    size INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS sources (
                     identity_field TEXT NOT NULL,
                     identity_value TEXT NOT NULL,
@@ -412,9 +417,71 @@ class SourceRegistry:
         with self._connect() as conn:
             conn.execute("DELETE FROM chunks")
             conn.execute("DELETE FROM sources")
+            conn.execute("DELETE FROM vault_files")
             conn.execute(
                 "DELETE FROM meta WHERE key NOT IN ('schema_version')"
             )
+
+    # ------------------------------------------------------------ vault state
+
+    def get_vault_state(self) -> Dict[str, Tuple[float, int]]:
+        """Per-file vault snapshot from the last successful index run."""
+        with self._connect() as conn:
+            return {
+                row["relative_path"]: (row["mtime"], row["size"])
+                for row in conn.execute(
+                    "SELECT relative_path, mtime, size FROM vault_files"
+                )
+            }
+
+    def set_vault_state_entries(self, entries: Dict[str, Tuple[float, int]]) -> None:
+        """Upsert vault file states (called after files are successfully stored)."""
+        if not entries:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO vault_files(relative_path, mtime, size)
+                VALUES(?, ?, ?)
+                ON CONFLICT(relative_path) DO UPDATE SET
+                    mtime = excluded.mtime,
+                    size = excluded.size
+                """,
+                [
+                    (path, float(state[0]), int(state[1]))
+                    for path, state in entries.items()
+                ],
+            )
+
+    def delete_vault_state_entries(self, relative_paths: List[str]) -> None:
+        if not relative_paths:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                "DELETE FROM vault_files WHERE relative_path = ?",
+                [(path,) for path in relative_paths],
+            )
+
+    def obsidian_freshness(self) -> Dict[str, str]:
+        """Vault-relative path -> last_indexed_at for indexed Obsidian sources.
+
+        Used to bootstrap the Obsidian delta when no vault snapshot exists yet
+        (first run after the registry backfill).
+        """
+        prefix = "obsidian-"
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT identity_value, last_indexed_at
+                FROM sources
+                WHERE identity_field = 'source_id'
+                  AND identity_value LIKE 'obsidian-%'
+                """
+            ).fetchall()
+        return {
+            row["identity_value"][len(prefix):]: row["last_indexed_at"] or ""
+            for row in rows
+        }
 
     # ------------------------------------------------------------------ read
 

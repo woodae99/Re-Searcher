@@ -194,6 +194,8 @@ class ResearchRAGPipeline:
             # Check if re-indexing is needed
             changed_zotero_keys: Optional[List[str]] = None
             delta_versions: Optional[Dict[str, Any]] = None
+            obsidian_delta: Optional[Dict[str, Any]] = None
+            obsidian_paths_to_fetch: Optional[List[str]] = None
             if force_reindex:
                 print("[INFO] --force enabled: resetting index state and vector store")
                 self._reset_index_state()
@@ -220,15 +222,44 @@ class ResearchRAGPipeline:
                 else:
                     print("[INFO] Delta mode: no Zotero changes detected.")
 
-                # If delta reports no changes but global source hash changed, fall back
-                # to a full scan for safety (covers local-API outages or unsupported edits).
-                global_reindex_needed = self._needs_reindex()
-                if not changed_zotero_keys and global_reindex_needed:
-                    print("[WARN] Delta reported no changed keys but source hash changed; falling back to full Zotero scan.")
+                # Obsidian per-file delta: new/changed/deleted notes from the
+                # vault snapshot (or registry freshness on bootstrap).
+                obsidian_delta = self._collect_obsidian_delta_changes()
+                if obsidian_delta is not None:
+                    obsidian_paths_to_fetch = obsidian_delta["changed"]
+                    print(
+                        f"[INFO] Obsidian delta: {len(obsidian_delta['changed'])} new/changed, "
+                        f"{len(obsidian_delta['deleted'])} deleted."
+                    )
+
+                # Per-source hash fallback. Only a *Zotero* hash change widens
+                # the Zotero scan; Obsidian is covered exhaustively by the
+                # file-state diff, and a config edit alone should never
+                # trigger a multi-hour re-fetch.
+                current_hashes = self._compute_source_hashes()
+                previous_hashes = self._load_source_hashes()
+                if (
+                    "config" in previous_hashes
+                    and previous_hashes["config"] != current_hashes["config"]
+                ):
+                    print(
+                        "[WARN] config.yaml changed since the last run. Metadata "
+                        "filters pick this up automatically, but chunking/embedding "
+                        "changes need a --force re-index."
+                    )
+                if (
+                    not changed_zotero_keys
+                    and "zotero" in previous_hashes
+                    and previous_hashes["zotero"] != current_hashes["zotero"]
+                ):
+                    print("[WARN] Delta reported no changed keys but the Zotero DB changed; falling back to full Zotero scan.")
                     changed_zotero_keys = None
 
-                # If no changes anywhere, exit early.
-                if changed_zotero_keys == [] and not global_reindex_needed and not resume_incomplete:
+                # If no changes anywhere, persist watermarks and exit early.
+                obsidian_has_work = obsidian_delta is not None and (
+                    obsidian_delta["changed"] or obsidian_delta["deleted"]
+                )
+                if changed_zotero_keys == [] and not obsidian_has_work:
                     if delta_versions:
                         self._save_delta_state(
                             item_version=delta_versions["item_version"],
@@ -240,18 +271,44 @@ class ResearchRAGPipeline:
                                 0,
                             ),
                         )
+                    self._save_source_hash()
+                    # Seed the vault snapshot on bootstrap so future runs diff
+                    # against it even though nothing needed indexing today.
+                    self._persist_vault_state(obsidian_delta)
                     print("[INFO] No changes detected. Use --force to re-index anyway.")
                     return
             elif not self._needs_reindex() and not resume_incomplete:
                 print("[INFO] Index is up to date. Use --force to re-index anyway.")
                 return
 
+            # Remove chunks for vault notes that were deleted or changed
+            # (changed notes are re-indexed below; delete-first avoids stale
+            # chunk IDs surviving a content change).
+            if obsidian_delta is not None:
+                if obsidian_delta["deleted"]:
+                    print(f"[INFO] Removing {len(obsidian_delta['deleted'])} deleted Obsidian notes from the index.")
+                    self._delete_obsidian_sources(obsidian_delta["deleted"], removing=True)
+                if obsidian_delta["changed"]:
+                    self._delete_obsidian_sources(obsidian_delta["changed"])
+
+            # Replace old chunks for changed/deleted Zotero items. This runs
+            # before fetching so that pure deletions (which produce no
+            # documents) are still applied to the index.
+            if changed_zotero_keys:
+                self._delete_existing_zotero_chunks(changed_zotero_keys)
+
             # Stage 2: Fetching documents
             self.progress_display.set_stage(IndexingStage.FETCHING, 2, 4)
             self.progress_display.set_activity("Fetching documents from sources...")
-            documents = self._fetch_all_documents(zotero_item_keys=changed_zotero_keys)
+            documents = self._fetch_all_documents(
+                zotero_item_keys=changed_zotero_keys,
+                obsidian_relative_paths=obsidian_paths_to_fetch,
+            )
 
             if not documents:
+                # Deletions (Zotero items removed, vault notes removed) are
+                # already applied above; persist watermarks so they are not
+                # re-detected, and keep the registry aggregates in step.
                 if delta_versions:
                     self._save_delta_state(
                         item_version=delta_versions["item_version"],
@@ -263,12 +320,15 @@ class ResearchRAGPipeline:
                             0,
                         ),
                     )
-                print("[WARNING] No documents to index!")
+                    self._save_source_hash()
+                    self._persist_vault_state(obsidian_delta)
+                    self._refresh_registry()
+                    print("[INFO] No documents to re-index; deletions (if any) have been applied.")
+                else:
+                    print("[WARNING] No documents to index!")
                 return
 
             if changed_zotero_keys:
-                # Replace old chunks for changed Zotero items to avoid stale duplicates.
-                self._delete_existing_zotero_chunks(changed_zotero_keys)
                 # Ensure changed docs are not skipped due old progress entries.
                 for doc in documents:
                     if doc.metadata.get("source_type", "").startswith("zotero"):
@@ -321,7 +381,9 @@ class ResearchRAGPipeline:
                     ),
                 )
 
-            # Keep registry aggregates in step with this run's writes.
+            # Record which vault files are now reliably indexed, then keep
+            # registry aggregates in step with this run's writes.
+            self._persist_vault_state(obsidian_delta)
             self._refresh_registry()
 
             # Stage 4: Complete
@@ -363,11 +425,14 @@ class ResearchRAGPipeline:
 
             self.progress_display.set_activity(f"Processing batch {batch_num}/{total_batches}")
 
-            # Filter out already processed documents
+            # Filter out already processed documents (version-aware: a doc
+            # whose source content changed is never skipped as stored)
             pending_docs = [
                 doc
                 for doc in batch
-                if not self.progress.has_completed_status(doc.doc_id)
+                if not self.progress.has_completed_status(
+                    doc.doc_id, doc.metadata.get("content_version")
+                )
             ]
 
             if not pending_docs:
@@ -463,11 +528,13 @@ class ResearchRAGPipeline:
                             )
                         continue
 
-                # Update progress: documents stored
+                # Update progress: documents stored (with the content version
+                # that was stored, so future runs can detect changes)
                 for doc in pending_docs:
                     self.progress.set_document_status(
                         doc.doc_id,
                         DocumentStatus.STORED,
+                        content_version=doc.metadata.get("content_version"),
                     )
 
             except Exception as e:
@@ -493,8 +560,16 @@ class ResearchRAGPipeline:
         print(f"[INFO] Stop-after-batch request detected: {self.stop_flag_path}")
         return True
 
-    def _fetch_all_documents(self, zotero_item_keys: Optional[List[str]] = None) -> List:
-        """Fetch documents from all sources."""
+    def _fetch_all_documents(
+        self,
+        zotero_item_keys: Optional[List[str]] = None,
+        obsidian_relative_paths: Optional[List[str]] = None,
+    ) -> List:
+        """Fetch documents from all sources.
+
+        For both parameters, None means "fetch everything" and a list means
+        "fetch only these" (an empty list fetches nothing from that source).
+        """
         all_documents = []
         zotero_cfg = self.config.get("zotero", {}) or {}
         zotero_strict = bool(zotero_cfg.get("fail_if_no_documents", True))
@@ -504,11 +579,26 @@ class ResearchRAGPipeline:
             self.progress_display.set_activity(f"Fetching from {source_name}...")
             try:
                 if isinstance(source, ZoteroSource) and zotero_item_keys is not None:
+                    if not zotero_item_keys:
+                        continue
                     documents = list(source.fetch_documents(item_keys=zotero_item_keys))
+                elif isinstance(source, ObsidianSource) and obsidian_relative_paths is not None:
+                    if not obsidian_relative_paths:
+                        continue
+                    documents = list(
+                        source.fetch_documents(relative_paths=obsidian_relative_paths)
+                    )
                 else:
                     documents = list(source.fetch_documents())
 
-                if isinstance(source, ZoteroSource) and not documents:
+                if (
+                    isinstance(source, ZoteroSource)
+                    and not documents
+                    and zotero_item_keys is None
+                ):
+                    # Only suspicious on a full scan; a targeted delta fetch
+                    # legitimately returns nothing when every changed key was
+                    # a deletion.
                     msg = (
                         "Zotero source returned 0 documents. "
                         "This usually means the Zotero SQLite DB is locked or unavailable."
@@ -926,74 +1016,224 @@ class ResearchRAGPipeline:
         )
         return changes
 
+    def _get_obsidian_source(self) -> Optional[ObsidianSource]:
+        for source in self.sources:
+            if isinstance(source, ObsidianSource):
+                return source
+        return None
+
+    @staticmethod
+    def _parse_indexed_at(stamp: str) -> Optional[datetime]:
+        if not stamp:
+            return None
+        try:
+            return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _collect_obsidian_delta_changes(self) -> Optional[Dict[str, Any]]:
+        """Diff the vault against the registry's per-file snapshot.
+
+        Returns {"changed": [...], "deleted": [...], "disk": {path: (mtime, size)},
+        "bootstrap": bool}, or None when no Obsidian source is enabled.
+
+        Normal mode compares against the vault_files snapshot from the last
+        run. Bootstrap mode (no snapshot yet, e.g. first run after the
+        registry backfill) falls back to comparing file mtimes against each
+        source's last_indexed_at in the registry; notes whose chunks predate
+        indexed_at stamps are assumed current — the registry audit's stale
+        list is the repair path for those.
+        """
+        source = self._get_obsidian_source()
+        if source is None:
+            return None
+
+        disk = source.get_file_states()
+        snapshot = self.registry.get_vault_state()
+
+        if snapshot:
+            changed = sorted(
+                path for path, state in disk.items() if snapshot.get(path) != state
+            )
+            deleted = sorted(path for path in snapshot if path not in disk)
+            return {"changed": changed, "deleted": deleted, "disk": disk, "bootstrap": False}
+
+        freshness = self.registry.obsidian_freshness()
+        changed = []
+        unknown_age = 0
+        for path, (mtime, _size) in disk.items():
+            if path not in freshness:
+                changed.append(path)
+                continue
+            indexed_at = self._parse_indexed_at(freshness[path])
+            if indexed_at is None:
+                unknown_age += 1
+                continue
+            if datetime.fromtimestamp(mtime, tz=timezone.utc) > indexed_at:
+                changed.append(path)
+        deleted = sorted(path for path in freshness if path not in disk)
+        if unknown_age:
+            print(
+                f"[INFO] Obsidian bootstrap: {unknown_age} indexed notes have no "
+                f"indexed_at stamp; assuming current. Use the registry audit's "
+                f"stale list to repair any that changed before this upgrade."
+            )
+        return {"changed": sorted(changed), "deleted": deleted, "disk": disk, "bootstrap": True}
+
+    def _persist_vault_state(self, obsidian_delta: Optional[Dict[str, Any]]) -> None:
+        """Record the vault snapshot for files that are now reliably indexed."""
+        try:
+            if obsidian_delta is not None:
+                disk = obsidian_delta["disk"]
+                changed = set(obsidian_delta["changed"])
+                entries = {}
+                for path, state in disk.items():
+                    if path in changed:
+                        doc_id = f"obsidian-{path}"
+                        version = ObsidianSource.content_version_for_state(state)
+                        if not self.progress.has_completed_status(doc_id, version):
+                            continue
+                    entries[path] = state
+                self.registry.set_vault_state_entries(entries)
+            elif self._delta_enabled():
+                # Full-fetch run (resume / fallback): seed the snapshot for
+                # every note whose document is stored, so the next run can
+                # delta properly.
+                source = self._get_obsidian_source()
+                if source is None:
+                    return
+                disk = source.get_file_states()
+                entries = {
+                    path: state
+                    for path, state in disk.items()
+                    if self.progress.get_status(f"obsidian-{path}") == DocumentStatus.STORED
+                }
+                self.registry.set_vault_state_entries(entries)
+        except Exception as e:
+            print(f"[WARN] Failed to persist vault state: {e}")
+
     def _delete_existing_zotero_chunks(self, item_keys: List[str]) -> None:
+        """Delete all indexed chunks for the given Zotero items, batched.
+
+        There is deliberately no upper key limit: skipping deletes while still
+        re-indexing creates stale duplicates (stable chunk IDs include content,
+        so changed content gets new IDs and the old ones survive). A delete
+        failure raises and aborts the run instead.
+
+        The source_type guard keeps Obsidian notes that cite an item (and so
+        carry its zotero_key in metadata) out of the deletion.
+        """
         if not item_keys:
             return
-        max_delete_keys = int(self._delta_cfg().get("max_delete_keys_per_run", 500))
-        if len(item_keys) > max_delete_keys:
-            print(
-                f"[WARN] Skipping targeted chunk deletes for {len(item_keys)} keys "
-                f"(max_delete_keys_per_run={max_delete_keys})."
-            )
-            return
+        batch_size = max(1, int(self._delta_cfg().get("delete_batch_size", 100)))
         source_types = ["zotero", "zotero_note", "zotero_fulltext", "zotero_annotation"]
-        for key in item_keys:
-            for source_type in source_types:
-                self.vector_store.delete_where(
-                    {
-                        "$and": [
-                            {"zotero_key": key},
-                            {"source_type": source_type},
-                        ]
-                    }
-                )
+        total = len(item_keys)
+        for i in range(0, total, batch_size):
+            batch = item_keys[i : i + batch_size]
+            self.vector_store.delete_where(
+                {
+                    "$and": [
+                        {"zotero_key": {"$in": batch}},
+                        {"source_type": {"$in": source_types}},
+                    ]
+                }
+            )
+            for key in batch:
+                try:
+                    self.registry.delete_source_chunks("zotero_key", key)
+                except Exception as e:
+                    print(f"[WARN] Registry delete failed for zotero_key={key}: {e}")
+            if total > batch_size:
+                print(f"[INFO] Deleted old chunks for {min(i + batch_size, total)}/{total} changed Zotero items")
+
+    def _delete_obsidian_sources(
+        self, relative_paths: List[str], *, removing: bool = False
+    ) -> None:
+        """Delete indexed chunks for vault notes (changed: replace; removing: gone).
+
+        Clears the progress record so the note is re-indexed when changed, and
+        drops the vault-state row when the note was deleted from disk.
+        """
+        if not relative_paths:
+            return
+        batch_size = 100
+        source_ids = [f"obsidian-{path}" for path in relative_paths]
+        for i in range(0, len(source_ids), batch_size):
+            batch = source_ids[i : i + batch_size]
+            if len(batch) == 1:
+                where: Dict[str, Any] = {"source_id": batch[0]}
+            else:
+                where = {"source_id": {"$in": batch}}
+            self.vector_store.delete_where(where)
+            for source_id in batch:
+                try:
+                    self.registry.delete_source_chunks("source_id", source_id)
+                except Exception as e:
+                    print(f"[WARN] Registry delete failed for {source_id}: {e}")
+                self.progress.forget_document(source_id)
+        if removing:
             try:
-                self.registry.delete_source_chunks("zotero_key", key)
+                self.registry.delete_vault_state_entries(list(relative_paths))
             except Exception as e:
-                print(f"[WARN] Registry delete failed for zotero_key={key}: {e}")
+                print(f"[WARN] Vault-state cleanup failed: {e}")
 
-    def _compute_source_hash(self) -> str:
-        """Compute hash of all data sources to detect changes."""
-        h = hashlib.md5()
-
-        # Hash config file
+    def _compute_source_hashes(self) -> Dict[str, str]:
+        """Per-source change hashes, so one source's edits never trigger a
+        full re-fetch of the others (an edited note used to force a full
+        Zotero scan via the old combined hash)."""
+        config_h = hashlib.md5()
         if self.config_path.exists():
-            h.update(self.config_path.read_bytes())
+            config_h.update(self.config_path.read_bytes())
 
-        # Hash Zotero database if enabled
+        zotero_h = hashlib.md5()
         zotero_cfg = self.config.get("zotero", {})
         if zotero_cfg.get("enabled"):
             zotero_db = Path(zotero_cfg.get("data_directory", "")).expanduser() / "zotero.sqlite"
             if zotero_db.exists():
-                h.update(str(zotero_db.stat().st_mtime).encode())
+                zotero_h.update(str(zotero_db.stat().st_mtime).encode())
 
-        # Hash Obsidian vault if enabled
+        obsidian_h = hashlib.md5()
         obsidian_cfg = self.config.get("obsidian", {})
         if obsidian_cfg.get("enabled"):
             vault_path = Path(obsidian_cfg.get("vault_path", "")).expanduser()
             if vault_path.exists():
-                # Hash all markdown files
                 for md_file in sorted(vault_path.rglob("*.md")):
-                    h.update(str(md_file.stat().st_mtime).encode())
+                    obsidian_h.update(str(md_file.stat().st_mtime).encode())
 
-        return h.hexdigest()
+        return {
+            "config": config_h.hexdigest(),
+            "zotero": zotero_h.hexdigest(),
+            "obsidian": obsidian_h.hexdigest(),
+        }
+
+    def _load_source_hashes(self) -> Dict[str, str]:
+        """Load saved per-source hashes; legacy single-hash files return {}."""
+        hash_file = self.output_dir / "source_hash.txt"
+        if not hash_file.exists():
+            return {}
+        raw = hash_file.read_text().strip()
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                return {str(k): str(v) for k, v in loaded.items()}
+        except json.JSONDecodeError:
+            pass
+        return {}
 
     def _needs_reindex(self) -> bool:
         """Check if re-indexing is needed based on source changes."""
-        hash_file = self.output_dir / "source_hash.txt"
-
-        current_hash = self._compute_source_hash()
-        if not hash_file.exists():
+        previous = self._load_source_hashes()
+        if not previous:
+            # Missing or legacy-format hash file: assume changed once; the
+            # version-keyed progress check prevents redundant re-embedding.
             return True
-
-        previous_hash = hash_file.read_text().strip()
-        return current_hash != previous_hash
+        current = self._compute_source_hashes()
+        return any(previous.get(key) != value for key, value in current.items())
 
     def _save_source_hash(self):
-        """Save current source hash."""
+        """Save current per-source hashes."""
         hash_file = self.output_dir / "source_hash.txt"
-        current_hash = self._compute_source_hash()
-        hash_file.write_text(current_hash)
+        hash_file.write_text(json.dumps(self._compute_source_hashes(), indent=2))
 
     def _reset_index_state(self):
         """Reset progress and storage for a full re-index."""

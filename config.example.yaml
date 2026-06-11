@@ -213,7 +213,9 @@ indexing:
   delta:
     enabled: true
     state_file: "zotero_delta_state.json"
-    max_delete_keys_per_run: 500
+    # Changed/deleted items have their old chunks removed in batches of this
+    # size before re-indexing. There is no upper limit on keys per run.
+    delete_batch_size: 100
   # Optional: pipeline embed/store overlap to reduce idle time
   embed_store_pipeline:
     enabled: false

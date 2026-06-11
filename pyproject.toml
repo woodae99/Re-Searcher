@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "re-searcher"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local semantic + keyword search with Zotero integration"
 authors = ["<you>"]
 

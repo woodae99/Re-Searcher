@@ -362,6 +362,12 @@ class ZoteroSource(DataSource):
         sqlite_max_attachment_storage_mod_time = int(last_sqlite_attachment_storage_mod_time or 0)
         if self._is_local_api_available():
             item_keys, item_version = self._fetch_changed_item_keys(last_item_version)
+            # /items?since= does NOT report deletions; they live on /deleted.
+            # Without this, items deleted while Zotero is open keep their
+            # chunks in the index forever.
+            deleted_api_keys = self._fetch_deleted_item_keys(last_item_version)
+            if deleted_api_keys:
+                item_keys = list(dict.fromkeys([*item_keys, *deleted_api_keys]))
             fulltext_attachment_keys, fulltext_version = self._fetch_changed_fulltext_keys(last_fulltext_version)
             sqlite_watermarks = self._get_current_sqlite_delta_watermarks()
             sqlite_max_date_modified = sqlite_watermarks["sqlite_max_date_modified"]
@@ -760,6 +766,37 @@ class ZoteroSource(DataSource):
         finally:
             conn.close()
 
+    def _fetch_deleted_item_keys(self, since_version: int) -> List[str]:
+        """Fetch keys of items deleted since the given library version.
+
+        Uses the /deleted endpoint, which is the only place the Zotero API
+        reports deletions. Skipped on bootstrap (since_version <= 0), where
+        the historical deletion list would be large and predates the delta
+        cycle anyway.
+        """
+        if since_version <= 0:
+            return []
+
+        url = f"{self.local_api_base}/deleted"
+        try:
+            response = requests.get(
+                url,
+                params={"since": max(0, int(since_version))},
+                headers={"Zotero-Allowed-Request": "1"},
+                timeout=self.local_api_timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return []
+            keys = payload.get("items", [])
+            if not isinstance(keys, list):
+                return []
+            return [str(key) for key in keys if key]
+        except Exception as e:
+            print(f"[WARN] Failed to fetch deleted item keys from Zotero API: {e}")
+            return []
+
     def _fetch_changed_fulltext_keys(self, since_version: int) -> tuple[List[str], int]:
         """Fetch attachment keys with changed fulltext since given Zotero version."""
         if since_version <= 0 and not self.fulltext_bootstrap_scan:
@@ -853,8 +890,14 @@ class ZoteroSource(DataSource):
                 """,
                 tuple(item_keys),
             )
-            normalized = [row["effective_key"] for row in cursor.fetchall() if row["effective_key"]]
-            return list(dict.fromkeys(normalized))
+            rows = cursor.fetchall()
+            normalized = [row["effective_key"] for row in rows if row["effective_key"]]
+            # Keys absent from the SQLite items table (e.g. deleted items whose
+            # trash has been emptied) must be kept as-is so their chunks can
+            # still be deleted from the index by zotero_key.
+            found_child_keys = {row["child_key"] for row in rows if row["child_key"]}
+            unresolved = [key for key in item_keys if key not in found_child_keys]
+            return list(dict.fromkeys([*normalized, *unresolved]))
         except Exception:
             return item_keys
         finally:
@@ -900,10 +943,15 @@ class ZoteroSource(DataSource):
         """Get base metadata for an item."""
         cursor = conn.cursor()
 
-        # Get item key
-        cursor.execute("SELECT key FROM items WHERE itemID = ?", (item_id,))
+        # Get item key and modification stamp (used as the content version
+        # for version-keyed progress; a changed item is never skipped as
+        # already-stored even if delta detection missed it)
+        cursor.execute(
+            "SELECT key, dateModified FROM items WHERE itemID = ?", (item_id,)
+        )
         key_row = cursor.fetchone()
         zotero_key = key_row["key"] if key_row else str(item_id)
+        content_version = (key_row["dateModified"] or "") if key_row else ""
 
         # Get field values
         cursor.execute(
@@ -959,6 +1007,7 @@ class ZoteroSource(DataSource):
             "source_type": "zotero",
             "zotero_key": zotero_key,
             "zotero_id": item_id,
+            "content_version": content_version,
             "title": fields.get("title", "Untitled"),
             "authors": ", ".join(creators) if creators else "Unknown",
             "year": fields.get("date", "")[:4] if fields.get("date") else "",

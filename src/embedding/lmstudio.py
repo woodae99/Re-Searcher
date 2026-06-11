@@ -123,12 +123,17 @@ class LMStudioEmbedding(EmbeddingProvider):
                         failed_batches.append((batch_idx, batch, e))
 
         if failed_batches:
-            if self._dimension is None:
-                first_error = failed_batches[0][2]
-                raise RuntimeError("Cannot determine embedding dimension") from first_error
-            zero_vector = [0.0] * self._dimension
-            for batch_idx, batch, _ in failed_batches:
-                batch_results[batch_idx] = [zero_vector.copy() for _ in batch]
+            # Never store placeholder vectors: a zero vector is permanently
+            # unfindable and silently corrupts the index. Fail the whole call;
+            # the pipeline marks the affected documents ERROR and they are
+            # retried on the next run.
+            failed_indices = sorted(batch_idx for batch_idx, _, _ in failed_batches)
+            first_error = failed_batches[0][2]
+            raise RuntimeError(
+                f"Embedding failed for {len(failed_batches)} of {len(batches)} "
+                f"batches (batch indices {failed_indices[:10]}). "
+                f"First error: {first_error}"
+            ) from first_error
 
         embeddings = []
         for batch_embeddings in batch_results:
@@ -161,9 +166,9 @@ class LMStudioEmbedding(EmbeddingProvider):
             return embedding
 
         except Exception as e:
+            # A zero-vector fallback here would silently return nonsense
+            # search results; surface the failure to the caller instead.
             print(f"❌ Error generating query embedding: {e}")
-            if self._dimension:
-                return [0.0] * self._dimension
             raise
 
     @property

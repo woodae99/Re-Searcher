@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.5.0
+
+Trustworthy updates: routine index runs now converge the index to the truth.
+
+### Fixed
+- **Edited Obsidian notes are re-indexed.** New per-file vault delta: the
+  registry keeps a (mtime, size) snapshot per note; each run diffs the vault
+  against it, re-indexes changed notes (deleting their old chunks first) and
+  removes chunks for deleted notes. Previously an edited note was never
+  re-indexed and a deleted note's chunks lived forever. On first run after the
+  registry backfill, the delta bootstraps from per-source `indexed_at` stamps.
+- **Zotero deletions are detected while Zotero is open.** The API delta path
+  now also queries `/deleted?since=`; previously deletions were only caught by
+  the closed-Zotero SQLite path, whose watermark had usually already advanced
+  past them. Parent-key resolution also retains keys purged from zotero.sqlite
+  so their chunks can still be deleted.
+- **Large delta runs no longer create duplicates.** The >500-key delete-skip is
+  removed; old chunks for changed/deleted items are deleted in batched `$in`
+  filters (`indexing.delta.delete_batch_size`, default 100) with no key limit.
+  Pure-deletion runs (no documents to fetch) now actually apply the deletions.
+- **Failed embedding batches no longer store zero vectors.** `embed_texts`
+  raises so the pipeline marks the affected documents ERROR and retries next
+  run; `embed_query` raises instead of silently searching with a zero vector.
+
+### Changed
+- **Version-keyed progress**: the progress checkpoint records each document's
+  content version (file mtime/size for notes, `dateModified` for Zotero items);
+  "already stored" now means "this version stored". Pre-upgrade records without
+  a version are trusted, so the upgrade does not trigger a mass re-index.
+- **Per-source change hashes**: `source_hash.txt` now stores separate config /
+  Zotero / Obsidian hashes. An edited note no longer triggers a full Zotero
+  re-fetch (the main cause of multi-hour "routine" updates), and a config edit
+  alone warns instead of forcing a scan.
+- `indexing.delta.max_delete_keys_per_run` is retired (no longer needed);
+  `indexing.delta.delete_batch_size` controls delete batching.
+
+### Deferred
+- Metadata-only update path (re-write chunk metadata without re-embedding when
+  only Zotero fields changed) — planned alongside Phase 3 throughput work.
+
 ## 0.4.0
 
 Source registry: enumeration becomes a first-class, maintained system component.

@@ -86,10 +86,10 @@ environment; they are unrelated to most changes.
 
 See `CHANGELOG.md` for shipped work. Agreed next phases (June 2026):
 
-- **Phase 2 — trustworthy updates**: Obsidian per-file delta + deletes (edited notes
-  are currently never re-indexed; deletes never removed), Zotero `/deleted?since=`
-  handling, remove the >500-key delete-skip, version-keyed progress, fail loudly on
-  embedding errors instead of storing zero vectors, metadata-only update path.
-- **Phase 3 — throughput**: raise embedding concurrency (the 4-day rebuild
+- **Phase 2 — trustworthy updates (shipped in 0.5.0)**: Obsidian per-file delta +
+  deletes, Zotero `/deleted?since=` handling, batched deletes with no key cap,
+  version-keyed progress, fail-loud embeddings, per-source change hashes.
+- **Phase 3 — throughput (next)**: raise embedding concurrency (the 4-day rebuild
   bottleneck), honor configured store batch sizes, parallel upserts, weekly
-  reconcile in `routine_update_re_searcher.cmd`.
+  reconcile in `routine_update_re_searcher.cmd`, metadata-only update path
+  (deferred from Phase 2).
