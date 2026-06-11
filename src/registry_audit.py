@@ -110,8 +110,14 @@ def audit_zotero(registry: SourceRegistry, config: Dict[str, Any]) -> Dict[str, 
                 SELECT i.key
                 FROM items i
                 JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
-                WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
-                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                LEFT JOIN itemAttachments ia ON ia.itemID = i.itemID
+                WHERE i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND (
+                        it.typeName NOT IN ('attachment', 'note', 'annotation')
+                        -- standalone attachments (no parent item) are indexed
+                        -- under their own key and belong in the expected set
+                        OR (it.typeName = 'attachment' AND ia.parentItemID IS NULL)
+                      )
                 """
             ).fetchall()
         finally:
