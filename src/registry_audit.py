@@ -100,21 +100,32 @@ def audit_zotero(registry: SourceRegistry, config: Dict[str, Any]) -> Dict[str, 
         return {"skipped": True, "reason": f"zotero.sqlite not found at {db_path}"}
 
     uri = f"{db_path.as_uri()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=30)
-    conn.row_factory = sqlite3.Row
     try:
-        conn.execute("PRAGMA busy_timeout = 30000")
-        rows = conn.execute(
-            """
-            SELECT i.key
-            FROM items i
-            JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
-            WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
-              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
-            """
-        ).fetchall()
-    finally:
-        conn.close()
+        conn = sqlite3.connect(uri, uri=True, timeout=30)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            rows = conn.execute(
+                """
+                SELECT i.key
+                FROM items i
+                JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+                WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        # Typically "database is locked": Zotero holds zotero.sqlite while the
+        # app is open. Skip this section rather than failing the whole audit.
+        return {
+            "skipped": True,
+            "reason": (
+                f"zotero.sqlite unavailable ({exc}). Close Zotero and re-run "
+                f"scripts/build_registry.py --audit-only."
+            ),
+        }
     expected = {row["key"] for row in rows}
 
     with _registry_conn(registry) as reg:
