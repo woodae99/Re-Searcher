@@ -21,6 +21,7 @@ from .processing.id_utils import attach_parent_ids, stable_chunk_id
 from .processing.oversize_guard import create_oversize_guard
 from .processing.quality_filter import create_quality_filter_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
+from .registry import SourceRegistry, registry_path_for
 from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
 from .retrieval.filters import apply_post_filters, build_where_filter
@@ -81,6 +82,11 @@ class ResearchRAGPipeline:
             collection_slug = "research_library"
         progress_file = self.output_dir / f"indexing_progress.{collection_slug}.json"
         self.progress = IndexingProgress(progress_file)
+
+        # Source registry: SQLite mirror of source/chunk identity, updated in
+        # the same code paths as vector-store writes so enumeration surfaces
+        # (list_sources, CLI, index status) never scan collection metadata.
+        self.registry = SourceRegistry(registry_path_for(self.config))
 
         # Batch configuration
         self.batch_size = self.config.get("indexing", {}).get("batch_size", 50)
@@ -279,6 +285,7 @@ class ResearchRAGPipeline:
             self.progress_display.set_activity(f"Processing {len(documents)} documents in batches...")
             completed_run = self._process_batches(documents)
             if not completed_run:
+                self._refresh_registry()
                 print(
                     "[INFO] Indexing paused after completing the current batch. "
                     "Run the same command again to resume."
@@ -313,6 +320,9 @@ class ResearchRAGPipeline:
                         0,
                     ),
                 )
+
+            # Keep registry aggregates in step with this run's writes.
+            self._refresh_registry()
 
             # Stage 4: Complete
             self.progress_display.set_stage(IndexingStage.COMPLETE, 4, 4)
@@ -776,9 +786,35 @@ class ResearchRAGPipeline:
                     metadatas=metadatas[i:batch_end],
                     ids=ids[i:batch_end],
                 )
+
+            self._record_registry_chunks(ids, metadatas)
         except Exception as e:
             print(f"[ERROR] Error storing embeddings: {e}")
             raise
+
+    def _record_registry_chunks(self, ids: List[str], metadatas: List[Dict[str, Any]]):
+        """Mirror stored chunks into the source registry (never fails indexing)."""
+        try:
+            self.registry.record_chunks(ids, metadatas)
+        except Exception as e:
+            print(
+                f"[WARN] Registry update failed; registry may drift from the vector "
+                f"store until 'python scripts/build_registry.py' is re-run. Error: {e}"
+            )
+
+    def _refresh_registry(self):
+        """Rebuild registry source aggregates after a run's writes/deletes."""
+        try:
+            self.registry.refresh_sources()
+            self.registry.set_meta(
+                "last_index_run_at",
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z"),
+            )
+        except Exception as e:
+            print(f"[WARN] Registry refresh failed: {e}")
 
     def _delta_cfg(self) -> Dict[str, Any]:
         return self.config.get("indexing", {}).get("delta", {}) or {}
@@ -911,6 +947,10 @@ class ResearchRAGPipeline:
                         ]
                     }
                 )
+            try:
+                self.registry.delete_source_chunks("zotero_key", key)
+            except Exception as e:
+                print(f"[WARN] Registry delete failed for zotero_key={key}: {e}")
 
     def _compute_source_hash(self) -> str:
         """Compute hash of all data sources to detect changes."""
@@ -958,6 +998,11 @@ class ResearchRAGPipeline:
     def _reset_index_state(self):
         """Reset progress and storage for a full re-index."""
         self.progress.clear()
+
+        try:
+            self.registry.reset()
+        except Exception as e:
+            print(f"[WARN] Registry reset failed: {e}")
 
         hash_file = self.output_dir / "source_hash.txt"
         if hash_file.exists():

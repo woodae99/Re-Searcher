@@ -161,7 +161,6 @@ def format_list_sources(payload: Dict[str, Any]) -> str:
             "Identity Fields: "
             "zotero_key for Zotero sources; source_id for Obsidian/local sources"
         ),
-        "Cold Scan Cost: list_sources scans all collection metadata when the cache is cold or collection count changes.",
     ]
 
     active_filters = {k: v for k, v in filters.items() if v}
@@ -194,6 +193,43 @@ def format_list_sources(payload: Dict[str, Any]) -> str:
         parts.append(f"Freshness: {source.get('freshness', 'unknown')}")
         if source.get("backlink"):
             parts.append(f"Link: {source['backlink']}")
+
+    return "\n".join(parts)
+
+
+def format_index_status(payload: Dict[str, Any]) -> str:
+    """Format index health status for MCP response text."""
+    registry = payload.get("registry", {}) or {}
+    drift = payload.get("drift", 0)
+
+    parts = [
+        "=== Index Status ===",
+        f"Collection: {payload.get('collection_name', 'unknown')}",
+        f"Endpoint: {payload.get('endpoint', 'unknown')}",
+        f"Server Build: {payload.get('git_sha', 'unknown')}",
+        "",
+        f"Chroma Chunks: {payload.get('chroma_chunk_count', 0):,}",
+        f"Registry Chunks: {registry.get('chunk_count', 0):,}",
+        f"Registry Sources: {registry.get('source_count', 0):,}",
+        f"Drift (chroma - registry): {drift:+,}",
+    ]
+
+    if drift == 0:
+        parts.append("Sync: OK (registry matches the vector store)")
+    else:
+        parts.append(
+            "Sync: DRIFT DETECTED - registry and vector store disagree. "
+            "Run 'python scripts/build_registry.py' to rebuild/verify, "
+            "or re-run the routine index update."
+        )
+
+    parts.extend([
+        "",
+        f"Registry Backfill Complete: {'yes' if registry.get('backfill_complete') else 'no'}",
+        f"Last Index Run: {registry.get('last_index_run_at') or 'unknown'}",
+        f"Last Registry Refresh: {registry.get('last_refreshed_at') or 'unknown'}",
+        f"Last Backfill: {registry.get('last_backfill_at') or 'never'}",
+    ])
 
     return "\n".join(parts)
 

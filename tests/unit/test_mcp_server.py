@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from src.mcp_server import MCPServerBusyError, ResearchMCPServer
+from src.registry import SourceRegistry
 
 
 class _FakePipeline:
@@ -71,14 +72,70 @@ class _FakeVectorStore:
     def __init__(self, collection):
         self.collection = collection
 
+    def get_collection_stats(self):
+        return {
+            "collection_name": "test_collection",
+            "document_count": self.collection.count(),
+            "endpoint": "http://localhost:8000",
+        }
 
-def _server_with_collection(collection, output_dir=None):
+
+def _server_with_collection(collection, output_dir=None, registry=None):
     server = ResearchMCPServer(Path("config.yaml"))
     server.pipeline = SimpleNamespace(
         vector_store=_FakeVectorStore(collection),
         output_dir=output_dir or Path("output"),
+        registry=registry,
     )
     return server
+
+
+def _registry_with_sources(tmp_path):
+    """Registry seeded with one Zotero item (note + fulltext chunks) and one note."""
+    registry = SourceRegistry(tmp_path / "registry.test.sqlite")
+    registry.record_chunks(
+        ["z-note-1", "z-full-1", "z-full-2", "o-1"],
+        [
+            {
+                "source_type": "zotero_note",
+                "zotero_key": "Z1",
+                "source_id": "zotero-1-note-9",
+                "title": "Alpha Coaching",
+                "authors": "Whitehead",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+            },
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-1-attachment-7",
+                "title": "Alpha Coaching",
+                "authors": "Whitehead",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+                "indexed_at": "2026-06-10T12:00:00Z",
+            },
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-1-attachment-7",
+                "title": "Alpha Coaching",
+                "authors": "Whitehead",
+                "chunk_level": "fine",
+                "chunk_index": 1,
+            },
+            {
+                "source_type": "obsidian",
+                "source_id": "obsidian-B.md",
+                "title": "Beta Notes",
+                "authors": "Colin",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+            },
+        ],
+    )
+    registry.refresh_sources()
+    return registry
 
 
 def test_mcp_server_defaults_to_single_search_slot():
@@ -218,139 +275,99 @@ def test_get_source_chunks_errors_when_identity_is_ambiguous():
     asyncio.run(run_test())
 
 
-def test_list_sources_aggregates_batches_filters_and_caches():
+def test_list_sources_reads_registry(tmp_path):
     async def run_test():
-        collection = _FakeCollection(
-            [
-                {
-                    "id": "z-1",
-                    "document": "a",
-                    "metadata": {
-                        "source_type": "zotero_fulltext",
-                        "zotero_key": "Z1",
-                        "title": "Alpha Coaching",
-                        "authors": "Whitehead",
-                        "chunk_level": "mid",
-                        "indexed_at": "2026-06-10T12:00:00Z",
-                    },
-                },
-                {
-                    "id": "z-2",
-                    "document": "b",
-                    "metadata": {
-                        "source_type": "zotero_fulltext",
-                        "zotero_key": "Z1",
-                        "title": "Alpha Coaching",
-                        "authors": "Whitehead",
-                        "chunk_level": "fine",
-                    },
-                },
-                {
-                    "id": "o-1",
-                    "document": "c",
-                    "metadata": {
-                        "source_type": "obsidian",
-                        "source_id": "obsidian-B.md",
-                        "title": "Beta Notes",
-                        "authors": "Colin",
-                        "chunk_level": "mid",
-                    },
-                },
-            ]
-        )
-        server = _server_with_collection(collection)
+        registry = _registry_with_sources(tmp_path)
+        server = _server_with_collection(_FakeCollection([]), registry=registry)
 
-        first = await server._list_sources({"author": "white", "limit": 10})
-        second = await server._list_sources({"title_contains": "alpha", "limit": 10})
+        by_author = await server._list_sources({"author": "white", "limit": 10})
+        by_title = await server._list_sources({"title_contains": "alpha", "limit": 10})
 
-        assert "Total Sources: 1" in first[0].text
+        assert "Total Sources: 1" in by_author[0].text
+        assert "Identity: zotero_key=Z1" in by_author[0].text
+        assert "mid=2" in by_author[0].text
+        assert "fine=1" in by_author[0].text
+        assert "Freshness: 2026-06-10T12:00:00Z" in by_author[0].text
+        assert "Total Sources: 1" in by_title[0].text
+
+    asyncio.run(run_test())
+
+
+def test_list_sources_source_type_filter_uses_membership(tmp_path):
+    """An item whose first-seen chunk was a note must still match fulltext filters."""
+
+    async def run_test():
+        registry = _registry_with_sources(tmp_path)
+        server = _server_with_collection(_FakeCollection([]), registry=registry)
+
+        fulltext = await server._list_sources({"source_type": "zotero_fulltext"})
+        notes = await server._list_sources({"source_type": "zotero_note"})
+        obsidian = await server._list_sources({"source_type": "obsidian"})
+
+        assert "Identity: zotero_key=Z1" in fulltext[0].text
+        assert "Identity: zotero_key=Z1" in notes[0].text
+        assert "Identity: source_id=obsidian-B.md" in obsidian[0].text
+        assert "zotero_key=Z1" not in obsidian[0].text
+
+    asyncio.run(run_test())
+
+
+def test_list_sources_pagination_is_disjoint_and_complete(tmp_path):
+    async def run_test():
+        registry = _registry_with_sources(tmp_path)
+        server = _server_with_collection(_FakeCollection([]), registry=registry)
+
+        first = await server._list_sources({"limit": 1, "offset": 0})
+        second = await server._list_sources({"limit": 1, "offset": 1})
+
+        # Sorted by title: Alpha Coaching (Z1) then Beta Notes (obsidian-B.md)
         assert "Identity: zotero_key=Z1" in first[0].text
-        assert "mid=1" in first[0].text
-        assert "fine=1" in first[0].text
-        assert "Freshness: 2026-06-10T12:00:00Z" in first[0].text
-        assert "Total Sources: 1" in second[0].text
-        assert collection.count_calls == 2
-        metadata_scans = [
-            call
-            for call in collection.get_calls
-            if call["include"] == ["metadatas"] and call["limit"] == 2000
-        ]
-        assert len(metadata_scans) == 1
-
-    asyncio.run(run_test())
-
-
-def test_list_sources_cache_rebuilds_when_collection_count_changes():
-    async def run_test():
-        collection = _FakeCollection(
-            [
-                {
-                    "id": "o-1",
-                    "document": "c",
-                    "metadata": {
-                        "source_type": "obsidian",
-                        "source_id": "obsidian-B.md",
-                        "title": "Beta Notes",
-                        "chunk_level": "mid",
-                    },
-                },
-            ]
-        )
-        server = _server_with_collection(collection)
-
-        await server._list_sources({})
-        collection.records.append(
-            {
-                "id": "o-2",
-                "document": "d",
-                "metadata": {
-                    "source_type": "obsidian",
-                    "source_id": "obsidian-C.md",
-                    "title": "Gamma Notes",
-                    "chunk_level": "mid",
-                },
-            }
-        )
-        result = await server._list_sources({})
-
-        assert "Total Sources: 2" in result[0].text
-        metadata_scans = [
-            call
-            for call in collection.get_calls
-            if call["include"] == ["metadatas"] and call["limit"] == 2000
-        ]
-        assert len(metadata_scans) == 2
-
-    asyncio.run(run_test())
-
-
-def test_list_sources_large_collection_starts_background_cache(tmp_path):
-    async def run_test():
-        collection = _FakeCollection(
-            [
-                {
-                    "id": "o-1",
-                    "document": "c",
-                    "metadata": {
-                        "source_type": "obsidian",
-                        "source_id": "obsidian-B.md",
-                        "title": "Beta Notes",
-                        "chunk_level": "mid",
-                    },
-                },
-            ],
-            count_override=100_000,
-        )
-        server = _server_with_collection(collection, output_dir=tmp_path)
-
-        result = await server._list_sources({})
-
-        assert "Source register cache is building in the background" in result[0].text
-        assert server._source_cache_future is not None
-        assert server._source_cache_future.result(timeout=5)
-        assert (tmp_path / "mcp_source_cache.json").exists()
-        second = await server._list_sources({})
-        assert "=== Source Register ===" in second[0].text
+        assert "obsidian-B.md" not in first[0].text
         assert "Identity: source_id=obsidian-B.md" in second[0].text
+        assert "zotero_key=Z1" not in second[0].text
+        assert "Total Sources: 2" in first[0].text
+
+    asyncio.run(run_test())
+
+
+def test_list_sources_empty_registry_returns_guidance(tmp_path):
+    async def run_test():
+        registry = SourceRegistry(tmp_path / "registry.empty.sqlite")
+        server = _server_with_collection(_FakeCollection([]), registry=registry)
+
+        result = await server._list_sources({})
+
+        assert "build_registry.py" in result[0].text
+        assert "checkpointed" in result[0].text
+
+    asyncio.run(run_test())
+
+
+def test_index_status_reports_drift(tmp_path):
+    async def run_test():
+        registry = _registry_with_sources(tmp_path)  # 4 chunks recorded
+        collection = _FakeCollection([], count_override=6)
+        server = _server_with_collection(collection, registry=registry)
+
+        result = await server._index_status({})
+
+        assert "Chroma Chunks: 6" in result[0].text
+        assert "Registry Chunks: 4" in result[0].text
+        assert "Drift (chroma - registry): +2" in result[0].text
+        assert "DRIFT DETECTED" in result[0].text
+
+    asyncio.run(run_test())
+
+
+def test_index_status_reports_sync_ok(tmp_path):
+    async def run_test():
+        registry = _registry_with_sources(tmp_path)  # 4 chunks recorded
+        collection = _FakeCollection([], count_override=4)
+        server = _server_with_collection(collection, registry=registry)
+
+        result = await server._index_status({})
+
+        assert "Drift (chroma - registry): +0" in result[0].text
+        assert "Sync: OK" in result[0].text
 
     asyncio.run(run_test())

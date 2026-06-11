@@ -280,8 +280,13 @@ so in the response.
 
 ### list_sources
 
-Build a source register from collection metadata with per-level chunk counts.
-Rows from this tool can be fed directly into `get_source_chunks`.
+Return the source register with per-level chunk counts. Rows from this tool can
+be fed directly into `get_source_chunks`.
+
+The register is served from the **source registry**, a SQLite database
+(`output/registry.<collection>.sqlite`) that the indexing pipeline maintains in
+the same code paths that write to ChromaDB. Responses are immediate; there is no
+cold scan, background cache build, or retry loop.
 
 **Source identity fields:**
 - Zotero rows report `identity_field=zotero_key`.
@@ -290,18 +295,48 @@ Rows from this tool can be fed directly into `get_source_chunks`.
 
 **Parameters:**
 - **source_type** (optional): `zotero`, `zotero_fulltext`, `zotero_note`,
-  `zotero_annotation`, or `obsidian`
+  `zotero_annotation`, or `obsidian`. Matches sources that have *any* chunks of
+  that type (a Zotero item with both notes and fulltext matches both filters).
 - **title_contains** (optional): case-insensitive title filter
 - **author** (optional): case-insensitive authors filter
 - **limit** (optional): default `100`, max `500`
 - **offset** (optional): default `0`
 
-**Cold scan cost:** A cold `list_sources` call scans all collection metadata in
-batches. The aggregate is cached in memory and persisted to
-`output/mcp_source_cache.json`; it is rebuilt when `collection.count()` changes.
-For large collections with no valid cache, the first call starts the cache build
-in the background and returns quickly so the MCP client does not time out. Retry
-after the build completes.
+**One-time backfill:** Collections indexed before the registry existed need a
+single backfill scan:
+
+```bash
+python scripts/build_registry.py
+```
+
+The scan checkpoints its offset with every committed batch, so it can be
+interrupted (Ctrl-C, reboot) and re-run to resume. It finishes with an integrity
+audit (`output/registry_audit.json`) that diffs the index against the Zotero
+database and Obsidian vault. After the backfill, routine indexing keeps the
+registry in sync automatically.
+
+### index_status
+
+Report index health in one call: registry source/chunk counts, live ChromaDB
+chunk count, drift between the two, backfill/refresh timestamps, and the
+server's git SHA. Takes no parameters.
+
+Use it as a preflight check before systematic per-source missions: if drift is
+non-zero or the last index run is older than expected, fix the index before
+trusting enumeration results.
+
+## CLI parity
+
+Every enumeration tool has a CLI equivalent with identical logic and output
+formatting (`scripts/sources.py`):
+
+```bash
+python scripts/sources.py list --source-type zotero_fulltext --title-contains coaching
+python scripts/sources.py chunks --zotero-key XMN6HI9Y --chunk-level mid --no-text
+python scripts/sources.py status
+```
+
+Add `--json` to any subcommand for machine-readable output.
 
 ## Maintenance
 

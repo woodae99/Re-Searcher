@@ -39,7 +39,9 @@ def create_app(config_path: Path | None = None) -> Starlette:
     return Starlette(routes=routes, lifespan=lifespan)
 
 
-app = create_app()
+# For ASGI servers that import an app object, use the factory form:
+#   uvicorn 'src.mcp_http_server:create_app' --factory
+# The launch scripts use `python -m src.mcp_http_server`, which calls main().
 
 
 def main() -> None:

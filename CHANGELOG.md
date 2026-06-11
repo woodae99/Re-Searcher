@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.0
+
+Source registry: enumeration becomes a first-class, maintained system component.
+
+### Added
+- **Source registry** (`src/registry.py`): SQLite mirror of source/chunk identity
+  (`output/registry.<collection>.sqlite`), updated by the indexing pipeline in the
+  same code paths that write to and delete from ChromaDB. `list_sources` now reads
+  it directly and responds immediately at any collection size.
+- **Checkpointed backfill + integrity audit** (`scripts/build_registry.py`):
+  one-time registry build for pre-registry collections. Commits its scan offset
+  atomically with each batch, so it resumes after interruption. Finishes with an
+  audit (`output/registry_audit.json`) diffing the index against Zotero SQLite and
+  the Obsidian vault: ghosts, missing/stale notes, duplicate chunk slots, legacy
+  IDs, optional zero-vector sampling (`--check-embeddings N`).
+- **index_status MCP tool**: registry vs Chroma counts, drift flag, last run
+  timestamps, server git SHA. Intended as a preflight check for systematic
+  per-source missions.
+- **CLI parity** (`scripts/sources.py`): `list`, `chunks`, `status` subcommands
+  mirroring `list_sources` / `get_source_chunks` / `index_status` with shared
+  logic and formatting (`src/enumeration.py`); `--json` for machine output.
+- Server startup now logs the git SHA for deploy traceability.
+
+### Changed
+- `list_sources` no longer scans collection metadata at request time. The
+  background cache machinery (`output/mcp_source_cache.json`, count-keyed
+  invalidation, "cache is building" retry responses) is removed; an unbuilt
+  registry returns instructions for the one-time backfill instead.
+- `list_sources` `source_type` filter now matches membership (a source with any
+  chunks of the requested type), fixing rows being hidden when their first-seen
+  chunk had a different type.
+- `src/mcp_http_server.py` no longer constructs a second server instance at
+  import time.
+
 ## 0.3.1
 
 Hierarchical chunk filtering + UX improvements.
