@@ -58,6 +58,7 @@ def cmd_list(args) -> None:
         source_type=args.source_type,
         title_contains=args.title_contains,
         author=args.author,
+        collection=args.collection,
         limit=args.limit,
         offset=args.offset,
     )
@@ -147,6 +148,11 @@ def main():
     )
     p_list.add_argument("--title-contains", default=None, help="Case-insensitive title substring filter")
     p_list.add_argument("--author", default=None, help="Case-insensitive author substring filter")
+    p_list.add_argument(
+        "--collection",
+        default=None,
+        help="Case-insensitive Zotero collection name substring (scope a register to one collection)",
+    )
     p_list.add_argument("--limit", type=int, default=100, help="Max sources per page (default 100, max 500)")
     p_list.add_argument("--offset", type=int, default=0, help="Page offset after sorting")
     p_list.add_argument("--json", action="store_true", help="Emit raw JSON payload")

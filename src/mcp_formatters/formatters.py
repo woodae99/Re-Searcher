@@ -191,6 +191,8 @@ def format_list_sources(payload: Dict[str, Any]) -> str:
             f"unknown={counts.get('unknown', 0)}"
         )
         parts.append(f"Freshness: {source.get('freshness', 'unknown')}")
+        if source.get("collections"):
+            parts.append(f"Collections: {source['collections']}")
         if source.get("backlink"):
             parts.append(f"Link: {source['backlink']}")
 

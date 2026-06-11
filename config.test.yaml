@@ -16,7 +16,7 @@ obsidian:
 embedding:
   model: "text-embedding-bge-m3"
   api_endpoint: "http://localhost:1234/v1"
-  api_key: "sk-lm-nNiGKWlr:2CgOVIJlX5UcGyf3UKR6"
+  api_key: "${LMSTUDIO_API_KEY}"
   batch_size: 10
 
 # ChromaDB vector storage configuration

@@ -382,6 +382,15 @@ class ResearchMCPServer:
                                 "type": "string",
                                 "description": "Case-insensitive post-filter on source authors.",
                             },
+                            "collection": {
+                                "type": "string",
+                                "description": (
+                                    "Case-insensitive substring filter on Zotero collection names. "
+                                    "Use this to scope a register to one Zotero collection, "
+                                    "e.g. collection='Process' for a systematic-review register. "
+                                    "Only Zotero sources carry collections."
+                                ),
+                            },
                             "limit": {
                                 "type": "integer",
                                 "description": "Maximum sources to return in this page (default 100, max 500).",
@@ -777,6 +786,7 @@ class ResearchMCPServer:
                     source_type=source_type,
                     title_contains=title_contains,
                     author=author,
+                    collection=arguments.get("collection"),
                     limit=limit,
                     offset=offset,
                 )

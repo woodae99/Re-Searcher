@@ -8,6 +8,8 @@ Re-Searcher indexes your research library (Zotero + Obsidian + local files), sto
 
 - **Indexing pipeline**: extract → chunk → embed → store (resumable, batch-concurrent)
 - **Retrieval pipeline**: metadata filters, diversity/dedupe, robust reranking
+- **Source registry**: SQLite register of indexed sources for systematic-review
+  enumeration (list/enumerate/status with drift detection; CLI + MCP parity)
 - **Integrations**: Zotero (SQLite), Obsidian (frontmatter + links), local files
 - **Optional MCP server**: expose retrieval/indexing to agents/tools via MCP
 

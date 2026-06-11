@@ -118,6 +118,7 @@ class SourceRegistry:
                     authors TEXT DEFAULT '',
                     year TEXT DEFAULT '',
                     backlink TEXT DEFAULT '',
+                    collections TEXT DEFAULT '',
                     source_types TEXT DEFAULT '',
                     counts_json TEXT DEFAULT '{}',
                     total_chunks INTEGER DEFAULT 0,
@@ -127,6 +128,13 @@ class SourceRegistry:
                 );
                 """
             )
+            existing = {
+                row[1] for row in conn.execute("PRAGMA table_info(sources)").fetchall()
+            }
+            if "collections" not in existing:
+                conn.execute(
+                    "ALTER TABLE sources ADD COLUMN collections TEXT DEFAULT ''"
+                )
             conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -195,7 +203,8 @@ class SourceRegistry:
 
             key = (identity_field, identity_value)
             current = attrs.setdefault(
-                key, {"title": "", "authors": "", "year": "", "backlink": ""}
+                key,
+                {"title": "", "authors": "", "year": "", "backlink": "", "collections": ""},
             )
             title = str(metadata.get("title") or "")
             if current["title"] in _PLACEHOLDER_TITLES and title not in _PLACEHOLDER_TITLES:
@@ -207,6 +216,16 @@ class SourceRegistry:
                 current["year"] = str(metadata.get("year"))
             if not current["backlink"] and metadata.get("backlink"):
                 current["backlink"] = str(metadata.get("backlink"))
+            # Zotero collection names: a list before Chroma sanitization
+            # (pipeline path) or a comma-joined string after it (backfill path).
+            if not current["collections"] and metadata.get("collections"):
+                raw_collections = metadata.get("collections")
+                if isinstance(raw_collections, list):
+                    current["collections"] = ", ".join(
+                        str(name) for name in raw_collections
+                    )
+                else:
+                    current["collections"] = str(raw_collections)
 
         if not chunk_rows and not meta_updates:
             return 0
@@ -234,8 +253,8 @@ class SourceRegistry:
             if attrs:
                 conn.executemany(
                     """
-                    INSERT INTO sources(identity_field, identity_value, title, authors, year, backlink)
-                    VALUES(?,?,?,?,?,?)
+                    INSERT INTO sources(identity_field, identity_value, title, authors, year, backlink, collections)
+                    VALUES(?,?,?,?,?,?,?)
                     ON CONFLICT(identity_field, identity_value) DO UPDATE SET
                         title = CASE
                             WHEN excluded.title NOT IN ('', 'Untitled')
@@ -250,10 +269,21 @@ class SourceRegistry:
                             THEN excluded.year ELSE sources.year END,
                         backlink = CASE
                             WHEN excluded.backlink != '' AND sources.backlink = ''
-                            THEN excluded.backlink ELSE sources.backlink END
+                            THEN excluded.backlink ELSE sources.backlink END,
+                        collections = CASE
+                            WHEN excluded.collections != '' AND sources.collections = ''
+                            THEN excluded.collections ELSE sources.collections END
                     """,
                     [
-                        (field, value, a["title"], a["authors"], a["year"], a["backlink"])
+                        (
+                            field,
+                            value,
+                            a["title"],
+                            a["authors"],
+                            a["year"],
+                            a["backlink"],
+                            a["collections"],
+                        )
                         for (field, value), a in attrs.items()
                     ],
                 )
@@ -408,6 +438,7 @@ class SourceRegistry:
         source_type: Optional[str] = None,
         title_contains: Optional[str] = None,
         author: Optional[str] = None,
+        collection: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Dict[str, Any]:
@@ -424,6 +455,10 @@ class SourceRegistry:
         if author:
             where.append("lower(authors) LIKE ? ESCAPE '\\'")
             params.append(f"%{_like_escape(str(author).lower())}%")
+        if collection:
+            # Substring match on Zotero collection names (comma-joined).
+            where.append("lower(collections) LIKE ? ESCAPE '\\'")
+            params.append(f"%{_like_escape(str(collection).lower())}%")
 
         where_sql = " AND ".join(where)
 
@@ -456,6 +491,7 @@ class SourceRegistry:
                     "year": row["year"] or "",
                     "source_type": row["source_types"] or "unknown",
                     "backlink": row["backlink"] or None,
+                    "collections": row["collections"] or "",
                     "chunk_counts": counts.get("levels", {}),
                     "chunk_counts_by_type": counts.get("types", {}),
                     "total_chunks": row["total_chunks"],
@@ -474,6 +510,7 @@ class SourceRegistry:
                 "source_type": source_type,
                 "title_contains": title_contains,
                 "author": author,
+                "collection": collection,
             },
             "sources": sources,
         }

@@ -299,6 +299,9 @@ cold scan, background cache build, or retry loop.
   that type (a Zotero item with both notes and fulltext matches both filters).
 - **title_contains** (optional): case-insensitive title filter
 - **author** (optional): case-insensitive authors filter
+- **collection** (optional): case-insensitive substring match on Zotero collection
+  names — scopes a register to one Zotero collection (e.g. `"Process"` for a
+  systematic-review register). Only Zotero sources carry collections.
 - **limit** (optional): default `100`, max `500`
 - **offset** (optional): default `0`
 
@@ -411,7 +414,7 @@ Or in Claude Desktop config:
 2. **Check dependencies**: `pip install -r requirements.txt`
 
    - If you see an error like `ModuleNotFoundError: No module named 'mcp.server'` when starting the MCP plugin in LM Studio, it usually means LM Studio launched the script using a Python environment that does not have the `mcp` package installed.
-   - Diagnose by running `python check_mcp.py` from the project root (it prints Python executable and whether `mcp.server` can be imported).
+   - Diagnose with `python -c "import mcp.server; import sys; print(sys.executable)"` from the project root.
    - To fix, either install the requirements into the same Python (e.g., `pip install -r requirements.txt`) or launch the MCP script with the explicit Python that has `mcp` installed (Windows: `run_mcp.bat`).
 
 3. **Check ChromaDB**: Ensure Docker container is running on port 8000

@@ -229,3 +229,21 @@ def test_audit_duplicates_detects_double_slots(tmp_path):
     assert report["duplicate_slots"] == 1
     assert report["extra_chunks"] == 1
     assert report["affected_sources"] == 1
+
+
+def test_list_sources_collection_filter(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    in_process = _zotero_chunk("c1", "Z1")["metadata"]
+    in_process["collections"] = ["Process", "Theory"]
+    other = _zotero_chunk("c2", "Z2")["metadata"]
+    other["collections"] = "Methods"
+    registry.record_chunks(["c1", "c2"], [in_process, other])
+    registry.refresh_sources()
+
+    scoped = registry.list_sources_payload(collection="process")
+    assert scoped["total_sources"] == 1
+    assert scoped["sources"][0]["identity_value"] == "Z1"
+    assert scoped["sources"][0]["collections"] == "Process, Theory"
+
+    unscoped = registry.list_sources_payload()
+    assert unscoped["total_sources"] == 2

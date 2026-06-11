@@ -1,117 +1,95 @@
-# Re-Searcher: Project Context for Claude Code
+# Re-Searcher: Project Context
 
 ## Overview
-Re-Searcher is a semantic search system for academic research, built for Colin's PhD thesis work on coaching theory. It indexes and searches across Zotero (reference manager) and Obsidian (markdown notes) using BGE-M3 embeddings via LM Studio.
 
-## Current State (January 2025)
+Re-Searcher is a semantic search and systematic-review system for academic research,
+built for Colin's PhD thesis work on coaching theory. It indexes Zotero (references,
+PDF fulltext, notes, annotations) and Obsidian (markdown vault) into ChromaDB using
+BGE-M3 embeddings served by LM Studio, and exposes the corpus to humans (CLI) and
+agents (MCP) with deliberate parity between the two surfaces.
 
-### What's Working
-- **Full corpus indexed**: 649,094 chunks from 8,239 Zotero items + 4,720 Obsidian notes
-- **ChromaDB**: Running in Docker on port 8000, collection name: `research_library`
-- **Embeddings**: BGE-M3 (1024 dimensions) via LM Studio at `http://localhost:1234/v1`
-- **Query CLI**: `python scripts/query.py "search query"` works perfectly
-- **Rich metadata**: Authors, titles, DOIs, backlinks, source types preserved per chunk
+## Current State (June 2026)
 
-### The Problem We're Solving
-The `chroma-mcp` server (official Chroma MCP) can connect to our ChromaDB but **cannot query** because:
-- It uses a default 384-dimension embedder
-- Our collection uses 1024-dimension BGE-M3 embeddings
-- chroma-mcp doesn't support custom OpenAI base URLs for embedding
-
-We tried configuring chroma-mcp with environment variables (`OPENAI_API_BASE`, etc.) but it doesn't pass them through to its embedding function.
-
-### Solution: Build a Custom MCP Server
-Create a lightweight MCP server that wraps our existing pipeline, exposing a `search_research_library` tool that Claude can call directly.
+- **Production collection**: `research_library`, ~9.85M chunks from ~8,200 Zotero
+  items + ~4,700 Obsidian notes. ChromaDB runs in Docker on port 8000.
+- **Embeddings**: BGE-M3 (1024-dim) via LM Studio at `http://localhost:1234/v1`,
+  JIT-loaded on the local RTX 5090. Reranking uses a small LLM via the same server.
+- **Source registry**: SQLite mirror of source/chunk identity at
+  `output/registry.<collection>.sqlite`, maintained by the indexing pipeline in the
+  same code paths that write to ChromaDB. Enumeration (`list_sources`, status,
+  drift checks) reads the registry — never a collection scan.
+- **Everything runs on this machine (Bambino)**. Remote agents reach the MCP server
+  over HTTP (port 8001); local use goes through stdio MCP or the CLI scripts.
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Claude.ai     │────▶│  research-mcp    │────▶│   ChromaDB      │
-│   (MCP client)  │     │  (new server)    │     │   (Docker:8000) │
-└─────────────────┘     └────────┬─────────┘     └─────────────────┘
-                                 │
-                                 ▼
-                        ┌──────────────────┐
-                        │   LM Studio      │
-                        │   (BGE-M3)       │
-                        │   localhost:1234 │
-                        └──────────────────┘
+Claude / Hermes (MCP clients)          Colin (CLI)
+        │                                  │
+        ▼                                  ▼
+src/mcp_server.py  ◀── shared logic ──▶  scripts/*.py
+        │        (src/enumeration.py,
+        │         src/mcp_formatters/)
+        ▼
+src/pipeline.py ──▶ ChromaDB (Docker :8000)   ←─ vectors + chunk text
+        │      └──▶ output/registry.*.sqlite  ←─ source register, sync state
+        ▼
+LM Studio (:1234, BGE-M3 embed + rerank)
 ```
 
 ## Key Files
 
-### Configuration
-- `config.yaml` - Main config (endpoints, paths, chunking params)
-- `.chroma_env` - Local env vars (gitignored)
+- `config.yaml` — main config (gitignored; see `config.example.yaml`)
+- `src/pipeline.py` — ResearchRAGPipeline: indexing (batched, resumable, delta) + query
+- `src/registry.py` — source registry (SQLite) + checkpointed backfill
+- `src/registry_audit.py` — integrity audit: registry vs Zotero SQLite vs vault
+- `src/enumeration.py` — shared get_source_chunks logic (MCP + CLI)
+- `src/mcp_server.py` — MCP tools: search_research_library, get_chunk_context,
+  get_source_chunks, list_sources, index_status
+- `src/mcp_http_server.py` — HTTP transport wrapper (LAN access, port 8001)
+- `src/sources/{zotero,obsidian}.py` — extraction; `src/storage/chroma.py` — vector store
 
-### Pipeline Components
-- `src/pipeline.py` - ResearchRAGPipeline orchestrator
-- `src/embedding/lmstudio.py` - LM Studio embedding client
-- `src/storage/chroma.py` - ChromaVectorStore implementation
-- `src/sources/zotero.py` - Zotero data extraction
-- `src/sources/obsidian.py` - Obsidian vault indexing
+## Common Commands
 
-### Scripts
-- `scripts/query.py` - CLI query interface (working reference)
-- `scripts/index.py` - Incremental indexing
-- `index_full_corpus.py` - Full batch indexing (ran overnight)
-
-## Task: Create MCP Server
-
-### Requirements
-1. **MCP server** using Python `mcp` package
-2. **Single tool**: `search_research_library`
-   - Input: query string, optional k (number of results)
-   - Output: list of results with text, metadata, scores, backlinks
-3. **Use existing pipeline**: Reuse `ResearchRAGPipeline` from `src/pipeline.py`
-4. **Config-driven**: Read from `config.yaml`
-
-### Suggested Implementation
-```python
-# src/mcp_server.py
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-from pipeline import ResearchRAGPipeline
-
-server = Server("research-mcp")
-pipeline = ResearchRAGPipeline(Path("config.yaml"))
-
-@server.tool()
-async def search_research_library(query: str, k: int = 5) -> list:
-    """Search the research library using semantic search."""
-    results = pipeline.query(query, k=k)
-    # Format results with metadata, backlinks, scores
-    return formatted_results
+```bash
+python scripts/index.py                  # incremental index update (delta-aware, resumable)
+python scripts/index.py --request-stop   # cleanly stop a running index after current batch
+python scripts/query.py "..." -k 5       # semantic search (mirrors MCP search tool)
+python scripts/sources.py list --collection "Process"   # source register (mirrors list_sources)
+python scripts/sources.py chunks --zotero-key KEY       # enumerate one source
+python scripts/sources.py status         # registry vs Chroma drift check
+python scripts/build_registry.py         # one-time registry backfill + integrity audit (resumable)
+python -m pytest tests/ --ignore=tests/integration --ignore=tests/pipeline -q
 ```
 
-### Claude Desktop Config Entry
-```json
-"research-mcp": {
-  "command": "python",
-  "args": ["C:/Users/colin/Dev/GitHub/Re-Searcher/src/mcp_server.py"],
-  "env": {
-    "PYTHONPATH": "C:/Users/colin/Dev/GitHub/Re-Searcher"
-  }
-}
-```
+Known pre-existing test failures: `tests/test_rerank_json.py` and
+`tests/test_resumable_indexing.py` need an OpenAI-compatible API key in the
+environment; they are unrelated to most changes.
 
-## Testing
-After implementation:
-1. Restart Claude Desktop
-2. Test tool appears in available tools
-3. Query: "Whitehead process philosophy coaching"
-4. Verify results match `query.py` output
+## Conventions (keep these)
 
-## Dependencies
-Key packages (see requirements.txt):
-- `chromadb>=0.4.0`
-- `openai>=1.0.0` (for LM Studio API compatibility)
-- `PyYAML>=6.0`
-- `mcp` (add to requirements)
+- **Thin MCP wrapper**: tool handlers delegate to the pipeline/registry; no business
+  logic in `mcp_server.py`. Output formatting lives in `src/mcp_formatters/`.
+- **CLI/MCP parity**: every enumeration capability exists on both surfaces and runs
+  the same code. New tools get a `scripts/sources.py` subcommand.
+- **Source identity rule** (single definition in `src/registry.py`): Zotero-derived
+  chunks group by `zotero_key`; everything else by `source_id`
+  (`obsidian-<relative_path>` for vault notes).
+- **Resumability**: any operation that can run for minutes must checkpoint durable
+  state and resume after interruption (see `_process_batches`, the backfill).
+  This machine is a workstation, not an always-on server.
+- **Registry sync**: code that writes to or deletes from ChromaDB must update the
+  registry in the same step. Drift is detected via `index_status` / `sources.py status`
+  and repaired with `scripts/build_registry.py`.
 
-## Environment
-- Windows 11
-- Python 3.13
-- LM Studio v4 beta with BGE-M3 model loaded
-- Docker Desktop running ChromaDB container
+## Roadmap
+
+See `CHANGELOG.md` for shipped work. Agreed next phases (June 2026):
+
+- **Phase 2 — trustworthy updates**: Obsidian per-file delta + deletes (edited notes
+  are currently never re-indexed; deletes never removed), Zotero `/deleted?since=`
+  handling, remove the >500-key delete-skip, version-keyed progress, fail loudly on
+  embedding errors instead of storing zero vectors, metadata-only update path.
+- **Phase 3 — throughput**: raise embedding concurrency (the 4-day rebuild
+  bottleneck), honor configured store batch sizes, parallel upserts, weekly
+  reconcile in `routine_update_re_searcher.cmd`.
