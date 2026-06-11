@@ -49,6 +49,17 @@ Tool: `get_chunk_context`
 - `chunk_id` (string, required)
 - `include_parent` (bool, default true)
 
+Tool: `list_sources`
+- Build a source register with identity fields, titles/authors, and chunk counts.
+- Use `source_type`, `title_contains`, `author`, `limit`, and `offset` to scope the register.
+- Zotero rows use `zotero_key`; Obsidian/local rows use `source_id`.
+
+Tool: `get_source_chunks`
+- Enumerate chunks from one source with stable pagination.
+- Pass Zotero rows with `zotero_key=<identity_value>`.
+- Pass Obsidian/local rows with `source_path=<identity_value>`.
+- Use `chunk_level=mid` for most systematic extraction passes.
+
 
 ### 2) CLI (good for humans / debugging)
 
@@ -149,6 +160,35 @@ Done when:
 Done when:
 - you can propose at least 2–3 plausible analogues,
 - with evidence chunks for each.
+
+---
+
+### Pattern E — Systematic per-source mining
+**Goal:** Screen or extract from a closed corpus where coverage and explicit nulls matter.
+
+1) Build and freeze a source register:
+- call `list_sources` with the required `source_type` / title / author filters
+- record each row's identity field, identity value, title, authors, and chunk counts
+2) For each source, enumerate rather than search:
+- Zotero: `get_source_chunks(zotero_key=<identity_value>, chunk_level="mid")`
+- Obsidian/local: `get_source_chunks(source_path=<identity_value>, chunk_level="mid")`
+- page with `limit` / `offset` until every mid chunk is processed once
+3) Ask a bounded per-source question:
+- extract only what is present in that source's chunks
+- write an explicit null when the source does not contain the requested material
+4) Persist records to disk:
+- include source identity, chunk ids reviewed, positive findings, nulls, and uncertainty
+5) Run a coverage audit:
+- compare processed source count and reviewed chunk count against the frozen register
+6) Synthesize only after the audit passes.
+
+Search is for identifying promising sources or terms. Enumeration is what makes
+absence claims valid, because top-k search cannot prove a source lacks something.
+
+Done when:
+- every source in the frozen register has a processed record,
+- every paginated chunk window is accounted for exactly once,
+- positive findings and explicit nulls are separated.
 
 ---
 

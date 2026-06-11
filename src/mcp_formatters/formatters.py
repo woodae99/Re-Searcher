@@ -60,6 +60,10 @@ def format_search_results(
             result["year"] = metadata["year"]
         if "url" in metadata:
             result["url"] = metadata["url"]
+        if "indexed_at" in metadata:
+            result["indexed_at"] = metadata["indexed_at"]
+        if "source_mtime" in metadata:
+            result["source_mtime"] = metadata["source_mtime"]
 
         # Parent context (added by expand_parents)
         if "parent_text" in metadata:
@@ -71,6 +75,127 @@ def format_search_results(
         formatted.append(result)
 
     return formatted
+
+
+def _freshness_value(metadata: Dict[str, Any]) -> str:
+    """Return the best available index/source freshness stamp."""
+    return (
+        metadata.get("indexed_at")
+        or metadata.get("source_mtime")
+        or metadata.get("source_hash")
+        or "unknown"
+    )
+
+
+def format_source_chunks(payload: Dict[str, Any]) -> str:
+    """Format source chunk enumeration results for MCP response text."""
+    source = payload.get("source", {})
+    chunks = payload.get("chunks", [])
+    page = payload.get("page", {})
+    order = payload.get("ordering", {})
+
+    identity_field = source.get("identity_field", "unknown")
+    identity_value = source.get("identity_value", "unknown")
+
+    parts = [
+        "=== Source Chunks ===",
+        f"Source: {identity_field}={identity_value}",
+        f"Total Matching Chunks: {payload.get('total_matching', 0)}",
+        (
+            "Page: "
+            f"offset={page.get('offset', 0)}, "
+            f"limit={page.get('limit', 0)}, "
+            f"returned={page.get('returned', len(chunks))}"
+        ),
+        (
+            "Ordering: "
+            f"{order.get('field', 'store order')}"
+            f"{' (id tie-break)' if order.get('id_tiebreak') else ''}"
+        ),
+    ]
+
+    if order.get("note"):
+        parts.append(f"Ordering Note: {order['note']}")
+
+    if not chunks:
+        parts.append("\nNo chunks found.")
+        return "\n".join(parts)
+
+    for idx, chunk in enumerate(chunks, 1):
+        metadata = chunk.get("metadata", {}) or {}
+        parts.append(f"\n--- Chunk #{idx} ---")
+        parts.append(f"Chunk ID: {chunk.get('chunk_id', 'unknown')}")
+        parts.append(f"Chunk Level: {metadata.get('chunk_level', 'unknown')}")
+        parts.append(f"Parent Chunk: {metadata.get('parent_id', 'none')}")
+        parts.append(
+            "Section: "
+            f"{metadata.get('heading_path') or metadata.get('section') or 'unknown'}"
+        )
+        parts.append(f"Title: {metadata.get('title', 'Untitled')}")
+        parts.append(f"Authors: {metadata.get('authors', 'Unknown')}")
+        parts.append(f"Source Type: {metadata.get('source_type', 'unknown')}")
+        parts.append(f"Freshness: {_freshness_value(metadata)}")
+
+        if chunk.get("text") is not None:
+            parts.append(f"\nText:\n{chunk.get('text', '')}")
+
+    return "\n".join(parts)
+
+
+def format_list_sources(payload: Dict[str, Any]) -> str:
+    """Format source register results for MCP response text."""
+    sources = payload.get("sources", [])
+    page = payload.get("page", {})
+    filters = payload.get("filters", {})
+
+    parts = [
+        "=== Source Register ===",
+        f"Total Sources: {payload.get('total_sources', 0)}",
+        (
+            "Page: "
+            f"offset={page.get('offset', 0)}, "
+            f"limit={page.get('limit', 0)}, "
+            f"returned={page.get('returned', len(sources))}"
+        ),
+        (
+            "Identity Fields: "
+            "zotero_key for Zotero sources; source_id for Obsidian/local sources"
+        ),
+        "Cold Scan Cost: list_sources scans all collection metadata when the cache is cold or collection count changes.",
+    ]
+
+    active_filters = {k: v for k, v in filters.items() if v}
+    if active_filters:
+        parts.append(f"Filters: {active_filters}")
+
+    if not sources:
+        parts.append("\nNo sources found.")
+        return "\n".join(parts)
+
+    for idx, source in enumerate(sources, 1):
+        counts = source.get("chunk_counts", {}) or {}
+        parts.append(f"\n--- Source #{idx} ---")
+        parts.append(
+            f"Identity: {source.get('identity_field', 'unknown')}={source.get('identity_value', 'unknown')}"
+        )
+        parts.append(f"Title: {source.get('title', 'Untitled')}")
+        parts.append(f"Authors: {source.get('authors', 'Unknown')}")
+        parts.append(f"Year: {source.get('year', 'unknown') or 'unknown'}")
+        parts.append(f"Source Type: {source.get('source_type', 'unknown')}")
+        parts.append(f"Total Chunks: {source.get('total_chunks', 0)}")
+        parts.append(
+            "Chunk Counts: "
+            f"coarse={counts.get('coarse', 0)}, "
+            f"mid={counts.get('mid', 0)}, "
+            f"fine={counts.get('fine', 0)}, "
+            f"atomic={counts.get('atomic', 0)}, "
+            f"unknown={counts.get('unknown', 0)}"
+        )
+        parts.append(f"Freshness: {source.get('freshness', 'unknown')}")
+        if source.get("backlink"):
+            parts.append(f"Link: {source['backlink']}")
+
+    return "\n".join(parts)
 
 
 def format_chunk_context(

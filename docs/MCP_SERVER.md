@@ -254,6 +254,55 @@ Fetch a chunk and its parent for expanded context. Use this when a fine-grained 
 3. Get the parent (mid-level) chunk for more context
 4. If needed, call again with parent's parent_id for coarse-level context
 
+### get_source_chunks
+
+Enumerate chunks for one source document using plain Chroma metadata reads. This
+does not embed the query and does not apply similarity ranking, so it is the tool
+to use when a mission needs full source coverage or an absence claim.
+
+**Source identity fields:**
+- Zotero sources use `zotero_key`.
+- Obsidian/local sources use the indexed `source_id`; pass that value as
+  `source_path`. For Obsidian notes, values typically look like
+  `obsidian-<relative_path>`.
+
+**Parameters:**
+- **zotero_key** or **source_path**: exactly one is required
+- **chunk_level** (optional): `coarse`, `mid`, `fine`, or `atomic`
+- **include_text** (optional): default `true`; use `false` for ids + metadata only
+- **limit** (optional): default `50`, max `200`
+- **offset** (optional): default `0`
+
+**Ordering and cost:** The server fetches all matching metadata for the requested
+source, sorts globally by `chunk_index` when present and chunk id as a tie-break,
+then applies pagination. If no `chunk_index` exists, it sorts by chunk id and says
+so in the response.
+
+### list_sources
+
+Build a source register from collection metadata with per-level chunk counts.
+Rows from this tool can be fed directly into `get_source_chunks`.
+
+**Source identity fields:**
+- Zotero rows report `identity_field=zotero_key`.
+- Obsidian/local rows report `identity_field=source_id`; use the row's
+  `identity_value` as `source_path` in `get_source_chunks`.
+
+**Parameters:**
+- **source_type** (optional): `zotero`, `zotero_fulltext`, `zotero_note`,
+  `zotero_annotation`, or `obsidian`
+- **title_contains** (optional): case-insensitive title filter
+- **author** (optional): case-insensitive authors filter
+- **limit** (optional): default `100`, max `500`
+- **offset** (optional): default `0`
+
+**Cold scan cost:** A cold `list_sources` call scans all collection metadata in
+batches. The aggregate is cached in memory and persisted to
+`output/mcp_source_cache.json`; it is rebuilt when `collection.count()` changes.
+For large collections with no valid cache, the first call starts the cache build
+in the background and returns quickly so the MCP client does not time out. Retry
+after the build completes.
+
 ## Maintenance
 
 ### When Pipeline Changes
@@ -407,7 +456,6 @@ This allows Claude to start with precise matches and expand context as needed.
 Potential additions (easy to implement with current architecture):
 
 - **get_collection_stats** - Return library statistics
-- **list_sources** - Show available data sources
 - **search_by_author** - Filter by author
 - **search_by_source** - Filter by source type (Zotero/Obsidian)
 - **get_siblings** - Get chunks at the same level from the same document

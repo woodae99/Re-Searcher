@@ -9,11 +9,16 @@ It's designed as a thin wrapper around the existing pipeline to ensure:
 """
 
 import asyncio
+from concurrent.futures import Future, ThreadPoolExecutor
+import json
+import logging
 import sys
 import os
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List
+import threading
+import time
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -43,15 +48,26 @@ from src.mcp_formatters.formatters import (
     format_search_results,
     format_error_response,
     format_hierarchy_info,
+    format_source_chunks,
+    format_list_sources,
 )
 
 
 # Configuration
 DEFAULT_CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
+logging.basicConfig(
+    level=os.getenv("RESEARCH_MCP_LOG_LEVEL", "INFO").upper(),
+    format="[%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 class MCPServerBusyError(RuntimeError):
     """Raised when the MCP server is already handling its search capacity."""
+
+
+class SourceCacheBuildingError(RuntimeError):
+    """Raised when a large source register cache is building asynchronously."""
 
 
 class ResearchMCPServer:
@@ -68,6 +84,14 @@ class ResearchMCPServer:
         self.server = Server("research-mcp")
         self.pipeline = None
         self._init_lock = asyncio.Lock()
+        self._source_cache_count: Optional[int] = None
+        self._source_cache: Optional[List[Dict[str, Any]]] = None
+        self._source_cache_future: Optional[Future[List[Dict[str, Any]]]] = None
+        self._source_cache_lock = threading.Lock()
+        self._source_cache_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="mcp-source-cache",
+        )
 
         runtime_config = self._load_runtime_config()
         mcp_config = runtime_config.get("mcp", {}) or {}
@@ -276,6 +300,93 @@ class ResearchMCPServer:
                         "required": ["chunk_id"],
                     },
                 ),
+                Tool(
+                    name="get_source_chunks",
+                    description=(
+                        "Enumerate chunks belonging to one source document without embedding or semantic ranking. "
+                        "Use zotero_key for Zotero sources. Use source_path for Obsidian/local sources; this maps to the indexed "
+                        "metadata field source_id (for Obsidian, values look like obsidian-<relative_path>). "
+                        "Results are globally sorted by chunk_index when present, then chunk id. "
+                        "This tool fetches all matching metadata for the source to make pagination stable, then fetches page text only when requested."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "zotero_key": {
+                                "type": "string",
+                                "description": "Exact Zotero item key. Required when enumerating Zotero sources.",
+                            },
+                            "source_path": {
+                                "type": "string",
+                                "description": "Exact indexed source_id for Obsidian/local sources, as returned by list_sources.",
+                            },
+                            "chunk_level": {
+                                "type": "string",
+                                "enum": ["coarse", "mid", "fine", "atomic"],
+                                "description": "Optional chunk granularity filter.",
+                            },
+                            "include_text": {
+                                "type": "boolean",
+                                "description": "Include chunk text. Set false for ids + metadata census mode.",
+                                "default": True,
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum chunks to return in this page (default 50, max 200).",
+                                "default": 50,
+                                "minimum": 1,
+                                "maximum": 200,
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Zero-based page offset after stable sorting.",
+                                "default": 0,
+                                "minimum": 0,
+                            },
+                        },
+                    },
+                ),
+                Tool(
+                    name="list_sources",
+                    description=(
+                        "List distinct indexed sources and chunk counts without embedding or semantic ranking. "
+                        "Zotero source identity is zotero_key; Obsidian/local source identity is source_id, which can be passed "
+                        "to get_source_chunks as source_path. Cold-cache calls scan all collection metadata in batches; results are "
+                        "cached in memory and on disk until collection.count() changes. "
+                        "If no valid cache exists for a large collection, the first call starts a background cache build and returns quickly; retry after it completes."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "source_type": {
+                                "type": "string",
+                                "enum": ["zotero", "zotero_fulltext", "zotero_note", "zotero_annotation", "obsidian"],
+                                "description": "Optional exact source type filter.",
+                            },
+                            "title_contains": {
+                                "type": "string",
+                                "description": "Case-insensitive post-filter on source title.",
+                            },
+                            "author": {
+                                "type": "string",
+                                "description": "Case-insensitive post-filter on source authors.",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum sources to return in this page (default 100, max 500).",
+                                "default": 100,
+                                "minimum": 1,
+                                "maximum": 500,
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Zero-based page offset after aggregation and sorting.",
+                                "default": 0,
+                                "minimum": 0,
+                            },
+                        },
+                    },
+                ),
             ]
 
         @self.server.call_tool()
@@ -285,6 +396,10 @@ class ResearchMCPServer:
                 return await self._search_research_library(arguments)
             elif name == "get_chunk_context":
                 return await self._get_chunk_context(arguments)
+            elif name == "get_source_chunks":
+                return await self._get_source_chunks(arguments)
+            elif name == "list_sources":
+                return await self._list_sources(arguments)
             else:
                 raise ValueError(f"Unknown tool: {name}")
 
@@ -557,6 +672,461 @@ class ResearchMCPServer:
             error_info = format_error_response(e)
             error_text = (
                 f"Error getting chunk context: {error_info['error']}\n"
+                f"Message: {error_info['message']}"
+            )
+            return [TextContent(type="text", text=error_text)]
+
+    @staticmethod
+    def _clamp_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
+
+    @staticmethod
+    def _source_identity_for_metadata(metadata: Dict[str, Any]) -> tuple[str, Optional[str]]:
+        source_type = metadata.get("source_type")
+        if isinstance(source_type, str) and source_type.startswith("zotero"):
+            return "zotero_key", metadata.get("zotero_key")
+        return "source_id", metadata.get("source_id")
+
+    @staticmethod
+    def _sort_key_for_chunk(record: Dict[str, Any]) -> tuple[int, int, str]:
+        metadata = record.get("metadata", {}) or {}
+        ordinal = metadata.get("chunk_index")
+        try:
+            return (0, int(ordinal), str(record.get("chunk_id", "")))
+        except (TypeError, ValueError):
+            return (1, 0, str(record.get("chunk_id", "")))
+
+    @staticmethod
+    def _chroma_where(conditions: Dict[str, Any]) -> Dict[str, Any]:
+        """Build Chroma-compatible where syntax from exact-match conditions."""
+        conditions = {key: value for key, value in conditions.items() if value is not None}
+        if len(conditions) <= 1:
+            return conditions
+        return {"$and": [{key: value} for key, value in conditions.items()]}
+
+    async def _get_source_chunks(
+        self, arguments: Dict[str, Any]
+    ) -> list[TextContent]:
+        """Enumerate chunks for a single source by exact metadata identity."""
+        try:
+            await self._initialize_pipeline()
+
+            zotero_key = arguments.get("zotero_key")
+            source_path = arguments.get("source_path")
+            if bool(zotero_key) == bool(source_path):
+                raise ValueError("Exactly one of zotero_key or source_path is required")
+
+            chunk_level = arguments.get("chunk_level")
+            if chunk_level and chunk_level not in {"coarse", "mid", "fine", "atomic"}:
+                raise ValueError("chunk_level must be one of: coarse, mid, fine, atomic")
+
+            include_text = bool(arguments.get("include_text", True))
+            limit = self._clamp_int(arguments.get("limit"), 50, minimum=1, maximum=200)
+            offset = self._clamp_int(arguments.get("offset"), 0, minimum=0, maximum=10**12)
+
+            identity_field = "zotero_key" if zotero_key else "source_id"
+            identity_value = zotero_key or source_path
+            where: Dict[str, Any] = {identity_field: identity_value}
+
+            collection = self.pipeline.vector_store.collection
+
+            all_result = await asyncio.to_thread(
+                partial(collection.get, where=where, include=["metadatas"])
+            )
+            ids = all_result.get("ids", []) or []
+            metadatas = all_result.get("metadatas", []) or []
+
+            records = [
+                {"chunk_id": doc_id, "metadata": metadata or {}}
+                for doc_id, metadata in zip(ids, metadatas)
+            ]
+            if chunk_level:
+                records = [
+                    record
+                    for record in records
+                    if (record.get("metadata") or {}).get("chunk_level") == chunk_level
+                ]
+            has_ordinal = any(
+                (record.get("metadata") or {}).get("chunk_index") is not None
+                for record in records
+            )
+            records.sort(key=self._sort_key_for_chunk)
+
+            page_records = records[offset : offset + limit]
+
+            if include_text and page_records:
+                page_ids = [record["chunk_id"] for record in page_records]
+                text_result = await asyncio.to_thread(
+                    partial(
+                        collection.get,
+                        ids=page_ids,
+                        include=["documents", "metadatas"],
+                    )
+                )
+                by_id = {
+                    doc_id: {
+                        "text": (text_result.get("documents", []) or [None] * len(text_result.get("ids", [])))[idx],
+                        "metadata": (text_result.get("metadatas", []) or [{}] * len(text_result.get("ids", [])))[idx] or {},
+                    }
+                    for idx, doc_id in enumerate(text_result.get("ids", []) or [])
+                }
+                for record in page_records:
+                    fetched = by_id.get(record["chunk_id"], {})
+                    record["text"] = fetched.get("text")
+                    if fetched.get("metadata") is not None:
+                        record["metadata"] = fetched["metadata"]
+
+            payload = {
+                "source": {
+                    "identity_field": identity_field,
+                    "identity_value": identity_value,
+                },
+                "total_matching": len(records),
+                "page": {
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(page_records),
+                },
+                "ordering": {
+                    "field": "chunk_index" if has_ordinal else "chunk_id",
+                    "id_tiebreak": True,
+                    "note": None if has_ordinal else "No chunk_index metadata found; sorted by chunk id.",
+                },
+                "chunks": page_records,
+            }
+
+            return [TextContent(type="text", text=format_source_chunks(payload))]
+
+        except Exception as e:
+            error_info = format_error_response(e)
+            error_text = (
+                f"Error getting source chunks: {error_info['error']}\n"
+                f"Message: {error_info['message']}"
+            )
+            return [TextContent(type="text", text=error_text)]
+
+    def _source_cache_path(self) -> Path:
+        output_dir = Path(getattr(self.pipeline, "output_dir", self.config_path.parent / "output"))
+        if not output_dir.is_absolute():
+            output_dir = self.config_path.parent / output_dir
+        return output_dir / "mcp_source_cache.json"
+
+    def _load_source_cache_from_disk(self, collection_count: int) -> Optional[List[Dict[str, Any]]]:
+        path = self._source_cache_path()
+        if not path.exists():
+            logger.info("Source cache miss: %s does not exist", path)
+            return None
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Source cache read failed for %s: %s", path, exc)
+            return None
+
+        if payload.get("collection_count") != collection_count:
+            logger.info(
+                "Source cache count mismatch for %s: cached=%s current=%s",
+                path,
+                payload.get("collection_count"),
+                collection_count,
+            )
+            return None
+
+        sources = payload.get("sources")
+        if not isinstance(sources, list):
+            logger.warning("Source cache payload has invalid sources list: %s", path)
+            return None
+        logger.info(
+            "Loaded source cache from %s: collection_count=%s sources=%s",
+            path,
+            collection_count,
+            len(sources),
+        )
+        return sources
+
+    def _save_source_cache_to_disk(
+        self,
+        *,
+        collection_count: int,
+        sources: List[Dict[str, Any]],
+    ) -> None:
+        path = self._source_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "collection_count": collection_count,
+            "sources": sources,
+        }
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        tmp_path.replace(path)
+        logger.info(
+            "Persisted source cache to %s: collection_count=%s sources=%s",
+            path,
+            collection_count,
+            len(sources),
+        )
+
+    def _build_source_cache(self, collection: Any) -> List[Dict[str, Any]]:
+        """Scan collection metadata and aggregate distinct source records."""
+        sources: Dict[tuple[str, str], Dict[str, Any]] = {}
+        batch_size = 2000
+        offset = 0
+        started_at = time.monotonic()
+
+        while True:
+            batch = collection.get(
+                include=["metadatas"],
+                limit=batch_size,
+                offset=offset,
+            )
+            ids = batch.get("ids", []) or []
+            metadatas = batch.get("metadatas", []) or []
+            if not ids:
+                break
+
+            for metadata in metadatas:
+                metadata = metadata or {}
+                identity_field, identity_value = self._source_identity_for_metadata(metadata)
+                if not identity_value:
+                    continue
+
+                key = (identity_field, str(identity_value))
+                source = sources.setdefault(
+                    key,
+                    {
+                        "identity_field": identity_field,
+                        "identity_value": str(identity_value),
+                        "title": metadata.get("title", "Untitled"),
+                        "authors": metadata.get("authors", "Unknown"),
+                        "year": metadata.get("year", ""),
+                        "source_type": metadata.get("source_type", "unknown"),
+                        "backlink": metadata.get("backlink"),
+                        "chunk_counts": {},
+                        "total_chunks": 0,
+                        "freshness": "unknown",
+                    },
+                )
+
+                level = str(metadata.get("chunk_level", "unknown") or "unknown")
+                source["chunk_counts"][level] = source["chunk_counts"].get(level, 0) + 1
+                source["total_chunks"] += 1
+
+                freshness = (
+                    metadata.get("indexed_at")
+                    or metadata.get("source_mtime")
+                    or metadata.get("source_hash")
+                )
+                if freshness and source.get("freshness") == "unknown":
+                    source["freshness"] = freshness
+
+                for field in ("title", "authors", "year", "source_type", "backlink"):
+                    if source.get(field) in (None, "", "Unknown", "Untitled", "unknown") and metadata.get(field):
+                        source[field] = metadata.get(field)
+
+            offset += len(ids)
+            if offset % 50_000 == 0:
+                logger.info(
+                    "Source cache scan progress: chunks=%s sources=%s elapsed=%.1fs",
+                    offset,
+                    len(sources),
+                    time.monotonic() - started_at,
+                )
+            if len(ids) < batch_size:
+                break
+
+        return sorted(
+            sources.values(),
+            key=lambda source: (
+                str(source.get("title", "")).lower(),
+                str(source.get("identity_value", "")).lower(),
+            ),
+        )
+
+    async def _build_and_store_source_cache(
+        self,
+        collection: Any,
+        collection_count: int,
+    ) -> List[Dict[str, Any]]:
+        sources = await asyncio.to_thread(
+            self._build_and_store_source_cache_sync,
+            collection,
+            collection_count,
+        )
+        return sources
+
+    def _build_and_store_source_cache_sync(
+        self,
+        collection: Any,
+        collection_count: int,
+    ) -> List[Dict[str, Any]]:
+        logger.info(
+            "Starting source cache build: collection_count=%s cache_path=%s",
+            collection_count,
+            self._source_cache_path(),
+        )
+        sources = self._build_source_cache(collection)
+        self._save_source_cache_to_disk(
+            collection_count=collection_count,
+            sources=sources,
+        )
+        with self._source_cache_lock:
+            self._source_cache = sources
+            self._source_cache_count = collection_count
+        logger.info(
+            "Finished source cache build: collection_count=%s sources=%s",
+            collection_count,
+            len(sources),
+        )
+        return sources
+
+    def _start_source_cache_build(
+        self,
+        collection: Any,
+        collection_count: int,
+    ) -> None:
+        with self._source_cache_lock:
+            if self._source_cache_future is not None and not self._source_cache_future.done():
+                return
+
+            self._source_cache_future = self._source_cache_executor.submit(
+                self._build_and_store_source_cache_sync,
+                collection,
+                collection_count,
+            )
+            logger.info(
+                "Launched background source cache build: collection_count=%s",
+                collection_count,
+            )
+
+    async def _get_cached_sources(self, collection: Any) -> List[Dict[str, Any]]:
+        collection_count = await asyncio.to_thread(collection.count)
+        with self._source_cache_lock:
+            if (
+                self._source_cache is not None
+                and self._source_cache_count == collection_count
+            ):
+                return self._source_cache
+
+        disk_sources = await asyncio.to_thread(
+            self._load_source_cache_from_disk,
+            collection_count,
+        )
+        if disk_sources is not None:
+            with self._source_cache_lock:
+                self._source_cache = disk_sources
+                self._source_cache_count = collection_count
+            return disk_sources
+
+        large_collection_threshold = 100_000
+        if collection_count >= large_collection_threshold:
+            with self._source_cache_lock:
+                future = self._source_cache_future
+
+            if future is not None and future.done():
+                try:
+                    future.result()
+                except Exception:
+                    logger.exception("Background source cache build failed")
+                    with self._source_cache_lock:
+                        self._source_cache_future = None
+                    raise
+                with self._source_cache_lock:
+                    self._source_cache_future = None
+                    if (
+                        self._source_cache is not None
+                        and self._source_cache_count == collection_count
+                    ):
+                        return self._source_cache
+                logger.info(
+                    "Discarding completed source cache because collection count changed; rebuilding for count=%s",
+                    collection_count,
+                )
+
+            self._start_source_cache_build(collection, collection_count)
+
+            raise SourceCacheBuildingError(
+                "Source register cache is building in the background. "
+                "This collection is large, so the first cold list_sources call returns immediately to avoid MCP client timeouts. "
+                "Retry list_sources after the cache build completes; subsequent calls use the persisted cache."
+            )
+
+        return await self._build_and_store_source_cache(collection, collection_count)
+
+    async def _list_sources(
+        self, arguments: Dict[str, Any]
+    ) -> list[TextContent]:
+        """List distinct indexed sources with chunk counts."""
+        try:
+            await self._initialize_pipeline()
+
+            source_type = arguments.get("source_type")
+            if source_type and source_type not in {
+                "zotero",
+                "zotero_fulltext",
+                "zotero_note",
+                "zotero_annotation",
+                "obsidian",
+            }:
+                raise ValueError("Invalid source_type")
+
+            title_contains = arguments.get("title_contains")
+            author = arguments.get("author")
+            limit = self._clamp_int(arguments.get("limit"), 100, minimum=1, maximum=500)
+            offset = self._clamp_int(arguments.get("offset"), 0, minimum=0, maximum=10**12)
+
+            collection = self.pipeline.vector_store.collection
+            sources = list(await self._get_cached_sources(collection))
+
+            if source_type:
+                sources = [
+                    source for source in sources
+                    if source.get("source_type") == source_type
+                ]
+
+            if title_contains:
+                needle = str(title_contains).lower()
+                sources = [
+                    source for source in sources
+                    if needle in str(source.get("title", "")).lower()
+                ]
+
+            if author:
+                needle = str(author).lower()
+                sources = [
+                    source for source in sources
+                    if needle in str(source.get("authors", "")).lower()
+                ]
+
+            page_sources = sources[offset : offset + limit]
+            payload = {
+                "total_sources": len(sources),
+                "page": {
+                    "offset": offset,
+                    "limit": limit,
+                    "returned": len(page_sources),
+                },
+                "filters": {
+                    "source_type": source_type,
+                    "title_contains": title_contains,
+                    "author": author,
+                },
+                "sources": page_sources,
+            }
+
+            return [TextContent(type="text", text=format_list_sources(payload))]
+
+        except SourceCacheBuildingError as e:
+            return [TextContent(type="text", text=str(e))]
+        except Exception as e:
+            error_info = format_error_response(e)
+            error_text = (
+                f"Error listing sources: {error_info['error']}\n"
                 f"Message: {error_info['message']}"
             )
             return [TextContent(type="text", text=error_text)]

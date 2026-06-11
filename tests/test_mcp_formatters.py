@@ -6,7 +6,12 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.mcp_formatters.formatters import format_search_results, format_error_response
+from src.mcp_formatters.formatters import (
+    format_search_results,
+    format_error_response,
+    format_source_chunks,
+    format_list_sources,
+)
 
 
 def test_format_search_results():
@@ -65,6 +70,93 @@ def test_format_search_results():
     assert "doi" not in result2  # Should not include missing fields
 
     print("✅ All formatter tests passed!")
+
+
+def test_format_search_results_surfaces_freshness_stamp():
+    formatted = format_search_results(
+        [
+            (
+                "doc1",
+                "text",
+                0.5,
+                {"title": "T", "indexed_at": "2026-06-10T12:00:00Z"},
+            )
+        ]
+    )
+
+    assert formatted[0]["indexed_at"] == "2026-06-10T12:00:00Z"
+
+
+def test_format_source_chunks_missing_fields_and_empty_page():
+    text = format_source_chunks(
+        {
+            "source": {"identity_field": "source_id", "identity_value": "obsidian-note"},
+            "total_matching": 0,
+            "page": {"offset": 0, "limit": 50, "returned": 0},
+            "ordering": {"field": "chunk_id", "id_tiebreak": True},
+            "chunks": [],
+        }
+    )
+
+    assert "Source: source_id=obsidian-note" in text
+    assert "No chunks found." in text
+
+
+def test_format_source_chunks_pagination_header_and_unknown_freshness():
+    text = format_source_chunks(
+        {
+            "source": {"identity_field": "zotero_key", "identity_value": "ABC123"},
+            "total_matching": 3,
+            "page": {"offset": 1, "limit": 1, "returned": 1},
+            "ordering": {"field": "chunk_index", "id_tiebreak": True},
+            "chunks": [
+                {
+                    "chunk_id": "chunk-2",
+                    "metadata": {"chunk_level": "mid", "title": "Example"},
+                    "text": "Chunk text",
+                }
+            ],
+        }
+    )
+
+    assert "Page: offset=1, limit=1, returned=1" in text
+    assert "Freshness: unknown" in text
+    assert "Chunk text" in text
+
+
+def test_format_list_sources_missing_fields_empty_and_pagination():
+    empty = format_list_sources(
+        {
+            "total_sources": 0,
+            "page": {"offset": 0, "limit": 100, "returned": 0},
+            "filters": {},
+            "sources": [],
+        }
+    )
+
+    assert "No sources found." in empty
+
+    text = format_list_sources(
+        {
+            "total_sources": 1,
+            "page": {"offset": 0, "limit": 1, "returned": 1},
+            "filters": {"source_type": "obsidian"},
+            "sources": [
+                {
+                    "identity_field": "source_id",
+                    "identity_value": "obsidian-A.md",
+                    "title": "A",
+                    "chunk_counts": {"mid": 2},
+                    "total_chunks": 2,
+                    "freshness": "2026-06-10T12:00:00Z",
+                }
+            ],
+        }
+    )
+
+    assert "Page: offset=0, limit=1, returned=1" in text
+    assert "Identity: source_id=obsidian-A.md" in text
+    assert "Freshness: 2026-06-10T12:00:00Z" in text
 
 
 def test_format_error_response():

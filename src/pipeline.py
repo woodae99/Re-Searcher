@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -757,6 +757,15 @@ class ResearchRAGPipeline:
     ):
         """Store embeddings from a batch in vector database."""
         try:
+            indexed_at = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            for metadata in metadatas:
+                metadata.setdefault("indexed_at", indexed_at)
+
             # Store in sub-batches to avoid overwhelming ChromaDB
             batch_size = 100
             for i in range(0, len(chunks), batch_size):
