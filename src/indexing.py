@@ -229,6 +229,39 @@ class IndexingProgress:
                 return True
         return False
 
+    def forget_many(self, doc_ids) -> int:
+        """Forget many documents with a single checkpoint write.
+
+        Repair flows can touch thousands of documents; per-document forgets
+        would rewrite the whole checkpoint file each time.
+        """
+        forgotten = 0
+        for doc_id in doc_ids:
+            doc_info = self.data["documents"].pop(doc_id, None)
+            if not doc_info:
+                continue
+            forgotten += 1
+            old_status = doc_info.get("status")
+            for status_name, stat_key in (
+                ("chunked", "documents_chunked"),
+                ("embedded", "documents_embedded"),
+                ("stored", "documents_stored"),
+            ):
+                if old_status == status_name:
+                    self.data["stats"][stat_key] = max(
+                        0, self.data["stats"][stat_key] - 1
+                    )
+        if forgotten:
+            self._save()
+        return forgotten
+
+    def forget_with_prefix(self, prefix: str) -> int:
+        """Forget all documents whose ID starts with the prefix (one write)."""
+        matching = [
+            doc_id for doc_id in self.data["documents"] if doc_id.startswith(prefix)
+        ]
+        return self.forget_many(matching)
+
     def forget_document(self, doc_id: str):
         """Forget a document's stored progress record.
 

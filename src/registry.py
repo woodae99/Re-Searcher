@@ -314,6 +314,27 @@ class SourceRegistry:
             )
         return cursor.rowcount
 
+    def delete_sources_like(self, identity_field: str, like_pattern: str) -> int:
+        """Bulk-remove chunk and source rows whose identity matches a LIKE pattern.
+
+        Used by repair flows (e.g. wiping all 'obsidian-%' identities before a
+        full vault re-index).
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM chunks WHERE identity_field = ? AND identity_value LIKE ?",
+                (identity_field, like_pattern),
+            )
+            conn.execute(
+                "DELETE FROM sources WHERE identity_field = ? AND identity_value LIKE ?",
+                (identity_field, like_pattern),
+            )
+        return cursor.rowcount
+
+    def clear_vault_state(self) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM vault_files")
+
     def refresh_sources(self) -> int:
         """Rebuild per-source aggregates (types, level counts, freshness) from chunks.
 

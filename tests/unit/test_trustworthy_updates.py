@@ -273,3 +273,107 @@ def test_resolve_parent_keys_retains_purged_keys(tmp_path):
     assert "PARENT" in resolved  # child resolved to its parent
     assert "GONE" in resolved  # purged key retained for chunk deletion
     assert "CHILD" not in resolved
+
+
+# ------------------------------------------- annotation identity attribution
+
+
+def _zotero_fixture_db(tmp_path):
+    db_path = tmp_path / "zfix" / "zotero.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE itemTypes (itemTypeID INTEGER PRIMARY KEY, typeName TEXT);
+        CREATE TABLE items (itemID INTEGER PRIMARY KEY, itemTypeID INTEGER,
+                            dateAdded TEXT, dateModified TEXT, key TEXT);
+        CREATE TABLE deletedItems (itemID INTEGER PRIMARY KEY, dateDeleted TEXT);
+        CREATE TABLE itemAttachments (itemID INTEGER PRIMARY KEY, parentItemID INTEGER);
+        CREATE TABLE itemNotes (itemID INTEGER PRIMARY KEY, parentItemID INTEGER);
+        CREATE TABLE itemAnnotations (itemID INTEGER PRIMARY KEY, parentItemID INTEGER,
+                                      text TEXT, comment TEXT, sortIndex TEXT, pageLabel TEXT);
+        INSERT INTO itemTypes VALUES (1, 'book'), (2, 'attachment'), (3, 'annotation'), (4, 'note');
+        -- top item 10 (PARENT) with attachment 20 (ATTACH) carrying annotation 30
+        INSERT INTO items VALUES (10, 1, '', '2026-01-01 00:00:00', 'PARENT');
+        INSERT INTO items VALUES (20, 2, '', '2026-01-01 00:00:00', 'ATTACH');
+        INSERT INTO items VALUES (30, 3, '', '2026-01-01 00:00:00', 'ANNOT');
+        INSERT INTO itemAttachments VALUES (20, 10);
+        INSERT INTO itemAnnotations VALUES (30, 20, 'highlighted text', 'my comment', '0001', '12');
+        """
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_get_all_items_returns_only_top_level(tmp_path):
+    db_path = _zotero_fixture_db(tmp_path)
+    source = ZoteroSource({"zotero": {"enabled": True, "data_directory": str(db_path.parent)}})
+    conn = source._get_db_connection()
+    try:
+        rows = source._get_all_items(conn)
+    finally:
+        conn.close()
+
+    keys = [row["key"] for row in rows]
+    assert keys == ["PARENT"]  # attachment/annotation rows are not items to process
+
+
+def test_annotations_attributed_to_parent_item_key(tmp_path):
+    db_path = _zotero_fixture_db(tmp_path)
+    source = ZoteroSource({"zotero": {"enabled": True, "data_directory": str(db_path.parent)}})
+    conn = source._get_db_connection()
+    try:
+        docs = list(
+            source._process_annotations(
+                conn, 10, {"source_type": "zotero", "zotero_key": "PARENT"}
+            )
+        )
+    finally:
+        conn.close()
+
+    assert len(docs) == 1
+    doc = docs[0]
+    assert doc.metadata["zotero_key"] == "PARENT"  # NOT the attachment's key
+    assert doc.metadata["source_type"] == "zotero_annotation"
+    assert "highlighted text" in doc.content
+    assert doc.doc_id == "zotero-10-annotation-30"
+
+
+# ------------------------------------------------------------- bulk helpers
+
+
+def test_progress_forget_with_prefix_single_write(tmp_path):
+    progress = IndexingProgress(tmp_path / "p.json")
+    for i in range(5):
+        progress.set_document_status(f"obsidian-n{i}.md", DocumentStatus.STORED)
+    progress.set_document_status("zotero-1-note-1", DocumentStatus.STORED)
+
+    forgotten = progress.forget_with_prefix("obsidian-")
+
+    assert forgotten == 5
+    assert progress.get_status("zotero-1-note-1") == DocumentStatus.STORED
+    assert progress.get_status("obsidian-n0.md") is None
+    assert progress.data["stats"]["documents_stored"] == 1
+
+
+def test_registry_delete_sources_like(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["o1", "o2", "z1"],
+        [
+            {"source_type": "obsidian", "source_id": "obsidian-a.md", "chunk_level": "mid", "chunk_index": 0},
+            {"source_type": "obsidian", "source_id": "obsidian-b.md", "chunk_level": "mid", "chunk_index": 0},
+            {"source_type": "zotero_fulltext", "zotero_key": "Z1", "source_id": "zotero-1-attachment-1",
+             "chunk_level": "mid", "chunk_index": 0},
+        ],
+    )
+    registry.refresh_sources()
+
+    removed = registry.delete_sources_like("source_id", "obsidian-%")
+
+    assert removed == 2
+    assert registry.chunk_count() == 1
+    payload = registry.list_sources_payload()
+    assert payload["total_sources"] == 1
+    assert payload["sources"][0]["identity_value"] == "Z1"

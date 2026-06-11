@@ -309,31 +309,41 @@ class ZoteroSource(DataSource):
             return None
 
     def _get_all_items(self, conn: sqlite3.Connection) -> List[sqlite3.Row]:
-        """Get all non-deleted items."""
+        """Get all non-deleted top-level items.
+
+        Child attachments/notes/annotations are processed via their parent
+        item, never as items in their own right. Processing them directly
+        used to attribute PDF annotations to the attachment's key instead of
+        the parent's, splitting one source across two identities.
+        """
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT itemID, itemTypeID, dateAdded, dateModified, key
-            FROM items
-            WHERE itemID NOT IN (SELECT itemID FROM deletedItems)
-            ORDER BY itemID
+            SELECT i.itemID, i.itemTypeID, i.dateAdded, i.dateModified, i.key
+            FROM items i
+            JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+            WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+            ORDER BY i.itemID
             """
         )
         return cursor.fetchall()
 
     def _get_items_by_keys(self, conn: sqlite3.Connection, keys: List[str]) -> List[sqlite3.Row]:
-        """Get non-deleted items by Zotero item key."""
+        """Get non-deleted top-level items by Zotero item key."""
         if not keys:
             return []
         placeholders = ",".join("?" for _ in keys)
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            SELECT itemID, itemTypeID, dateAdded, dateModified, key
-            FROM items
-            WHERE key IN ({placeholders})
-              AND itemID NOT IN (SELECT itemID FROM deletedItems)
-            ORDER BY itemID
+            SELECT i.itemID, i.itemTypeID, i.dateAdded, i.dateModified, i.key
+            FROM items i
+            JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+            WHERE i.key IN ({placeholders})
+              AND it.typeName NOT IN ('attachment', 'note', 'annotation')
+              AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+            ORDER BY i.itemID
             """,
             tuple(keys),
         )
@@ -1229,17 +1239,22 @@ class ZoteroSource(DataSource):
     def _process_annotations(
         self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
     ) -> Iterator[Document]:
-        """Process PDF annotations for an item."""
+        """Process PDF annotations for a top-level item.
+
+        Annotations hang off the item's attachments, so the query goes
+        through itemAttachments: this attributes them to the parent item's
+        zotero_key (the source identity rule), not the attachment's.
+        """
         cursor = conn.cursor()
 
-        # Get annotations from itemAnnotations table
         cursor.execute(
             """
-            SELECT ia.text, ia.comment, ia.sortIndex, ia.pageLabel, i.itemID
-            FROM itemAnnotations ia
-            JOIN items i ON ia.itemID = i.itemID
-            WHERE ia.parentItemID = ?
-            ORDER BY ia.sortIndex
+            SELECT an.text, an.comment, an.sortIndex, an.pageLabel, i.itemID
+            FROM itemAnnotations an
+            JOIN items i ON an.itemID = i.itemID
+            JOIN itemAttachments att ON att.itemID = an.parentItemID
+            WHERE att.parentItemID = ?
+            ORDER BY an.sortIndex
             """,
             (item_id,),
         )
