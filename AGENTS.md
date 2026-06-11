@@ -11,7 +11,7 @@ agents (MCP) with deliberate parity between the two surfaces.
 ## Current State (June 2026)
 
 - **Production collection**: `research_library`, ~9.85M chunks from ~8,200 Zotero
-  items + ~4,700 Obsidian notes. ChromaDB runs in Docker on port 8000.
+  items + ~4,700 Obsidian notes. ChromaDB runs natively on Windows (python process, port 8000) — moved out of Docker for performance.
 - **Embeddings**: BGE-M3 (1024-dim) via LM Studio at `http://localhost:1234/v1`,
   JIT-loaded on the local RTX 5090. Reranking uses a small LLM via the same server.
 - **Source registry**: SQLite mirror of source/chunk identity at
@@ -31,7 +31,7 @@ src/mcp_server.py  ◀── shared logic ──▶  scripts/*.py
         │        (src/enumeration.py,
         │         src/mcp_formatters/)
         ▼
-src/pipeline.py ──▶ ChromaDB (Docker :8000)   ←─ vectors + chunk text
+src/pipeline.py ──▶ ChromaDB (native, :8000)   ←─ vectors + chunk text
         │      └──▶ output/registry.*.sqlite  ←─ source register, sync state
         ▼
 LM Studio (:1234, BGE-M3 embed + rerank)

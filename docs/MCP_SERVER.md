@@ -417,7 +417,7 @@ Or in Claude Desktop config:
    - Diagnose with `python -c "import mcp.server; import sys; print(sys.executable)"` from the project root.
    - To fix, either install the requirements into the same Python (e.g., `pip install -r requirements.txt`) or launch the MCP script with the explicit Python that has `mcp` installed (Windows: `run_mcp.bat`).
 
-3. **Check ChromaDB**: Ensure Docker container is running on port 8000
+3. **Check ChromaDB**: Ensure the native ChromaDB server (python process) is listening on port 8000
 4. **Check LM Studio**: Ensure it's running with BGE-M3 loaded on port 1234
 
 ### No results returned
