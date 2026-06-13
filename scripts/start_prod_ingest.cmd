@@ -1,7 +1,12 @@
 @echo off
 setlocal
 set ROOT=C:\Users\colin\Dev\GitHub\Re-Searcher
-set PYTHON=C:\Users\colin\AppData\Local\Programs\Python\Python313\python.exe
+REM Prefer the project venv; fall back to system Python 3.13
+if exist "%ROOT%\.venv\Scripts\python.exe" (
+    set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
+) else (
+    set "PYTHON=C:\Users\colin\AppData\Local\Programs\Python\Python313\python.exe"
+)
 set OUT=%ROOT%\output\prod_ingest_bg.out.log
 set ERR=%ROOT%\output\prod_ingest_bg.err.log
 

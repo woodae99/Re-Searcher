@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Launcher Python selection is consistent.** `run_mcp.bat`,
+  `run_mcp_http_lan.ps1`, and `scripts/start_prod_ingest.cmd` previously used
+  three different conventions (system Python hardcoded / `.venv` hardcoded /
+  `.venv`-preferred); they now all prefer the project `.venv` and fall back to
+  system Python 3.13, matching `routine_update`/`warmup`. The repo `.venv` had
+  drifted empty — repopulate from `requirements.txt` (chromadb pinned to the
+  running server's 1.3.0). See `docs/SPEC_VNEXT.md` for the planned rebuild.
+
 ## 0.5.0
 
 Trustworthy updates: routine index runs now converge the index to the truth.
