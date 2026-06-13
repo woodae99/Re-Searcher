@@ -5,7 +5,19 @@
 **Branch**: `v0.6-rebuild`
 **Supersedes/extends**: the shipped Jan-2026 "vNext" effort (parallel extraction,
 oversize guard, progress UI, chunking router, document-scoped parent IDs — all in
-`main`) and the `EMBED_STORE_PIPELINE_SPEC.md` throughput draft.
+`main`). The throughput machinery (`EMBED_STORE_PIPELINE_SPEC.md`'s producer/consumer
+overlap and concurrent embedding) is **already implemented** in `pipeline.py` /
+`embedding/lmstudio.py`, just conservatively configured — so v0.6 enables and tunes it
+rather than building it.
+
+> **Code-state note (verified 2026-06-13).** The older `docs/*VNEXT*` and
+> `PLAN_PARALLEL_PROGRESS.md` describe *completed, shipped* work; they are history,
+> not constraints — this spec favours the present direction. Verified in `main`:
+> `src/preflight.py`, `src/progress.py`, `src/processing/{router,oversize_guard,id_utils}.py`,
+> and `src/processing/chunkers/{atomic,markdown,hierarchical}.py` all exist; the
+> `embed_store_pipeline` (producer/consumer + bounded queue) and `max_concurrent_requests`
+> parallel embedding are implemented and exposed in `config.example.yaml`
+> (`queue_max_items`, `embed_sub_batch_size`, `store_sub_batch_size`; concurrency capped at 2).
 
 > **Naming note.** "vNext" in `docs/IMPLEMENTATION_PLAN_VNEXT.md`,
 > `CHUNKING_VNEXT.md`, `VNEXT_TEST_RESULTS.md` refers to a *completed* Jan-2026
@@ -32,7 +44,8 @@ production data is messy* in ways only a clean rebuild fixes:
   hyphenation (`"actu-\nally"`), ligature+space (`"ﬂ uid"`), repeated running headers,
   occasional garbled reversed-text chunks.
 - **Throughput**: full rebuild ~4 days; embedding concurrency (`max_concurrent_requests: 2`)
-  and serial store are the bottleneck. The producer/consumer overlap is drafted but off.
+  is the bottleneck. The producer/consumer embed↔store overlap is *implemented* in
+  `pipeline.py` but conservatively configured — it needs enabling/tuning, not building.
 - **Durability**: a power-crash left blank checkpoint files (tmp+rename without fsync) and
   ChromaDB 1.3.0 crash-loops replaying a large WAL backlog after an unclean stop.
 
@@ -131,13 +144,18 @@ config `cleaning:`). Operates on `(text, metadata)`; composable cleaners, each t
   best for framing; no chunk exceeds the oversize guard; rerun doesn't balloon counts;
   no `fine` level present.
 
-### W3 — Throughput  *(implements `EMBED_STORE_PIPELINE_SPEC.md` + Phase-3 roadmap)*
-- Raise embedding concurrency (config `embedding.max_concurrent_requests`, currently 2) to a
-  tuned value for the local LM Studio / 5090; honor configured store batch sizes.
-- Enable the **producer/consumer embed↔store overlap** (already drafted, feature-flag → on by
-  default after validation); bounded queue for backpressure; determinism preserved via stable
-  IDs.
-- Parallel/batched upserts to Chroma.
+### W3 — Throughput  *(enable + tune; machinery already exists)*
+The infrastructure is built, just conservative — this is largely a config + validation task,
+not new development:
+- Raise embedding concurrency (`embedding.max_concurrent_requests`, currently capped at 2) to
+  a value swept against the local LM Studio / 5090 ceiling (`lmstudio.py` already runs batches
+  in a thread pool sized by this knob).
+- Turn the **producer/consumer embed↔store overlap on by default** after validation
+  (`indexing.embed_store_pipeline` is implemented in `pipeline.py`); tune `queue_max_items`,
+  `embed_sub_batch_size`, `store_sub_batch_size`; bounded queue gives backpressure; determinism
+  preserved via stable IDs.
+- Confirm Chroma upserts honour the configured store batch size (verify whether
+  `src/storage/chroma.py` still uses a fixed upsert size and wire it to config if so).
 - **Acceptance**: full `test_*` rebuild throughput improves materially (target: project a full
   production rebuild to hours, not days); stored count == embedded count; resume still works.
 

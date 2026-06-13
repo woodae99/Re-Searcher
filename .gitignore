@@ -3,6 +3,9 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# uv lockfile — vestigial: this project pins deps via requirements.txt, not uv
+uv.lock
+
 # C extensions
 *.so
 

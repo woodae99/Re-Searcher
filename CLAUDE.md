@@ -93,3 +93,10 @@ See `CHANGELOG.md` for shipped work. Agreed next phases (June 2026):
   bottleneck), honor configured store batch sizes, parallel upserts, weekly
   reconcile in `routine_update_re_searcher.cmd`, metadata-only update path
   (deferred from Phase 2).
+- **v0.6 — clean rebuild (proposed; spec in `docs/SPEC_V0.6_REBUILD.md`, branch
+  `v0.6-rebuild`)**: consolidates Phase 3 throughput with two-level chunking
+  (retire `fine`, structure-aware), a text-cleaning stage, a ChromaDB upgrade on
+  a fresh build, fsync durability, and a test-corpus-driven tuning loop — ending
+  in a clean production rebuild whose acceptance is the process-in-coaching
+  mission. The current production collection is intentionally left noisy (no
+  in-place dedup); the rebuild is the fix.
