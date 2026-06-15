@@ -212,7 +212,8 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
 - *Extractor*: which candidate clears the acceptance gates for each source class, and when
   should the router escalate from Zotero FT cache / `pdfminer` to Marker, Docling, or a
   hybrid LLM pass?
-- *Chunker*: adopt Docling HybridChunker vs feed our chunker from Docling structure.
+- *Chunker*: ~~Docling HybridChunker vs our chunker~~ — **resolved (2026-06-15)**: Docling dropped;
+  use a **recursive** splitter, `mid` 700/100, settled by the retrieval eval (`docs/CHUNKING_EVAL.md`).
 Each has a harness experiment; we converge before the rebuild, and record what the evidence said.
 
 ## 5. Workstreams
@@ -276,15 +277,18 @@ and an **open one, settled by iteration** (§3d), not committed up front:
   shows it materially improves *broad/whole-corpus survey recall* over "mid + register
   aggregation" (W8). For the register-scoped mission (exhaustive per-source screening over mid),
   coarse is expected to add little. If added, it's one extra pass — never `fine`.
-- **Structure-aware boundaries** — never split mid-word/mid-sentence. With Docling this is largely
-  free: chunk from the `DoclingDocument` structure (headings/paragraphs), carrying `heading_path`.
-- **Docling HybridChunker is the leading candidate** for the mid grain (hierarchical +
-  tokenizer-aware: splits oversized, merges undersized with same headings; `contextualize()`
-  prepends heading metadata for embedding). Decide via the eval: adopt HybridChunker vs feed our
-  existing chunker from Docling's clean structure. Either way, map output to our stable-ID +
-  registry schema (the seam).
-- **Size seed for the sweep**: `mid` ≈ 200–350 tokens (~15% overlap); chosen by the eval, not a
-  priori. Keep BGE-M3 precision in mind — bigger ≠ better for a single vector.
+- **Structure-aware boundaries** — never split mid-word/mid-sentence. Since extraction is now
+  plain-text-dominant (Zotero FT cache ~99%, not Docling structure), this means a **recursive**
+  splitter (respects paragraph/sentence boundaries), not the `character` splitter.
+- **First eval result (2026-06-15, `docs/CHUNKING_EVAL.md`):** measured over 40 sources / 20 gold
+  probes through real BGE-M3 retrieval. **`recursive` strategy beats `character` decisively**
+  (char only splits on blank lines → oversized chunks, worst hit@1/MRR). Retrieval is **flat
+  across recursive sizes 500–1000**; ≥1200 dips. Decision: **`recursive`, `mid` = 700 chars /
+  100 overlap** (Pareto: top retrieval at 26% fewer chunks than 500); `1000/150` if minimizing
+  rebuild cost. The Docling HybridChunker option is dropped with Docling.
+- **Caveat:** the eval is *source-level* and saturated (hit@5=1.0). It firmly settles
+  strategy=recursive; the precise size needs a *passage-level*, larger-distractor eval to
+  discriminate (W2 next step). Keep BGE-M3 precision in mind — bigger ≠ better for a single vector.
 - **Acceptance**: eval confirms `mid` is the best quotable grain and that "mid + register
   aggregation" recovers survey (or that coarse is justified); no chunk exceeds the oversize
   guard; rerun doesn't balloon counts; no `fine`, no `parent_id`-navigation.
