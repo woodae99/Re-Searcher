@@ -57,17 +57,20 @@ mission pressure forces it before v0.6 lands.
 ## 2. Goals / non-goals
 
 **Goals**
-1. Two-level chunking (`mid` + `coarse`), structure-aware, no `fine`.
-2. A text-cleaning stage that removes the artifact classes above, validated against
-   known-noisy items.
-3. Throughput: raise embedding concurrency, enable embed/store overlap, parallel/ batched
-   upserts — bring a full rebuild from days toward hours.
-4. Upgrade ChromaDB (free on an empty build; removes the 1.3.0 crash-loop fragility).
-5. Durability: fsync all checkpoint/state writes; resumable as today.
-6. A **test-corpus-driven** development loop: tune chunking/cleaning variables on a small,
-   fast, re-runnable corpus and compare quality objectively before committing to a full run.
-7. Keep it **modular, maintainable, configurable — no hard-coded configs.**
-8. A clean production rebuild whose acceptance is the real process-in-coaching mission.
+1. **Two-plane architecture**: register as the control/navigation plane, Chroma as a
+   single-working-grain retrieval plane — preserving the full functional profile (§3b).
+2. **Single working grain (`mid`)**, structure-aware; `coarse` added only if the eval shows
+   broad-survey recall needs it; `fine` retired; `parent_id`-navigation retired.
+3. **High-quality extraction**: adopt a single best-in-class extractor (Docling, working
+   hypothesis) behind a swappable seam; reduce/clean artifacts at the source.
+4. Throughput: raise embedding concurrency, enable embed/store overlap, batched upserts —
+   bring a full rebuild from days toward hours.
+5. Upgrade ChromaDB (free on an empty build; removes the 1.3.0 crash-loop fragility).
+6. Durability: fsync all checkpoint/state writes; resumable as today.
+7. A **test-corpus-driven** development loop: tune extraction/chunking on a small, fast,
+   re-runnable corpus and compare quality objectively before any full run.
+8. Keep it **modular, maintainable, configurable — no hard-coded configs.**
+9. A clean production rebuild whose acceptance is the real process-in-coaching mission.
 
 **Non-goals**
 - Migrating/deduping the existing production collection (explicitly out — replaced).
@@ -75,18 +78,62 @@ mission pressure forces it before v0.6 lands.
   guard, registry, enumeration, delta updates) except where v0.6 changes them.
 - New query/rerank behaviour (separate track).
 
-## 3. Guiding principles (carried from vNext, reaffirmed)
+## 3. Architecture v0.6 & guiding principles
+
+### 3a. Two planes: register = control/navigation, Chroma = retrieval
+
+The central reframe of v0.6. Previously the chunk hierarchy (`fine`/`mid`/`coarse` +
+`parent_id`) did **two** jobs at once: (1) **genealogy/navigation** — which source a chunk
+belongs to, its siblings, how to zoom from a hit out to the whole source; and (2) **retrieval
+grain** — what vector size gives the best recall. The registry now owns job (1) authoritatively,
+so v0.6 splits the system into two planes:
+
+- **Retrieval plane (ChromaDB)** — "dumb": one **working grain** of vectors + text + *minimal*
+  metadata (identity keys, `chunk_index` for ordering, `heading_path` for structure). No
+  navigational genealogy baked in.
+- **Control/navigation plane (registry)** — "smart": source identity, source↔chunk membership
+  and ordering, selection metadata (title/authors/year/kind/collection/counts), per-source
+  structure outline, and extractor/quality provenance.
+
+The user-facing **functional profile is unchanged** ("broadly survey → select candidates →
+drill in"); only the *means* change. `parent_id`-as-navigation is **retired** (the register is
+the zoom-out); a second chunk level survives **only** if it earns its keep on *retrieval recall*,
+not navigation (see W2).
+
+### 3b. Functional-parity / no-regression map  *(the "handle with care" check)*
+
+Every current capability must be delivered in the new model before cutover:
+
+| Capability | Old mechanism (genealogy-in-chunks) | v0.6 mechanism (two-plane) | New support needed |
+|---|---|---|---|
+| Broad **survey** ("what does the corpus say about X") | semantic search over `coarse` vectors | search at `mid` → **aggregate hits by source via register**; optional `coarse` only if eval shows recall gain | survey/aggregate-by-source retrieval mode (W8) |
+| **Select** candidate sources | inspect coarse hits | register source view (title/year/kind/hit-count/strength) | register already has the fields |
+| **Drill into** a source | walk `parent_id` fine→mid→coarse | `get_source_chunks` (ordered enumeration) | exists |
+| Drill into a **section** of a source | coarse chunk as section proxy | enumerate source filtered by `heading_path` | surface `heading_path` in enumeration (W8) |
+| **Context** around a hit | fetch `parent_id` parent | `get_chunk_context` (neighbours by `chunk_index`) | exists |
+| Source/chunk **membership & counts** | reconstruct from chunk metadata | register (authoritative) | exists |
+| **Quote with backlink** | chunk id + text | unchanged (chunk id + verbatim text) | validator normalization (W7) |
+| Know **how a source was extracted** | n/a | register `extractor` + `extract_quality` | provenance columns (W1/W8) |
+
+If the eval (W2) shows broad survey needs `coarse`, we add exactly one coarse pass — never
+`fine`, never `parent_id`-navigation. Nothing in the table may regress silently; this map is a
+cutover gate.
+
+### 3c. Guiding principles (carried from vNext, reaffirmed)
 
 - **Config-first, no hard-coded behaviour.** Every new knob lands in `config.example.yaml`
   with a documented default; nothing magic in code. Preflight already prints the resolved
   config — extend it to print the v0.6 knobs.
-- **Stage isolation**: extraction → cleaning → chunking → embedding → storage, clear
-  boundaries, each independently testable and swappable.
+- **Stage isolation behind seams**: extraction → cleaning → chunking → embedding → storage,
+  clear boundaries, each independently testable and swappable. The extractor in particular sits
+  behind a one-method seam (`extract(source) -> CleanText`) so a fallback can be slotted later
+  without touching the pipeline (see W1).
 - **Determinism & resumability**: stable IDs, reproducible ordering, checkpointed state
-  (now fsync-durable).
-- **Registry is the source of truth** for source/chunk identity and drift — unchanged.
-- **Modularity for maintenance**: a new chunker / cleaner / source must not require touching
-  the pipeline core; register via config + a small interface.
+  (now fsync-durable). Extractor output must be deterministic — a precondition for stable IDs.
+- **Registry is the source of truth** for source/chunk identity, genealogy, navigation, and
+  provenance — now elevated from mirror to control plane.
+- **Modularity for maintenance**: a new chunker / cleaner / extractor / source must not require
+  touching the pipeline core; register via config + a small interface.
 
 ## 4. Test-corpus-driven methodology (the core working loop)
 
@@ -102,8 +149,14 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
 - **`test_obsidian` vault**: a small folder of notes — frontmatter, tags, wikilinks, code
   blocks, a very long note, a near-empty note, a conversation-log dump (the chatgpt-export
   style that dominated the crash backlog).
+  The corpus is deliberately stocked with **Docling's likely failure modes** so the "bet on
+  Docling, then plug leaks" plan (W1) is actually tested: huge omnibus (perf/timeout), heavy-table
+  empirical paper, OCR'd scan, multi-column, formula/math-heavy, non-English, reversed-text weird
+  PDF, and a no-PDF item (coverage boundary).
+- **Extractor bake-off**: the same corpus runs through Docling (and, only if a leak demands it,
+  PyMuPDF / Zotero-FT via the seam) so the W1 acceptance criteria are measured, not assumed.
 - **Re-runnable in minutes** into a throwaway `research_test` collection (separate from
-  production), so a chunking/cleaning variable change costs a quick re-run, not days.
+  production), so an extraction/chunking variable change costs a quick re-run, not days.
 - **Objective quality comparison harness** (formalize this session's `output/mission_*.py`):
   - enumeration ↔ registry exact-match (per source);
   - quote validator (chunk-id exists + belongs-to-source + verbatim substring after
@@ -117,32 +170,69 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
 
 ## 5. Workstreams
 
-### W1 — Text extraction & cleaning  *(new)*
-Add a **cleaning stage between extraction and chunking** (`src/processing/cleaning/`,
-config `cleaning:`). Operates on `(text, metadata)`; composable cleaners, each toggleable:
-- de-hyphenate line-break splits (`"foo-\nbar"` → `"foobar"`); normalize ligatures (NFKC);
-- strip repeated running headers/footers (detect lines recurring across N pages/chunks);
-- drop reference-list / boilerplate noise where detectable (configurable, conservative);
-- detect & quarantine garbled/reversed-text blocks (vertical-text PDF artifacts) — flag in
-  metadata rather than silently dropping.
-- **Acceptance**: on the known-noisy `test_zotero` items, the artifact-scan count drops to
-  ~0 and quote-validator pass-rate on sampled quotes is ~100% *without* downstream
-  de-hyphenation hacks. Cleaning is reversible/auditable (record what was removed in metadata).
+### W1 — Extraction & cleaning: bet on Docling, behind a seam  *(new)*
+**Decision (2026-06-13):** don't build a speculative N-tier extractor stack. Bet on **Docling
+as the single PDF-fulltext extractor** (it was the predicted winner on nearly every acceptance
+criterion — reading order, multi-column, tables, OCR, header classification, determinism), and
+let real-world edge cases — not guesses — pull in any backstop. Build *one* implementation well,
+then plug specific leaks; don't laminate the same system three times.
 
-### W2 — Chunking: two levels, structure-aware  *(amends `CHUNKING_VNEXT.md`)*
-- Retire `fine`. Levels become **`coarse`** (framing/context) and **`mid`** (evidence/quote),
-  plus `atomic` for annotations (unchanged). Hierarchical chunker emits coarse→mid with
-  `parent_id` (mid→coarse); markdown semantics (headings, code blocks, frontmatter, tags,
-  links, `heading_path`) preserved.
-- **Structure-aware boundaries everywhere** — never split mid-word/mid-sentence (the source of
-  the hyphenation fragments). Extend the markdown chunker's structure-respect to PDF text
-  (paragraph/sentence boundaries, section headings where detectable).
-- **Size seeds for the sweep**: `mid` ≈ 200–350 tokens (a complete, quotable paragraph, ~15%
-  overlap); `coarse` ≈ 600–900 tokens (a sub-section). Final sizes chosen by the W4-eval on
-  the test corpus. Keep BGE-M3 precision in mind — bigger ≠ better for a single vector.
-- **Acceptance**: level-quality eval shows `mid` is the best quotable grain and `coarse`
-  best for framing; no chunk exceeds the oversize guard; rerun doesn't balloon counts;
-  no `fine` level present.
+What makes that bet safe (cheap insurance, **not** a second implementation):
+- **Extractor seam.** A one-method interface `extract(source) -> CleanText` with Docling as the
+  only implementation today (`src/processing/extraction/`). Pluggable via config; a fallback can
+  be slotted later without touching the pipeline. PyMuPDF/Zotero-FT are *candidate sockets*, not
+  built up front.
+- **Scope is PDFs only.** Docling handles the Zotero **PDF** path. Obsidian markdown and Zotero
+  notes/annotations keep their existing clean paths. Items with no accessible PDF are a coverage
+  boundary, not a Docling failure — the register records "no fulltext" (the 5WPQDBL5 case).
+- **Register-tracked provenance + leak flagging.** Add `extractor` and `extract_quality` to the
+  register; a source that fails the acceptance gates is flagged, so leak-plugging is a per-source
+  re-extraction (`reindex.py --zotero-keys`), never a re-architecture.
+- **Residual cleaner (thin).** Docling fixes most artifacts structurally; keep a small,
+  config-toggled cleaner only for whatever it leaves (e.g. stray de-hyphenation), reversible and
+  recorded in metadata. Most of the originally-planned cleaning stage should become unnecessary.
+
+**Acceptance criteria** (measured per extractor on the nasty `test_zotero`, via the W7 harness —
+used to confirm the Docling bet and to characterise any leak):
+
+| Criterion | Measure | Why it matters |
+|---|---|---|
+| Coverage | % sources with usable fulltext; count FT-absent | Zotero-FT has gaps; our extractors work on any accessible PDF |
+| Artifact rate | artifact-scan per 1k tokens | drives cleaning effort + retrieval/quote quality |
+| Reading order | sentence-continuity proxy + multi-column spot check | source of scrambled/reversed chunks |
+| Quote verifiability | % sampled quotes verbatim-verify | the "take-to-the-bank" metric |
+| Tables/figures | spot-check stats-table fixture | usable structure vs number-soup |
+| Downstream retrieval | level-eval usable-evidence@k on mission queries | the ultimate arbiter |
+| Determinism | same input → same text across runs; version-pinnable | stable IDs + registry sync depend on it |
+| Throughput | pages/sec; projected full-rebuild time | one-time rebuild budget |
+| Dependency/coupling | install weight; needs Zotero running? | long-term upkeep |
+
+**Pass gate for the rebuild**: artifact ≈ 0, quote-verify ≈ 100%, reading order intact, tables
+usable, deterministic, downstream usable-evidence@k ≥ current, rebuild-time within budget. The
+**aftermath** = sources that fail, clustered by failure type — that, and only that, tells us
+whether a backstop is needed and for what.
+
+### W2 — Chunking: single working grain, register-driven navigation  *(amends `CHUNKING_VNEXT.md`)*
+Now that the register owns genealogy (§3a), chunking is *only* a retrieval-grain decision:
+- **`mid` is the single working grain** (evidence/quote), `atomic` for annotations (unchanged).
+  `fine` retired. **`parent_id`-as-navigation retired** — keep `chunk_index` ordering and
+  `heading_path`; the register + `get_source_chunks`/`get_chunk_context` provide all navigation.
+- **`coarse` is conditional, not assumed.** Add a coarse pass **only if** the level-quality eval
+  shows it materially improves *broad/whole-corpus survey recall* over "mid + register
+  aggregation" (W8). For the register-scoped mission (exhaustive per-source screening over mid),
+  coarse is expected to add little. If added, it's one extra pass — never `fine`.
+- **Structure-aware boundaries** — never split mid-word/mid-sentence. With Docling this is largely
+  free: chunk from the `DoclingDocument` structure (headings/paragraphs), carrying `heading_path`.
+- **Docling HybridChunker is the leading candidate** for the mid grain (hierarchical +
+  tokenizer-aware: splits oversized, merges undersized with same headings; `contextualize()`
+  prepends heading metadata for embedding). Decide via the eval: adopt HybridChunker vs feed our
+  existing chunker from Docling's clean structure. Either way, map output to our stable-ID +
+  registry schema (the seam).
+- **Size seed for the sweep**: `mid` ≈ 200–350 tokens (~15% overlap); chosen by the eval, not a
+  priori. Keep BGE-M3 precision in mind — bigger ≠ better for a single vector.
+- **Acceptance**: eval confirms `mid` is the best quotable grain and that "mid + register
+  aggregation" recovers survey (or that coarse is justified); no chunk exceeds the oversize
+  guard; rerun doesn't balloon counts; no `fine`, no `parent_id`-navigation.
 
 ### W3 — Throughput  *(enable + tune; machinery already exists)*
 The infrastructure is built, just conservative — this is largely a config + validation task,
@@ -186,6 +276,18 @@ not new development:
   artifact scan). These are the **gate** for both the test-corpus sweeps and the final
   production rebuild.
 
+### W8 — Register as control plane: navigation capabilities  *(new; from the §3b parity map)*
+The support the two-plane model needs so nothing in the functional profile regresses:
+- **Survey/aggregate-by-source retrieval mode**: a search variant (CLI + MCP, same shared code)
+  that runs a `mid` search and returns hits **grouped and ranked by source** via the register
+  (hit count + best score per source) — the "broad survey" step that `coarse` used to serve.
+- **`heading_path` surfaced in enumeration**: `get_source_chunks` exposes section structure so
+  "drill into section X" = enumerate-by-`heading_path`; optionally a per-source outline view.
+- **Register provenance columns**: `extractor`, `extract_quality` (+ optional structure outline)
+  — powers the W1 leak-tracking and per-source re-extraction.
+- **Acceptance**: the §3b parity table is fully satisfiable with these in place; the mission's
+  survey→select→drill runs end-to-end with no reliance on `coarse` or `parent_id`.
+
 ## 6. Acceptance scenario — the process-in-coaching mission
 
 v0.6 is "done for production" when, on a **freshly rebuilt clean collection**:
@@ -207,15 +309,19 @@ reconsider a one-off delete-only dedup of the 1,056 Zotero sources as a stopgap 
    retire it and reclaim space (incl. the 121 GB `data_recovery_test` backup).
 
 ## 8. Phasing & gates (suggested order)
-- **P0 — Test harness + test corpora (W7, W4-eval, §4).** Nothing tunes well without these.
+- **P0 — Test harness + test corpora (W7, §4).** Nothing tunes well without these.
   Gate: harness runs against the current DB and reproduces this session's findings.
-- **P1 — Cleaning + 2-level chunking (W1, W2)** on `test_*`, swept with the harness.
-  Gate: artifacts ~0, level-eval picks sizes, quotes verify verbatim.
-- **P2 — ChromaDB upgrade + durability (W4, W5)** on `test_*`.
-  Gate: fresh build serves on new version; unclean-stop recovers; checkpoints survive kill.
-- **P3 — Throughput (W3).** Gate: rebuild-time projection acceptable; counts reconcile.
-- **P4 — Config/modularity hardening (W6)** continuous; final audit before rebuild.
-- **P5 — Production rebuild + cutover (§7) + mission acceptance (§6).**
+- **P1 — Docling extraction behind the seam + single-grain chunking (W1, W2)** on `test_*`,
+  thrashed against the nasty fixtures. Gate: extraction acceptance gates pass (artifacts ≈ 0,
+  quotes verify, reading order intact); level-eval confirms `mid` (+ coarse only if justified);
+  leaks flagged and clustered.
+- **P2 — Register control-plane capabilities (W8)** so survey→select→drill works without
+  `coarse`/`parent_id`. Gate: §3b parity table fully satisfied.
+- **P3 — ChromaDB upgrade + durability (W5, W4)** on `test_*`. Gate: fresh build serves on new
+  version; unclean-stop recovers; checkpoints survive kill.
+- **P4 — Throughput (W3).** Gate: rebuild-time projection acceptable; counts reconcile.
+- **P5 — Config/modularity hardening (W6)** continuous; final audit before rebuild.
+- **P6 — Production rebuild + cutover (§7) + mission acceptance (§6).**
 
 ## 9. Risks & open questions
 - **Embedding concurrency ceiling** is set by LM Studio / the 5090, not just config — sweep to
@@ -228,6 +334,14 @@ reconsider a one-off delete-only dedup of the 1,056 Zotero sources as a stopgap 
 - **Coarse size vs embedding precision**: larger coarse aids framing but blurs the vector —
   the level-eval decides, not intuition.
 - **Mission timing pressure** vs v0.6 timeline — the stopgap dedup is the release valve.
+- **Docling cost/coverage** — ML inference is slower than raw PyMuPDF; the full-rebuild budget
+  is the real risk. Mitigation: GPU on Bambino, OCR/table toggles save 50–60%, and extraction
+  (Docling, GPU) and embedding (LM Studio, GPU) are *sequential* pipeline stages so they don't
+  contend. Measure on the test corpus before committing; the seam means a faster fallback is
+  slottable if Docling proves too slow for a class of items.
+- **Determinism of the extractor** — stable IDs depend on stable text; Zotero-FT drifts when
+  Zotero re-indexes (a cause of past duplication), so it is not a default for a stable corpus.
+  Docling/PyMuPDF are pinned/deterministic.
 
 ## 10. Decisions log
 | Date | Decision |
@@ -239,3 +353,8 @@ reconsider a one-off delete-only dedup of the 1,056 Zotero sources as a stopgap 
 | 2026-06-13 | Develop against small re-runnable `test_zotero` + `test_obsidian` corpora with an objective quality harness |
 | 2026-06-13 | The process-in-coaching mission is v0.6's end-to-end acceptance scenario |
 | 2026-06-13 | Cutover via a parallel new collection, not in-place; old DB serves until cutover |
+| 2026-06-13 | **Two-plane architecture**: register = control/navigation, Chroma = single-grain retrieval; genealogy leaves the chunks, lives in the register; functional profile preserved via §3b parity map |
+| 2026-06-13 | **Retire `parent_id`-as-navigation**; single working grain `mid`; `coarse` only if the eval shows broad-survey recall needs it |
+| 2026-06-13 | **Bet on Docling** as the single PDF extractor behind a one-method seam; do NOT pre-build a 3-tier stack; plug specific leaks (register-flagged) only where the nasty test corpus exposes them |
+| 2026-06-13 | Zotero-FT not a default extractor (drift breaks stable IDs / caused past duplication; coverage gaps; no control) |
+| 2026-06-13 | Add register provenance (`extractor`, `extract_quality`) + survey-by-source mode + `heading_path` in enumeration (W8) to recover navigation without chunk hierarchy |
