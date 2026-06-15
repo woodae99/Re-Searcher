@@ -134,6 +134,36 @@ cutover gate.
   provenance — now elevated from mirror to control plane.
 - **Modularity for maintenance**: a new chunker / cleaner / extractor / source must not require
   touching the pipeline core; register via config + a small interface.
+- **Agile / evidence-led**: where a design choice is genuinely open (chunk grain, survey
+  strategy, drill depth), it is a **hypothesis settled by the test-corpus loop**, not an
+  up-front commitment. Build the smallest informed thing, test, iterate, evolve. The one-time
+  rebuild is the *convergence point*, never the place we experiment.
+
+### 3d. The iterative loop v0.6 must serve (and why grain is low-stakes)
+
+The "systematic" capability is itself **adaptive** — a conversation with the corpus, not a
+fixed pipeline:
+
+1. **Survey** (recall-biased) — "who knows anything about X?"; even not-sure sources raise hands.
+2. **Filter** — "those who did, step forward" (candidate sources).
+3. **Classify** — "what do you know, and how?" (e.g. the senses of *process* in coaching).
+4. **Feedback edge** — "does new info change the question?" If yes, **re-ask** (this is how
+   sense **E** appeared — the corpus surfaced a use the taxonomy hadn't anticipated); if no, drill.
+5. **Mine at the appropriate level** per pocket → evaluate.
+
+Where each step lives — and why this *de-risks* the chunking decision:
+
+- Steps 1, 2, 4 (survey, filter, re-ask) are **control-plane** operations (register-scoped
+  search + aggregation + re-querying) — cheap to iterate, independent of chunk grain.
+- Steps 3, 5 (classify, mine) read the **retrieval plane** (`mid` enumeration + `get_chunk_context`).
+- "Appropriate level" can be an **adaptive runtime drill** — enumerate → context → *optionally
+  re-chunk a hot source finer on demand* — rather than pre-baking every level into every source.
+
+Because the loop lives mostly in the control plane, **chunk grain is a low-stakes, reversible
+choice**: `mid` is an informed default; if the loop's recall (step 1) or drill depth (step 5)
+proves it insufficient, we add exactly what's needed (a coarse pass, or on-demand finer drill)
+— a re-chunk of the *test* corpus, not an architecture change. This is the answer to "do we
+still need hierarchy in the chunks?": no — we need it in the *loop*, and the register provides it.
 
 ## 4. Test-corpus-driven methodology (the core working loop)
 
@@ -167,6 +197,17 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
   - text-artifact scan (hyphenation, ligature+space, header repetition, reversed-text).
 - **Pick parameters from the harness, not a priori.** Starting points below are seeds for
   the sweep, not decisions.
+
+**Open hypotheses to settle by iteration (not decisions):**
+- *Grain*: does `mid` + register-aggregation recover broad-survey recall (step 1), or does a
+  `coarse` pass earn its keep? Does any pocket need finer-than-`mid` drill (step 5), and is that
+  better served on-demand vs pre-baked?
+- *Survey strategy*: mid-aggregate-by-source vs coarse-search vs hybrid; recall vs precision at
+  the "raise your hand" stage (we *want* the unsure to surface).
+- *Extractor*: does Docling clear the acceptance gates across the nasty fixtures, and where does
+  it leak (→ whether a backstop is needed at all)?
+- *Chunker*: adopt Docling HybridChunker vs feed our chunker from Docling structure.
+Each has a harness experiment; we converge before the rebuild, and record what the evidence said.
 
 ## 5. Workstreams
 
@@ -212,11 +253,14 @@ usable, deterministic, downstream usable-evidence@k ≥ current, rebuild-time wi
 **aftermath** = sources that fail, clustered by failure type — that, and only that, tells us
 whether a backstop is needed and for what.
 
-### W2 — Chunking: single working grain, register-driven navigation  *(amends `CHUNKING_VNEXT.md`)*
-Now that the register owns genealogy (§3a), chunking is *only* a retrieval-grain decision:
-- **`mid` is the single working grain** (evidence/quote), `atomic` for annotations (unchanged).
-  `fine` retired. **`parent_id`-as-navigation retired** — keep `chunk_index` ordering and
-  `heading_path`; the register + `get_source_chunks`/`get_chunk_context` provide all navigation.
+### W2 — Chunking: single working grain (hypothesis), register-driven navigation  *(amends `CHUNKING_VNEXT.md`)*
+Now that the register owns genealogy (§3a), chunking is *only* a retrieval-grain decision —
+and an **open one, settled by iteration** (§3d), not committed up front:
+- **Working hypothesis: `mid` is the single working grain** (evidence/quote), `atomic` for
+  annotations (unchanged). `fine` retired (its cost/benefit failed in pilot-02).
+  **`parent_id`-as-navigation retired** — keep `chunk_index` ordering and `heading_path`; the
+  register + `get_source_chunks`/`get_chunk_context` provide all navigation. This is the
+  *starting* configuration to test, not a final decision — the loop's recall/drill needs decide.
 - **`coarse` is conditional, not assumed.** Add a coarse pass **only if** the level-quality eval
   shows it materially improves *broad/whole-corpus survey recall* over "mid + register
   aggregation" (W8). For the register-scoped mission (exhaustive per-source screening over mid),
@@ -309,6 +353,9 @@ reconsider a one-off delete-only dedup of the 1,056 Zotero sources as a stopgap 
    retire it and reclaim space (incl. the 121 GB `data_recovery_test` backup).
 
 ## 8. Phasing & gates (suggested order)
+Phases are **iterative loops on the small test corpus**, not a waterfall — survey/classify/drill,
+read what it shows, adjust, repeat. Each "gate" is a convergence check, not a one-shot. Only P6
+commits to the full rebuild, once the evidence has stopped surprising us.
 - **P0 — Test harness + test corpora (W7, §4).** Nothing tunes well without these.
   Gate: harness runs against the current DB and reproduces this session's findings.
 - **P1 — Docling extraction behind the seam + single-grain chunking (W1, W2)** on `test_*`,
