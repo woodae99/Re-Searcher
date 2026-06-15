@@ -187,6 +187,8 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
   PyMuPDF / Zotero-FT via the seam) so the W1 acceptance criteria are measured, not assumed.
 - **Re-runnable in minutes** into a throwaway `research_test` collection (separate from
   production), so an extraction/chunking variable change costs a quick re-run, not days.
+  Run it **on Sparky** (the production host) so throughput/rebuild-time numbers are real — that's
+  what decides grind-on-Sparky vs borrow-Bambino for the big rebuild (W9).
 - **Objective quality comparison harness** (formalize this session's `output/mission_*.py`):
   - enumeration ↔ registry exact-match (per source);
   - quote validator (chunk-id exists + belongs-to-source + verbatim substring after
@@ -332,6 +334,43 @@ The support the two-plane model needs so nothing in the functional profile regre
 - **Acceptance**: the §3b parity table is fully satisfiable with these in place; the mission's
   survey→select→drill runs end-to-end with no reliance on `coarse` or `parent_id`.
 
+### W9 — Deployment & host: Sparky as home  *(new; decided 2026-06-13)*
+**Re-Searcher v0.6 moves off Bambino (Windows / RTX 5090 workstation) to Sparky (NVIDIA DGX
+Spark, ARM64 Linux / DGX OS, 128 GB unified memory, always-on, low-power).** Rationale: serving
+wants *always-on + big memory + modest GPU* (Sparky), ingestion wants *raw GPU throughput*
+(Bambino); only an always-on host can be "always-ready", and Sparky + Hermes-on-RocknRolla lets
+missions run overnight with Bambino asleep.
+
+- **Roles**: **Sparky = home** (Chroma + MCP serving + delta ingestion + dev, all `systemd`,
+  always-ready). **Bambino = optional rebuild accelerator** — the one-time initial embed burst can
+  borrow her 5090 by pointing `embedding.endpoint` at Bambino; deltas run on Sparky. **RocknRolla
+  = always-on Hermes + canonical Zotero/Obsidian host.**
+- **Inference server**: **LM Studio already runs headless/systemd on Sparky** (confirmed working)
+  — no swap needed; the embedding/rerank endpoint is just Sparky's LM Studio. Bambino's LM Studio
+  is the borrow-target for the big rebuild.
+- **No data migration**: v0.6 builds a blank collection on Sparky's new ChromaDB — nothing to port.
+- **Source-of-truth access (Docling needs raw PDFs, not Zotero FT)**: Zotero is kept in sync across
+  laptop/Bambino/RocknRolla by Zotero's own sync (all canonical); the Obsidian vault is synced
+  Bambino↔RocknRolla by Syncthing (per-host `.obsidian/`). **Decision for Sparky: add Sparky as a
+  sync target so it holds LOCAL copies** of (a) the Zotero **storage dir + `zotero.sqlite`** and
+  (b) the vault — Re-Searcher reads *files* directly (Docling on PDFs, `zotero.sqlite` for
+  metadata, `.md` for notes), so it needs the **data synced, not the GUI apps running**. Local
+  copies beat the LAN/tailnet-to-RnR alternative for the heavy rebuild (1 gbps switched is the
+  ceiling) and for overnight autonomy (no dependency on RnR serving mid-run). Caveat to handle:
+  `zotero.sqlite` consistency while another host writes — snapshot/copy before a run, and the audit
+  already tolerates a locked `zotero.sqlite`. (Alternative kept on file: reach RnR's Zotero/Obsidian
+  local APIs over the tailnet — simpler, but LAN-limited and RnR-dependent.)
+- **Portability port (absorb into the rebuild, cheapest now)**: verify ARM64 wheels for
+  `chromadb` (+ `chromadb_rust_bindings`) and `torch`/Docling on ARM64+Blackwell CUDA; replace the
+  Windows launchers (NSSM, `.cmd`/`.ps1`) with `systemd` units + shell; make every path
+  config-driven (no `C:\...` constants) — feeds W6.
+- **Dev access**: run **Claude Code natively on Sparky** (Node CLI, ARM64 Linux) against the repo
+  on the `v0.6-rebuild` branch — develop where it will run. **VS Code Remote-SSH into Sparky** is
+  the equivalent alternative. (Bare SSH-from-elsewhere works but is clunky for iterative dev.)
+- **Acceptance**: Chroma + MCP HTTP come up as always-ready `systemd` services on Sparky;
+  Hermes-on-RocknRolla runs a mission end-to-end with Bambino powered off; a delta ingest runs
+  fully on Sparky; the big-rebuild borrow-Bambino path works via config alone.
+
 ## 6. Acceptance scenario — the process-in-coaching mission
 
 v0.6 is "done for production" when, on a **freshly rebuilt clean collection**:
@@ -346,18 +385,22 @@ reconsider a one-off delete-only dedup of the 1,056 Zotero sources as a stopgap 
 [[re-searcher-zotero-chunk-duplication]]).
 
 ## 7. Cutover plan (no big-bang risk)
-1. Build v0.6 into a **new collection** (`research_library_v06`) alongside the live one — the
-   noisy `research_library` keeps serving Colin's day-to-day search throughout.
-2. Validate the new collection with the W7 harness + the mission acceptance scenario.
-3. Flip config/MCP to the new collection; keep the old one until confidence is high; then
-   retire it and reclaim space (incl. the 121 GB `data_recovery_test` backup).
+The move is also a **host migration** (Bambino→Sparky), which *helps* here — the new system is
+built on a different box, so the old one keeps serving untouched until cutover.
+1. Build v0.6 into a **fresh collection on Sparky's new ChromaDB** — Bambino's noisy
+   `research_library` keeps serving Colin's day-to-day search throughout (no contention, no risk).
+2. Validate the Sparky collection with the W7 harness + the mission acceptance scenario.
+3. Point Hermes/MCP clients at Sparky's MCP endpoint; keep Bambino's stack until confidence is
+   high; then retire it and reclaim space on Bambino (incl. the 121 GB `data_recovery_test`).
 
 ## 8. Phasing & gates (suggested order)
 Phases are **iterative loops on the small test corpus**, not a waterfall — survey/classify/drill,
 read what it shows, adjust, repeat. Each "gate" is a convergence check, not a one-shot. Only P6
 commits to the full rebuild, once the evidence has stopped surprising us.
-- **P0 — Test harness + test corpora (W7, §4).** Nothing tunes well without these.
-  Gate: harness runs against the current DB and reproduces this session's findings.
+- **P0 — Sparky dev env + test harness + test corpora (W9, W7, §4).** Stand up the Sparky
+  environment (ARM64 deps, Chroma on the new version, LM Studio endpoint, synced sources, Claude
+  Code), then the harness and corpora. Gate: harness runs *on Sparky* and reproduces this
+  session's findings; a tiny end-to-end ingest+query works on Sparky.
 - **P1 — Docling extraction behind the seam + single-grain chunking (W1, W2)** on `test_*`,
   thrashed against the nasty fixtures. Gate: extraction acceptance gates pass (artifacts ≈ 0,
   quotes verify, reading order intact); level-eval confirms `mid` (+ coarse only if justified);
@@ -389,6 +432,14 @@ commits to the full rebuild, once the evidence has stopped surprising us.
 - **Determinism of the extractor** — stable IDs depend on stable text; Zotero-FT drifts when
   Zotero re-indexes (a cause of past duplication), so it is not a default for a stable corpus.
   Docling/PyMuPDF are pinned/deterministic.
+- **ARM64 build availability** — `chromadb_rust_bindings` and `torch`/Docling on ARM64+Blackwell
+  must have working wheels; verify in P0 before betting the port on them (LM Studio already proven
+  on Sparky, so embedding/rerank is de-risked).
+- **1 gbps source pull** — if sources aren't synced locally to Sparky, streaming the whole PDF
+  corpus from RnR for the initial rebuild is LAN-capped (~100 MB/s); the local-sync decision (W9)
+  avoids this. Deltas are small either way.
+- **`zotero.sqlite` consistency** — syncing a live SQLite file across hosts can catch a mid-write
+  state; snapshot before a run; the audit already tolerates a locked `zotero.sqlite`.
 
 ## 10. Decisions log
 | Date | Decision |
@@ -405,3 +456,8 @@ commits to the full rebuild, once the evidence has stopped surprising us.
 | 2026-06-13 | **Bet on Docling** as the single PDF extractor behind a one-method seam; do NOT pre-build a 3-tier stack; plug specific leaks (register-flagged) only where the nasty test corpus exposes them |
 | 2026-06-13 | Zotero-FT not a default extractor (drift breaks stable IDs / caused past duplication; coverage gaps; no control) |
 | 2026-06-13 | Add register provenance (`extractor`, `extract_quality`) + survey-by-source mode + `heading_path` in enumeration (W8) to recover navigation without chunk hierarchy |
+| 2026-06-13 | **Deployment moves to Sparky** (DGX Spark, ARM64 Linux, always-on, big unified memory) as Re-Searcher's home: Chroma + MCP serving + deltas + dev. Delivers "always-ready" + overnight missions with Bambino asleep |
+| 2026-06-13 | **Bambino = optional rebuild accelerator** only (borrow her 5090 for the one-time embed burst via `embedding.endpoint`); **RocknRolla = always-on Hermes + canonical source host** |
+| 2026-06-13 | LM Studio already headless/systemd on Sparky → no inference-server swap; blank-DB rebuild → no data migration |
+| 2026-06-13 | **Sources synced locally to Sparky** (Zotero storage+`zotero.sqlite`, Obsidian vault) so Docling reads raw PDFs locally (overnight-autonomous, not 1 gbps-limited); RnR-local-API access kept as the fallback |
+| 2026-06-13 | Port to ARM64 Linux (systemd not NSSM; config-driven paths) absorbed into the v0.6 rebuild; dev via Claude Code native on Sparky (or VS Code Remote-SSH) |
