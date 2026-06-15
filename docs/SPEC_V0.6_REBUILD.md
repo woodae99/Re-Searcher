@@ -3,14 +3,14 @@
 **Created**: 2026-06-13
 **Status**: Proposed (spec for approval)
 **Branch**: `v0.6-rebuild`
-**Supersedes/extends**: the shipped Jan-2026 "vNext" effort (parallel extraction,
+**Supersedes/extends**: the shipped Jan-2026 legacy feature effort (parallel extraction,
 oversize guard, progress UI, chunking router, document-scoped parent IDs — all in
 `main`). The throughput machinery (`EMBED_STORE_PIPELINE_SPEC.md`'s producer/consumer
 overlap and concurrent embedding) is **already implemented** in `pipeline.py` /
 `embedding/lmstudio.py`, just conservatively configured — so v0.6 enables and tunes it
 rather than building it.
 
-> **Code-state note (verified 2026-06-13).** The older `docs/*VNEXT*` and
+> **Code-state note (verified 2026-06-13).** The older legacy feature docs and
 > `PLAN_PARALLEL_PROGRESS.md` describe *completed, shipped* work; they are history,
 > not constraints — this spec favours the present direction. Verified in `main`:
 > `src/preflight.py`, `src/progress.py`, `src/processing/{router,oversize_guard,id_utils}.py`,
@@ -19,10 +19,10 @@ rather than building it.
 > parallel embedding are implemented and exposed in `config.example.yaml`
 > (`queue_max_items`, `embed_sub_batch_size`, `store_sub_batch_size`; concurrency capped at 2).
 
-> **Naming note.** "vNext" in `docs/IMPLEMENTATION_PLAN_VNEXT.md`,
-> `CHUNKING_VNEXT.md`, `VNEXT_TEST_RESULTS.md` refers to a *completed* Jan-2026
-> effort, now in `main`. This document is the *next* line of work — versioned
-> **v0.6** to avoid the collision — culminating in a clean production rebuild.
+> **Naming note.** The Jan-2026 planning docs have been renamed as legacy feature
+> work because that effort is complete and now lives in `main`. This document is
+> the next line of work — versioned **v0.6** to avoid the collision — culminating
+> in a clean production rebuild.
 
 ---
 
@@ -61,8 +61,9 @@ mission pressure forces it before v0.6 lands.
    single-working-grain retrieval plane — preserving the full functional profile (§3b).
 2. **Single working grain (`mid`)**, structure-aware; `coarse` added only if the eval shows
    broad-survey recall needs it; `fine` retired; `parent_id`-navigation retired.
-3. **High-quality extraction**: adopt a single best-in-class extractor (Docling, working
-   hypothesis) behind a swappable seam; reduce/clean artifacts at the source.
+3. **High-quality extraction**: route among measured extractor candidates behind a
+   swappable seam; prefer zero-cost Zotero full text when it passes quality gates, and
+   reduce/clean artifacts at the source.
 4. Throughput: raise embedding concurrency, enable embed/store overlap, batched upserts —
    bring a full rebuild from days toward hours.
 5. Upgrade ChromaDB (free on an empty build; removes the 1.3.0 crash-loop fragility).
@@ -74,7 +75,7 @@ mission pressure forces it before v0.6 lands.
 
 **Non-goals**
 - Migrating/deduping the existing production collection (explicitly out — replaced).
-- Re-litigating shipped vNext stages (preflight, progress, parallel extraction, oversize
+- Re-litigating shipped legacy stages (preflight, progress, parallel extraction, oversize
   guard, registry, enumeration, delta updates) except where v0.6 changes them.
 - New query/rerank behaviour (separate track).
 
@@ -119,7 +120,7 @@ If the eval (W2) shows broad survey needs `coarse`, we add exactly one coarse pa
 `fine`, never `parent_id`-navigation. Nothing in the table may regress silently; this map is a
 cutover gate.
 
-### 3c. Guiding principles (carried from vNext, reaffirmed)
+### 3c. Guiding principles (carried forward, reaffirmed)
 
 - **Config-first, no hard-coded behaviour.** Every new knob lands in `config.example.yaml`
   with a documented default; nothing magic in code. Preflight already prints the resolved
@@ -179,12 +180,14 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
 - **`test_obsidian` vault**: a small folder of notes — frontmatter, tags, wikilinks, code
   blocks, a very long note, a near-empty note, a conversation-log dump (the chatgpt-export
   style that dominated the crash backlog).
-  The corpus is deliberately stocked with **Docling's likely failure modes** so the "bet on
-  Docling, then plug leaks" plan (W1) is actually tested: huge omnibus (perf/timeout), heavy-table
+  The corpus is deliberately stocked with **extractor failure modes** so the measured router
+  plan (W1) is actually tested: huge omnibus (perf/timeout), heavy-table
   empirical paper, OCR'd scan, multi-column, formula/math-heavy, non-English, reversed-text weird
   PDF, and a no-PDF item (coverage boundary).
-- **Extractor bake-off**: the same corpus runs through Docling (and, only if a leak demands it,
-  PyMuPDF / Zotero-FT via the seam) so the W1 acceptance criteria are measured, not assumed.
+- **Extractor bake-off**: the same corpus runs through Zotero FT cache, `pdfminer`,
+  Marker, Docling, and PyMuPDF4LLM where relevant so W1 routing is measured, not assumed.
+  See `docs/EXTRACTION_BAKEOFF_AND_ROUTING.md` for the first Sparky/Hudson results and
+  the candidate routing strategy.
 - **Re-runnable in minutes** into a throwaway `research_test` collection (separate from
   production), so an extraction/chunking variable change costs a quick re-run, not days.
   Run it **on Sparky** (the production host) so throughput/rebuild-time numbers are real — that's
@@ -206,34 +209,40 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
   better served on-demand vs pre-baked?
 - *Survey strategy*: mid-aggregate-by-source vs coarse-search vs hybrid; recall vs precision at
   the "raise your hand" stage (we *want* the unsure to surface).
-- *Extractor*: does Docling clear the acceptance gates across the nasty fixtures, and where does
-  it leak (→ whether a backstop is needed at all)?
+- *Extractor*: which candidate clears the acceptance gates for each source class, and when
+  should the router escalate from Zotero FT cache / `pdfminer` to Marker, Docling, or a
+  hybrid LLM pass?
 - *Chunker*: adopt Docling HybridChunker vs feed our chunker from Docling structure.
 Each has a harness experiment; we converge before the rebuild, and record what the evidence said.
 
 ## 5. Workstreams
 
-### W1 — Extraction & cleaning: bet on Docling, behind a seam  *(new)*
-**Decision (2026-06-13):** don't build a speculative N-tier extractor stack. Bet on **Docling
-as the single PDF-fulltext extractor** (it was the predicted winner on nearly every acceptance
-criterion — reading order, multi-column, tables, OCR, header classification, determinism), and
-let real-world edge cases — not guesses — pull in any backstop. Build *one* implementation well,
-then plug specific leaks; don't laminate the same system three times.
+### W1 — Extraction & cleaning: measured router behind a seam  *(updated 2026-06-15)*
+**Decision (2026-06-15, settled):** a whole-corpus quality-gate run (535 PDFs) plus a
+derived-hard-scan OCR test settled the extraction plan as a **quality-gated router over two
+extractors**: Zotero's native `.zotero-ft-cache` is the zero-cost default (clears the gate
+for ~99% of the corpus), `pdfminer` is the cheap fallback for missing/empty caches, a
+deterministic cleanup pass handles the `clean` action, and **Marker+OCR** is the rare,
+opt-in, budgeted `escalate` backstop (validated: recovers image-only EN/RU scans to
+`accept`, but ~1 hr/book). **Docling and pymupdf4llm were evaluated and dropped** (Docling
+only pdfminer-grade; pymupdf4llm failed scans without OCR) — re-addable behind the seam if a
+fixture class needs them. Extraction is **not** the rebuild bottleneck (embedding is). See
+`docs/EXTRACTION_QUALITY_GATE.md` (controlling) and `docs/EXTRACTION_BAKEOFF_AND_ROUTING.md`.
 
-What makes that bet safe (cheap insurance, **not** a second implementation):
-- **Extractor seam.** A one-method interface `extract(source) -> CleanText` with Docling as the
-  only implementation today (`src/processing/extraction/`). Pluggable via config; a fallback can
-  be slotted later without touching the pipeline. PyMuPDF/Zotero-FT are *candidate sockets*, not
-  built up front.
-- **Scope is PDFs only.** Docling handles the Zotero **PDF** path. Obsidian markdown and Zotero
+What makes the router safe:
+- **Extractor seam.** A one-method interface `extract(source) -> CleanText`
+  (`src/processing/extraction/`). Pluggable via config; candidates can be slotted without
+  touching the pipeline.
+- **Scope is PDFs only.** The extractor router handles the Zotero **PDF/fulltext** path.
+  Obsidian markdown and Zotero
   notes/annotations keep their existing clean paths. Items with no accessible PDF are a coverage
   boundary, not a Docling failure — the register records "no fulltext" (the 5WPQDBL5 case).
 - **Register-tracked provenance + leak flagging.** Add `extractor` and `extract_quality` to the
   register; a source that fails the acceptance gates is flagged, so leak-plugging is a per-source
   re-extraction (`reindex.py --zotero-keys`), never a re-architecture.
-- **Residual cleaner (thin).** Docling fixes most artifacts structurally; keep a small,
-  config-toggled cleaner only for whatever it leaves (e.g. stray de-hyphenation), reversible and
-  recorded in metadata. Most of the originally-planned cleaning stage should become unnecessary.
+- **Residual cleaner (thin).** Run deterministic cleanup before LLM cleanup where possible:
+  de-hyphenation, letter-spaced word repair, repeated header/footer stripping, and spacing
+  normalization. Keep it config-toggled, reversible, and recorded in metadata.
 
 **Acceptance criteria** (measured per extractor on the nasty `test_zotero`, via the W7 harness —
 used to confirm the Docling bet and to characterise any leak):
@@ -255,7 +264,7 @@ usable, deterministic, downstream usable-evidence@k ≥ current, rebuild-time wi
 **aftermath** = sources that fail, clustered by failure type — that, and only that, tells us
 whether a backstop is needed and for what.
 
-### W2 — Chunking: single working grain (hypothesis), register-driven navigation  *(amends `CHUNKING_VNEXT.md`)*
+### W2 — Chunking: single working grain (hypothesis), register-driven navigation  *(amends `CHUNKING_LEGACY.md`)*
 Now that the register owns genealogy (§3a), chunking is *only* a retrieval-grain decision —
 and an **open one, settled by iteration** (§3d), not committed up front:
 - **Working hypothesis: `mid` is the single working grain** (evidence/quote), `atomic` for
@@ -296,8 +305,8 @@ not new development:
   production rebuild to hours, not days); stored count == embedded count; resume still works.
 
 ### W4 — ChromaDB upgrade  *(free on empty build)*
-- Build v0.6 on a current ChromaDB (≥1.5.x). The only blocker was that 1.5.x can't read the
-  1.3.0 on-disk format — irrelevant when starting from empty. Pin client == server.
+- Build v0.6 on ChromaDB 1.5.9 for the first Sparky clean rebuild. The only blocker was that 1.5.x cannot read the
+  1.3.0 on-disk format — irrelevant when starting from empty. Pin client == server via `requirements.txt` and `constraints-sparky.txt`.
 - Confirm the new version replays a WAL backlog after an unclean stop without segfaulting
   (1.5.9 errored gracefully in this session's test vs 1.3.0's crash-loop).
 - **Acceptance**: fresh `research_test` collection builds and serves on the new version;
@@ -454,7 +463,8 @@ commits to the full rebuild, once the evidence has stopped surprising us.
 | 2026-06-13 | **Two-plane architecture**: register = control/navigation, Chroma = single-grain retrieval; genealogy leaves the chunks, lives in the register; functional profile preserved via §3b parity map |
 | 2026-06-13 | **Retire `parent_id`-as-navigation**; single working grain `mid`; `coarse` only if the eval shows broad-survey recall needs it |
 | 2026-06-13 | **Bet on Docling** as the single PDF extractor behind a one-method seam; do NOT pre-build a 3-tier stack; plug specific leaks (register-flagged) only where the nasty test corpus exposes them |
-| 2026-06-13 | Zotero-FT not a default extractor (drift breaks stable IDs / caused past duplication; coverage gaps; no control) |
+| 2026-06-13 | Superseded 2026-06-15: Zotero-FT was initially rejected as a default extractor because of drift/stable-ID concerns, coverage gaps, and lack of control |
+| 2026-06-15 | **Extractor decision updated by Sparky bake-off**: route by quality gate instead of single Docling default. Zotero FT cache is the zero-cost first candidate; `pdfminer` is the cheap fallback/comparator; Marker is the primary local quality path on Hudson; Docling is an alternate quality path; PyMuPDF4LLM is candidate-only for born-digital PDFs. See `docs/EXTRACTION_BAKEOFF_AND_ROUTING.md` |
 | 2026-06-13 | Add register provenance (`extractor`, `extract_quality`) + survey-by-source mode + `heading_path` in enumeration (W8) to recover navigation without chunk hierarchy |
 | 2026-06-13 | **Deployment moves to Sparky** (DGX Spark, ARM64 Linux, always-on, big unified memory) as Re-Searcher's home: Chroma + MCP serving + deltas + dev. Delivers "always-ready" + overnight missions with Bambino asleep |
 | 2026-06-13 | **Bambino = optional rebuild accelerator** only (borrow her 5090 for the one-time embed burst via `embedding.endpoint`); **RocknRolla = always-on Hermes + canonical source host** |
