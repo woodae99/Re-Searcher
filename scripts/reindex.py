@@ -24,10 +24,13 @@ import argparse
 import sys
 from pathlib import Path
 
+import yaml
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.pipeline import ResearchRAGPipeline
+from src.embedding.vllm_server import managed_embedding_backend
 
 
 def _load_keys(args) -> list:
@@ -157,17 +160,21 @@ def main():
         sys.exit(1)
 
     progress_mode = "plain" if args.plain_progress else "auto"
-    pipeline = ResearchRAGPipeline(args.config, progress_mode=progress_mode)
+    config = yaml.safe_load(args.config.read_text()) or {}
 
     try:
-        if args.obsidian_all:
-            ok = reindex_obsidian_all(pipeline, args.skip_wipe)
-        else:
-            keys = _load_keys(args)
-            if not keys:
-                print("[ERROR] No Zotero keys given.")
-                sys.exit(1)
-            ok = reindex_zotero_keys(pipeline, keys, args.skip_wipe)
+        # Stand up the managed embedding backend (vLLM) for the reindex, then tear it
+        # down. No-op unless provider==vllm with managed lifecycle.
+        with managed_embedding_backend(config):
+            pipeline = ResearchRAGPipeline(args.config, progress_mode=progress_mode)
+            if args.obsidian_all:
+                ok = reindex_obsidian_all(pipeline, args.skip_wipe)
+            else:
+                keys = _load_keys(args)
+                if not keys:
+                    print("[ERROR] No Zotero keys given.")
+                    sys.exit(1)
+                ok = reindex_zotero_keys(pipeline, keys, args.skip_wipe)
     except KeyboardInterrupt:
         print("\n[WARN] Interrupted. Progress is checkpointed; re-run with --skip-wipe to resume.")
         sys.exit(130)

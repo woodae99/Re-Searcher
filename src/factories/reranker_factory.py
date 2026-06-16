@@ -2,7 +2,7 @@
 
 from typing import Any, Dict
 
-from src.retrieval.rerank import LLMReranker, NoRerank
+from src.retrieval.rerank import CrossEncoderReranker, LLMReranker, NoRerank
 
 
 def create_reranker(config: Dict[str, Any]):
@@ -14,6 +14,8 @@ def create_reranker(config: Dict[str, Any]):
     rerank_type = rerank_config.get("type", "llm")
     if rerank_type == "llm":
         return LLMReranker(config)
+    if rerank_type == "cross_encoder":
+        return CrossEncoderReranker(config)
     if rerank_type == "none":
         return NoRerank(config)
 
