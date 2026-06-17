@@ -323,10 +323,45 @@ def test_additive_migration_adds_ledger_to_v1_registry(tmp_path):
 
     # Re-opening runs the additive migration.
     reopened = SourceRegistry(db_path)
-    assert reopened.get_meta("schema_version") == "2"
+    assert reopened.get_meta("schema_version") == "3"
     # Round-trips, proving the table is back.
     reopened.record_unit_states([_unit("zotero-Z1-note-1", "Z1", "note", "v1")])
     assert reopened.get_unit_states() == {"zotero-Z1-note-1": "v1"}
+
+
+def test_registry_records_and_deletes_child_key_chunks(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["a1", "a2", "n1"],
+        [
+            _zotero_chunk("a1", "Z1", source_id="zotero-1-attachment-10")["metadata"]
+            | {"attachment_key": "ATT1"},
+            _zotero_chunk("a2", "Z1", source_id="zotero-1-attachment-11")["metadata"]
+            | {"attachment_key": "ATT2"},
+            {
+                "source_type": "zotero_note",
+                "zotero_key": "Z1",
+                "source_id": "zotero-1-note-20",
+                "chunk_level": "atomic",
+                "chunk_index": 0,
+                "note_key": "NOTE1",
+            },
+        ],
+    )
+
+    rows = registry.chunk_records_for_source("zotero_key", "Z1")
+    assert {row["chunk_id"]: row["attachment_key"] for row in rows}["a1"] == "ATT1"
+
+    deleted = registry.delete_chunks_matching(
+        "zotero_key",
+        "Z1",
+        source_types=["zotero_fulltext"],
+        attachment_key="ATT1",
+    )
+
+    assert deleted == 1
+    remaining = {row["chunk_id"] for row in registry.chunk_records_for_source("zotero_key", "Z1")}
+    assert remaining == {"a2", "n1"}
 
 
 def test_list_sources_collection_filter(tmp_path):

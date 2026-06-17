@@ -5,23 +5,31 @@
 (architecture + phase summary) → this doc (line-level implementation) → `docs/SPEC_W8_REGISTER_METADATA.md`
 (P5). `CLAUDE.md` has repo conventions; honor CLI/MCP parity and registry-sync rules.
 
-This document specs the work **not yet done**. P0 and P1 are **complete, tested, on the working
-tree** (see §0). Each phase is independently shippable; behavior only changes at **P3**. Run tests
-with `.venv/bin/python -m pytest tests/ --ignore=tests/integration --ignore=tests/pipeline -q`
-(known pre-existing failures: `test_rerank_json.py`, `test_resumable_indexing.py` — need an
-OpenAI-compatible key; ignore them).
+This document is now a **live implementation handoff**. P0–P2 are complete; **P3 core execution is
+implemented behind `indexing.ledger.execute`**, with important cleanup/acceptance items still open
+(sidecar retirement, `vault_files` transition, direct integration dry-run). Each phase should remain
+independently shippable. Current focused command:
+`.venv/bin/python -m pytest tests/unit --ignore=tests/unit/test_mcp_server.py -q`.
+
+Known test caveats as of 2026-06-17:
+- `tests/unit/test_mcp_server.py` times out independently after its first test in this workspace.
+- Older broad-suite caveats still apply for API-key-dependent tests outside `tests/unit`
+  (`tests/test_rerank_json.py`, `tests/test_resumable_indexing.py`).
 
 ---
 
-## 0. Current state (what P0/P1 already give you)
+## 0. Current state (what P0–P3 core already give you)
 
 **P0 — `src/registry.py`** (`SourceRegistry`):
 - Table `index_units(unit_id PK, identity_field, identity_value, unit_kind, source_fingerprint,
-  indexed_grain, indexed_at, chunk_count)` + indexes. `SCHEMA_VERSION = 2`; migration is additive
-  (CREATE IF NOT EXISTS on every init).
+  indexed_grain, indexed_at, chunk_count)` + indexes.
+- `SCHEMA_VERSION = 3` in the working tree. Version 3 currently covers the ledger table plus
+  child-key columns on `chunks` (`zotero_key`, `attachment_key`, `note_key`, `annotation_key`).
+  **Future P5 selection-metadata columns should bump to 4**, not reuse 3.
 - Methods: `get_unit_states() -> {unit_id: fingerprint}`, `record_unit_states(units, meta_updates=None)`,
   `delete_units(unit_ids)`, `delete_units_for_source(identity_field, identity_value)`. Ledger is
   cleared/kept-consistent in `reset()`, `delete_source_chunks()`, `delete_sources_like()`.
+- New P3 helpers: `chunk_records_for_source(...)`, `delete_chunks_matching(...)`.
 
 **P1 — `src/sources/`**:
 - `base.py`: `@dataclass(frozen=True) UnitState(unit_id, identity_field, identity_value, unit_kind,
@@ -35,11 +43,49 @@ OpenAI-compatible key; ignore them).
   if present else `mtime:<mtime>-<size>` of the resolved file (else the unit is omitted — not indexable).
 - Verified on the live library: 1787 units; attachment fingerprints 235 `hash:` / 308 `mtime:`.
 
-**Tests**: `tests/unit/test_registry.py` (ledger), `tests/unit/test_enumerate_state.py` (P1).
+**P2 — `src/reconcile.py`**:
+- `WorkPlan`, `reconcile(world, ledger)`, and `build_work_plan(sources, registry)` are implemented.
+- Pipeline shadow logging exists via `indexing.ledger.shadow` (default true in `config.example.yaml`)
+  when the legacy delta path is used.
+- Verified on a temp copy of the disposable Zotero DB (1787 units): parent metadata edit + new note +
+  attachment fingerprint change + top-level deletion produced exactly `creates=1`, `updates=2`,
+  `deletes=1`, `unchanged=1784`; ledger touched parents matched SQLite delta modification parents,
+  and ledger deletion matched SQLite deleted parent.
+
+**P3 core — behavior-changing path**:
+- `indexing.ledger.execute` is available and true in `config.example.yaml`. With this enabled,
+  non-force update runs call `_run_ledger_work_plan()` before the old delta path.
+- Resume with ledger execution enabled re-plans from the ledger and continues; legacy resume remains
+  for `indexing.ledger.execute: false`.
+- `src/storage/chroma.py`: `delete_where` normalizes multi-field equality filters into Chroma `$and`;
+  `update_metadata(ids, metadatas)` added for no-re-embed parent metadata updates.
+- `src/sources/zotero.py`: `fetch_item_documents(item_key, *, kinds=None, attachment_keys=None)` and
+  selector plumbing added; emitted chunks now carry `note_key` / `annotation_key` where applicable.
+- `src/pipeline.py`: core plan execution implemented:
+  - changed/new attachment units delete and fetch only that `attachment_key`;
+  - changed/new/deleted notes/annotations use parent kind-grain refresh for `zotero_note` +
+    `zotero_annotation`;
+  - parent-meta-only changes update Chroma metadata and registry chunks, with zero embeds;
+  - parent deletes remove all parent chunks and ledger rows;
+  - Obsidian create/update/delete paths route through the plan helpers (needs more direct tests).
+
+**Tests added/updated**:
+- `tests/unit/test_reconcile.py` (P2 pure diff + shadow parity fixture).
+- `tests/unit/test_chroma_storage.py` (Chroma filter normalization + metadata sanitizer).
+- `tests/unit/test_ledger_execution.py` (P3 headline behavior).
+- `tests/unit/test_registry.py` (schema v3 + child-key chunk delete helpers).
+- `tests/unit/test_trustworthy_updates.py` (partial Zotero fetch + child keys).
+
+Latest verified command:
+`timeout 180s .venv/bin/python -m pytest tests/unit --ignore=tests/unit/test_mcp_server.py -q`
+→ **133 passed**.
 
 ---
 
 ## P2 — Reconciliation planner (parity gate)
+
+**Status 2026-06-17: COMPLETE.** Keep this section as design reference; implementation lives in
+`src/reconcile.py` (not `src/indexing/planner.py`).
 
 **Goal**: a pure diff producing the work plan, plus a *shadow* parity check against today's delta
 path before any behavior changes.
@@ -122,9 +168,34 @@ Expected relationship (document any divergence in the log):
 Pure reconcile fully unit-tested; shadow parity logged and confirmed on the test corpora; **no
 behavior change** (planner does not yet drive deletes/embeds).
 
+**Acceptance evidence**:
+- `tests/unit/test_reconcile.py` passes.
+- Disposable Zotero-copy representative mutation run passed:
+  - create: `zotero:<parent>:note:<newKey>`
+  - updates: one `attachment`, one `parent_meta`
+  - delete: one parent `meta`
+  - ledger touched parent set == SQLite delta modification set; SQLite deleted set <= ledger deleted set.
+
 ---
 
 ## P3 — Granular execution + retire sidecar (the behavior change; the Jung win)
+
+**Status 2026-06-17: CORE IMPLEMENTED, NOT FULLY CLOSED.**
+
+Implemented:
+- Ledger execution path behind `indexing.ledger.execute`.
+- Storage metadata update and Chroma multi-field delete normalization.
+- Zotero partial fetch selectors and child-key metadata.
+- Registry child-key chunk columns/helpers.
+- Unit tests for note/attachment/meta/delete headline behavior.
+
+Still open before calling P3 fully shipped:
+- Retire `zotero_delta_state.json` and remove/seed sidecar code.
+- Migrate/subsume `vault_files` into `index_units`, or explicitly keep compatibility shims.
+- Add direct Obsidian P3 execution tests.
+- Add resume/crash test for interruption after Chroma upsert but before `record_unit_states`.
+- Run an integration-style dry-run over the disposable Zotero/Obsidian test subset with a disposable
+  Chroma collection.
 
 **Goal**: the pipeline acts on the `WorkPlan` — only changed units are re-embedded, deletes are
 surgical, metadata-only changes skip embedding, and `zotero_delta_state.json` is retired.
@@ -144,9 +215,14 @@ Group the plan's creates/updates/deletes by parent identity. For each touched pa
   update, no embed** (§P3.4).
 
 Rationale: precise where it's expensive (fulltext), kind-grain where it's cheap (children). Avoids
-adding child keys to chunk metadata. Record the per-parent grain decision in logs.
+needing child-key surgical deletes for notes/annotations. **Implementation note**: P3 now stores
+`note_key`/`annotation_key` in chunk metadata anyway so documents can map back to ledger units and
+future surgical child deletes remain possible. Current execution still uses kind-grain for
+notes/annotations.
 
 ### P3.2 Storage: surgical + metadata-only (`src/storage/chroma.py`)
+**Status: implemented.**
+
 - Confirm `delete_where` supports `{"zotero_key": K, "source_type": "zotero_fulltext",
   "attachment_key": A}` (Chroma `$and` of equality predicates — wrap multiple keys correctly; Chroma
   requires `{"$and":[{...},{...}]}` for >1 field). Add a helper if the current `delete_where` passes
@@ -155,6 +231,8 @@ adding child keys to chunk metadata. Record the per-parent grain decision in log
   (sanitize metadata the same way `add_documents` does). This is the no-re-embed path.
 
 ### P3.3 Source: partial fetch (`src/sources/zotero.py`)
+**Status: implemented.**
+
 Add a selective fetch so the pipeline can fetch a subset of an item's units. Extend `_process_item`
 (and a thin public entry like `fetch_item_documents(item_key, *, kinds=None, attachment_keys=None)`)
 with selectors:
@@ -164,12 +242,16 @@ The existing `_process_notes`/`_process_attachments`/`_process_annotations` alre
 gate them on the selector. Keep the full path (no selector) working for full rebuilds.
 
 ### P3.4 Pipeline orchestration (`src/pipeline.py`)
+**Status: core implemented behind `indexing.ledger.execute`; legacy delta path remains for
+`execute: false`.**
+
 Replace the delta-collect→delete→reindex flow (currently ~lines 196–390, plus
 `_collect_zotero_delta_changes`, `_collect_obsidian_delta_changes`, `_save/_load_delta_state`,
 `_persist_vault_state`) with a plan-driven flow:
 
-1. `plan = build_work_plan(self.sources, self.registry)` (skip in pure resume — checkpoint
-   continuity wins, as today).
+1. `plan = build_work_plan(self.sources, self.registry)`. With `indexing.ledger.execute: true`,
+   resume re-plans from the ledger and relies on stable chunk IDs/progress to converge; the legacy
+   "skip delta discovery on resume" behavior remains only for `execute: false`.
 2. **Deletes**: for each delete unit_id, map to chunks and remove from Chroma + registry
    (`delete_units` + chunk delete by the unit's grain), batched.
 3. **Creates/updates**: group by parent; for each parent fetch only the needed docs (§P3.3), chunk,
@@ -185,7 +267,15 @@ Write order per unit (durability, W5): embed → Chroma upsert → `record_chunk
 A kill-9 between upsert and `record_unit_states` leaves an un-recorded unit that the next reconcile
 re-plans; upserts are idempotent by stable id, so re-doing is safe.
 
+Implementation caveat:
+- `_record_ledger_unit_states()` records unit fingerprints after `_process_batches()` completes.
+  The intended durability property holds for completed runs, but the explicit crash/resume test is
+  still open. Verify that a kill between Chroma upsert and ledger record re-plans and converges with
+  stable IDs and no duplicate registry rows.
+
 ### P3.5 Retire the sidecar + decide the cursor
+**Status: not done.**
+
 - Delete `zotero_delta_state.json` usage: remove `_load_delta_state`/`_save_delta_state` and the
   `state_file` config. One-time migration: if the file exists on first P3 run, seed register `meta`
   (`zotero_item_version`, `zotero_fulltext_version`) from it, then ignore it.
@@ -204,22 +294,32 @@ fingerprint in `zotero.py` to a hash of `(dateModified, sorted(tags), sorted(col
 TODO; don't pre-build unless the test surfaces it.
 
 ### P3.7 Tests
-- **Add-note-to-large-item** (the headline): fixture parent with a fulltext attachment (hash
+- **Add-note-to-large-item** (the headline): implemented in `tests/unit/test_ledger_execution.py`.
+  Fixture parent with a fulltext attachment (hash
   unchanged) + add a note. Use a fake/counting embedder; assert embed is called for the note text
   only and the attachment's fulltext chunk ids are unchanged in Chroma.
-- **Tag edit** (parent_meta only): assert **zero** embed calls, `update_metadata` called, registry
+- **Tag edit / parent_meta only**: implemented in `tests/unit/test_ledger_execution.py`; asserts
+  **zero** embed calls, `update_metadata` called, registry
   `sources` row reflects new tags.
-- **Attachment replaced** (storageHash changes): assert that attachment re-embedded, sibling
+- **Attachment replaced** (storageHash changes): implemented in `tests/unit/test_ledger_execution.py`;
+  asserts changed attachment only is fetched/embedded and sibling
   attachments + notes untouched.
-- **Deletion**: item removed from fixture → its chunks + units removed from Chroma + registry.
-- **Resume after interruption**: simulate crash between Chroma upsert and `record_unit_states`;
+- **Deletion**: implemented in `tests/unit/test_ledger_execution.py`; item removed from fixture →
+  chunks + units removed from Chroma + registry.
+- **Resume after interruption**: TODO. Simulate crash between Chroma upsert and `record_unit_states`;
   assert next run re-plans and converges (no duplicates — idempotent ids).
-- **Obsidian**: new/changed/deleted file flows through the plan path equivalently to today.
+- **Obsidian**: TODO direct P3 execution tests. The plan helpers route vault create/update/delete,
+  but this needs explicit test coverage.
 
 ### P3.8 Acceptance
 Adding a note/annotation/tag to a 12,000-page item does **not** re-embed its fulltext; deletions are
 detected from ledger-minus-world without `/deleted`; `zotero_delta_state.json` is gone; the §3b
 functional profile does not regress; full delta run on the test corpora matches P2 shadow predictions.
+
+**Current acceptance state**:
+- Unit-level Jung win is covered.
+- Sidecar removal is not complete.
+- Full disposable-collection run has not yet been performed after P3 execution wiring.
 
 ---
 
@@ -261,7 +361,8 @@ touched by P0–P3, so there's one migration, not two.
 
 - **Register columns** (additive migration, same pattern as P0): `item_type`, `doi`, `abstract`,
   `tags`, `venue`, `language` on `sources`; lift in `record_chunks`; filter in `list_sources_payload`;
-  surface in `mcp_formatters` + `scripts/sources.py` (parity). Bump `SCHEMA_VERSION` (→3).
+  surface in `mcp_formatters` + `scripts/sources.py` (parity). **Bump `SCHEMA_VERSION` to 4**,
+  because P3 already uses 3 for child-key chunk columns.
 - **Extraction** (`src/sources/zotero.py` `_get_item_metadata`): resolve `typeName` → `item_type`
   (only field not already in `**fields`); the rest already arrive via the `**fields` spread; ensure
   `tags` survive to `record_chunks`.
@@ -302,10 +403,12 @@ or hosts; everything stays config-driven (W6).
 
 ## Sequencing & risk notes
 
-- **P2 before P3, always.** The shadow parity gate is the cheap insurance that the reconciler
-  reproduces today's decisions before it's allowed to drive deletes/embeds.
+- **P2 is complete.** Keep the shadow parity path available while P3 beds in, especially for
+  disposable/full-corpus dry runs.
 - **P5 can land with P3** (shared migration) or after; it's independent of the reconciliation logic.
 - **P4 backfill is optional for the fresh v0.6 build** — prioritize drift reporting over backfill.
 - Keep every new knob in `config.example.yaml` with a default and print it in preflight (W6).
 - Registry-sync rule (CLAUDE.md): any Chroma write/delete updates the registry **and now the ledger**
   in the same step.
+- `test_mcp_server.py` timeout should be investigated separately; do not treat it as a P3 regression
+  unless it starts failing differently after MCP changes.

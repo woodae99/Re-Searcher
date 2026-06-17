@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _PLACEHOLDER_TITLES = {"", "Untitled"}
 _PLACEHOLDER_AUTHORS = {"", "Unknown"}
@@ -105,6 +105,10 @@ class SourceRegistry:
                     chunk_level TEXT,
                     chunk_index INTEGER,
                     variant TEXT DEFAULT '',
+                    zotero_key TEXT DEFAULT '',
+                    attachment_key TEXT DEFAULT '',
+                    note_key TEXT DEFAULT '',
+                    annotation_key TEXT DEFAULT '',
                     indexed_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_identity
@@ -151,9 +155,20 @@ class SourceRegistry:
                 row[1] for row in conn.execute("PRAGMA table_info(sources)").fetchall()
             }
             if "collections" not in existing:
-                conn.execute(
-                    "ALTER TABLE sources ADD COLUMN collections TEXT DEFAULT ''"
-                )
+                conn.execute("ALTER TABLE sources ADD COLUMN collections TEXT DEFAULT ''")
+            existing_chunks = {
+                row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()
+            }
+            for column in (
+                "zotero_key",
+                "attachment_key",
+                "note_key",
+                "annotation_key",
+            ):
+                if column not in existing_chunks:
+                    conn.execute(
+                        f"ALTER TABLE chunks ADD COLUMN {column} TEXT DEFAULT ''"
+                    )
             # Upsert (not INSERT OR IGNORE) so the version reflects the migrations
             # actually applied: the additive CREATE/ALTER statements above run on
             # every init, so an existing v1 registry is now at SCHEMA_VERSION.
@@ -220,6 +235,10 @@ class SourceRegistry:
                     str(metadata.get("chunk_level") or "unknown"),
                     ordinal,
                     str(metadata.get("chunk_id_variant") or ""),
+                    str(metadata.get("zotero_key") or ""),
+                    str(metadata.get("attachment_key") or ""),
+                    str(metadata.get("note_key") or ""),
+                    str(metadata.get("annotation_key") or ""),
                     str(metadata.get("indexed_at") or ""),
                 )
             )
@@ -259,8 +278,10 @@ class SourceRegistry:
                     """
                     INSERT INTO chunks(
                         chunk_id, identity_field, identity_value, source_id,
-                        source_type, chunk_level, chunk_index, variant, indexed_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
+                        source_type, chunk_level, chunk_index, variant,
+                        zotero_key, attachment_key, note_key, annotation_key,
+                        indexed_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(chunk_id) DO UPDATE SET
                         identity_field = excluded.identity_field,
                         identity_value = excluded.identity_value,
@@ -269,6 +290,10 @@ class SourceRegistry:
                         chunk_level = excluded.chunk_level,
                         chunk_index = excluded.chunk_index,
                         variant = excluded.variant,
+                        zotero_key = excluded.zotero_key,
+                        attachment_key = excluded.attachment_key,
+                        note_key = excluded.note_key,
+                        annotation_key = excluded.annotation_key,
                         indexed_at = excluded.indexed_at
                     """,
                     chunk_rows,
@@ -442,6 +467,70 @@ class SourceRegistry:
             conn.execute(
                 "DELETE FROM index_units WHERE identity_field = ? AND identity_value = ?",
                 (identity_field, str(identity_value)),
+            )
+        return cursor.rowcount
+
+    def chunk_records_for_source(
+        self,
+        identity_field: str,
+        identity_value: str,
+        *,
+        source_types: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return registry chunk rows for one source identity."""
+        where = ["identity_field = ?", "identity_value = ?"]
+        params: List[Any] = [identity_field, str(identity_value)]
+        if source_types:
+            placeholders = ",".join("?" for _ in source_types)
+            where.append(f"source_type IN ({placeholders})")
+            params.extend(source_types)
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT chunk_id, identity_field, identity_value, source_id,
+                       source_type, chunk_level, chunk_index, variant,
+                       zotero_key, attachment_key, note_key, annotation_key,
+                       indexed_at
+                FROM chunks
+                WHERE {" AND ".join(where)}
+                ORDER BY chunk_id
+                """,
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_chunks_matching(
+        self,
+        identity_field: str,
+        identity_value: str,
+        *,
+        source_types: Optional[List[str]] = None,
+        attachment_key: Optional[str] = None,
+        note_key: Optional[str] = None,
+        annotation_key: Optional[str] = None,
+    ) -> int:
+        """Delete chunk rows matching a surgical vector-store delete."""
+        where = ["identity_field = ?", "identity_value = ?"]
+        params: List[Any] = [identity_field, str(identity_value)]
+        if source_types:
+            placeholders = ",".join("?" for _ in source_types)
+            where.append(f"source_type IN ({placeholders})")
+            params.extend(source_types)
+        if attachment_key:
+            where.append("attachment_key = ?")
+            params.append(str(attachment_key))
+        if note_key:
+            where.append("note_key = ?")
+            params.append(str(note_key))
+        if annotation_key:
+            where.append("annotation_key = ?")
+            params.append(str(annotation_key))
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"DELETE FROM chunks WHERE {' AND '.join(where)}",
+                params,
             )
         return cursor.rowcount
 

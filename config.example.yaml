@@ -120,7 +120,7 @@ chunking:
   chunk_overlap: 256
   # Chunking strategy: 'character', 'token', or 'semantic'
   strategy: character
-  # New router configuration (vNext)
+  # Router configuration
   router_enabled: true
   id_strategy: stable_hash  # stable_hash | legacy
   # Oversize guard settings (prevents embedder truncation)
@@ -216,6 +216,13 @@ indexing:
     # Changed/deleted items have their old chunks removed in batches of this
     # size before re-indexing. There is no upper limit on keys per run.
     delete_batch_size: 100
+  ledger:
+    # Behavior-changing P3 path: execute updates from the register-ledger
+    # work plan instead of the legacy Zotero sidecar / vault snapshot delta.
+    execute: true
+    # P2 parity gate: compute the register-ledger work plan and log it beside
+    # the current delta path, without letting it drive execution yet.
+    shadow: true
   # Optional: pipeline embed/store overlap to reduce idle time
   embed_store_pipeline:
     enabled: false

@@ -98,8 +98,8 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
     
     print(f"\n      Total documents fetched: {len(documents)}")
     
-    # Chunk documents using vNext router
-    print(f"\n[4/6] Chunking documents (vNext router)...")
+    # Chunk documents using the router
+    print(f"\n[4/6] Chunking documents (router)...")
     all_chunks = []
     all_metadata = []
     all_ids = []

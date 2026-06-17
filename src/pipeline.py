@@ -21,6 +21,7 @@ from .processing.id_utils import attach_parent_ids, stable_chunk_id
 from .processing.oversize_guard import create_oversize_guard
 from .processing.quality_filter import create_quality_filter_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
+from .reconcile import WorkPlan, build_work_plan
 from .registry import SourceRegistry, registry_path_for
 from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
@@ -203,7 +204,14 @@ class ResearchRAGPipeline:
                 # Resume mode should prioritize checkpoint continuity over delta
                 # re-discovery, which can otherwise fan out to broad "changed"
                 # sets when delta state is missing/stale.
+                if self._ledger_execution_enabled():
+                    print("[INFO] Resume mode: re-planning from the ledger and continuing.")
+                    self._run_ledger_work_plan()
+                    return
                 print("[INFO] Resume mode: skipping delta change discovery and continuing from checkpoint.")
+            elif self._ledger_execution_enabled():
+                self._run_ledger_work_plan()
+                return
             elif self._delta_enabled():
                 delta_changes = self._collect_zotero_delta_changes()
                 changed_zotero_keys = delta_changes.get("changed_item_keys", [])
@@ -217,6 +225,7 @@ class ResearchRAGPipeline:
                         0,
                     ),
                 }
+                self._run_ledger_shadow(delta_changes)
                 if changed_zotero_keys:
                     print(f"[INFO] Delta mode: {len(changed_zotero_keys)} changed Zotero items detected.")
                 else:
@@ -911,6 +920,475 @@ class ResearchRAGPipeline:
 
     def _delta_enabled(self) -> bool:
         return bool(self._delta_cfg().get("enabled", False))
+
+    def _ledger_cfg(self) -> Dict[str, Any]:
+        return self.config.get("indexing", {}).get("ledger", {}) or {}
+
+    def _ledger_execution_enabled(self) -> bool:
+        return bool(self._ledger_cfg().get("execute", False))
+
+    def _ledger_shadow_enabled(self) -> bool:
+        return bool(self._ledger_cfg().get("shadow", True))
+
+    def _run_ledger_shadow(self, delta_changes: Dict[str, Any]) -> None:
+        """Log the ledger reconciler's plan beside the current delta decision.
+
+        P2 is a parity gate: this computes the new planner's answer but never
+        lets it drive deletes, fetches, embeds, or watermarks.
+        """
+        if not self._ledger_shadow_enabled():
+            return
+
+        try:
+            plan = build_work_plan(self.sources, self.registry)
+            print(
+                "[INFO] Ledger shadow: "
+                f"{len(plan.creates)} creates, {len(plan.updates)} updates, "
+                f"{len(plan.deletes)} deletes, {plan.unchanged} unchanged units."
+            )
+
+            ledger_zotero_touched = {
+                value
+                for field, value in plan.touched_identities()
+                if field == "zotero_key"
+            }
+            ledger_zotero_deletes = {
+                parent
+                for parent in (
+                    self._zotero_parent_from_unit_id(unit_id)
+                    for unit_id in plan.deletes
+                )
+                if parent
+            }
+            delta_zotero_keys = set(delta_changes.get("changed_item_keys") or [])
+            comparable_delta_keys = delta_zotero_keys - ledger_zotero_deletes
+
+            missing = sorted(comparable_delta_keys - ledger_zotero_touched)
+            extra = sorted(ledger_zotero_touched - comparable_delta_keys)
+            if missing or extra:
+                print(
+                    "[WARN] Ledger shadow parity divergence: "
+                    f"delta_only={self._sample_list(missing)}, "
+                    f"ledger_only={self._sample_list(extra)}"
+                )
+            elif delta_zotero_keys or ledger_zotero_touched:
+                print(
+                    "[INFO] Ledger shadow parity: Zotero modify/create parent set "
+                    "matches current delta path."
+                )
+
+            if ledger_zotero_deletes:
+                print(
+                    "[INFO] Ledger shadow deletions: "
+                    f"{len(ledger_zotero_deletes)} Zotero parent(s) absent from world "
+                    f"(sample={self._sample_list(sorted(ledger_zotero_deletes))})."
+                )
+        except Exception as e:
+            print(f"[WARN] Ledger shadow reconciliation failed: {e}")
+
+    @staticmethod
+    def _zotero_parent_from_unit_id(unit_id: str) -> Optional[str]:
+        parts = str(unit_id).split(":")
+        if len(parts) >= 3 and parts[0] == "zotero":
+            return parts[1]
+        return None
+
+    @staticmethod
+    def _sample_list(values: List[str], limit: int = 10) -> List[str]:
+        if len(values) <= limit:
+            return values
+        return [*values[:limit], f"...(+{len(values) - limit} more)"]
+
+    def _run_ledger_work_plan(self) -> None:
+        """Execute an incremental update from the registry-ledger work plan."""
+        plan = build_work_plan(self.sources, self.registry)
+        print(
+            "[INFO] Ledger mode: "
+            f"{len(plan.creates)} creates, {len(plan.updates)} updates, "
+            f"{len(plan.deletes)} deletes, {plan.unchanged} unchanged units."
+        )
+
+        if plan.is_empty():
+            self._save_source_hash()
+            self._refresh_registry()
+            print("[INFO] Ledger mode: no changes detected. Use --force to re-index anyway.")
+            return
+
+        self._execute_ledger_deletes(plan)
+        documents, units_by_id = self._fetch_ledger_documents(plan)
+
+        if documents:
+            self.progress.forget_many([doc.doc_id for doc in documents])
+            self.progress.set_total_documents(len(documents))
+            self._overall_total_chunks = 0
+            self._overall_embedded = 0
+            self._overall_stored = 0
+
+            self.progress_display.set_stage(IndexingStage.CHUNKING, 3, 4)
+            self.progress_display.set_activity(
+                f"Processing {len(documents)} ledger-planned documents in batches..."
+            )
+            completed_run = self._process_batches(documents)
+            if not completed_run:
+                self._refresh_registry()
+                print(
+                    "[INFO] Ledger indexing paused after completing the current batch. "
+                    "Run the same command again to resume."
+                )
+                return
+
+            self._record_ledger_units_for_documents(documents, units_by_id)
+        else:
+            print("[INFO] Ledger mode: no text documents need embedding.")
+
+        self._apply_ledger_metadata_updates(plan)
+        self._save_source_hash()
+        self._refresh_registry()
+
+        self.progress_display.set_stage(IndexingStage.COMPLETE, 4, 4)
+        self.progress_display.set_activity("Ledger indexing complete!")
+        stats = self.vector_store.get_collection_stats()
+        print(f"\nCollection: {stats.get('collection_name')}")
+        print(f"Total documents: {stats.get('document_count')}")
+        print(f"Endpoint: {stats.get('endpoint')}")
+
+    def _execute_ledger_deletes(self, plan: WorkPlan) -> None:
+        """Apply delete-before-replace operations required by the work plan."""
+        zotero_delete_groups = self._group_zotero_deletes(plan.deletes)
+        zotero_changed_groups = self._group_zotero_states([*plan.creates, *plan.updates])
+
+        for relative_path in self._obsidian_delete_paths(plan):
+            self._delete_obsidian_sources([relative_path], removing=True)
+
+        for relative_path in self._obsidian_update_paths(plan):
+            self._delete_obsidian_sources([relative_path])
+
+        full_deleted_parents = {
+            parent
+            for parent, group in zotero_delete_groups.items()
+            if group.get("parent_meta")
+        }
+        for parent_key in sorted(full_deleted_parents):
+            self._delete_existing_zotero_chunks([parent_key])
+
+        for parent_key, group in zotero_delete_groups.items():
+            if parent_key in full_deleted_parents:
+                continue
+            for attachment_key in sorted(group.get("attachment", set())):
+                self._delete_zotero_attachment_chunks(parent_key, attachment_key)
+            if group.get("note") or group.get("annotation"):
+                self._delete_zotero_note_annotation_chunks(parent_key)
+
+        for parent_key, group in zotero_changed_groups.items():
+            if parent_key in full_deleted_parents:
+                continue
+            for attachment_key in sorted(group.get("attachment", set())):
+                self._delete_zotero_attachment_chunks(parent_key, attachment_key)
+            if group.get("note") or group.get("annotation"):
+                self._delete_zotero_note_annotation_chunks(parent_key)
+
+        deleted_unit_ids = [
+            unit_id
+            for unit_id in plan.deletes
+            if not (
+                unit_id.startswith("zotero:")
+                and self._zotero_parent_from_unit_id(unit_id) in full_deleted_parents
+            )
+        ]
+        try:
+            self.registry.delete_units(deleted_unit_ids)
+        except Exception as e:
+            print(f"[WARN] Ledger delete-unit cleanup failed: {e}")
+
+    def _fetch_ledger_documents(self, plan: WorkPlan) -> tuple[List[Any], Dict[str, Any]]:
+        """Fetch only documents needed by the ledger work plan."""
+        documents: List[Any] = []
+        units_by_id = {unit.unit_id: unit for unit in (*plan.creates, *plan.updates)}
+
+        obsidian_paths = self._obsidian_create_update_paths(plan)
+        if obsidian_paths:
+            source = self._get_obsidian_source()
+            if source is not None:
+                documents.extend(source.fetch_documents(relative_paths=obsidian_paths))
+
+        zotero_source = self._get_zotero_source()
+        if zotero_source is not None:
+            changed_groups = self._group_zotero_states([*plan.creates, *plan.updates])
+            delete_groups = self._group_zotero_deletes(plan.deletes)
+            for parent_key in sorted(set(changed_groups) | set(delete_groups)):
+                if delete_groups.get(parent_key, {}).get("parent_meta"):
+                    continue
+                group = changed_groups.get(parent_key, {})
+                deleted = delete_groups.get(parent_key, {})
+
+                attachment_keys = set(group.get("attachment", set()))
+                if attachment_keys:
+                    documents.extend(
+                        zotero_source.fetch_item_documents(
+                            parent_key,
+                            kinds={"attachment"},
+                            attachment_keys=attachment_keys,
+                        )
+                    )
+
+                if (
+                    group.get("note")
+                    or group.get("annotation")
+                    or deleted.get("note")
+                    or deleted.get("annotation")
+                ):
+                    documents.extend(
+                        zotero_source.fetch_item_documents(
+                            parent_key,
+                            kinds={"note", "annotation"},
+                        )
+                    )
+
+        deduped = list({doc.doc_id: doc for doc in documents}.values())
+        return deduped, units_by_id
+
+    def _record_ledger_units_for_documents(
+        self,
+        documents: List[Any],
+        units_by_id: Dict[str, Any],
+    ) -> None:
+        unit_ids = {
+            unit_id
+            for doc in documents
+            for unit_id in [self._unit_id_for_document(doc)]
+            if unit_id in units_by_id
+        }
+        self._record_ledger_unit_states([units_by_id[unit_id] for unit_id in sorted(unit_ids)])
+
+    def _apply_ledger_metadata_updates(self, plan: WorkPlan) -> None:
+        """Refresh source metadata for parent_meta units without embedding."""
+        zotero_source = self._get_zotero_source()
+        if zotero_source is None:
+            return
+
+        deleted_parents = {
+            parent
+            for parent, group in self._group_zotero_deletes(plan.deletes).items()
+            if group.get("parent_meta")
+        }
+        parent_meta_units = [
+            unit
+            for unit in (*plan.creates, *plan.updates)
+            if unit.identity_field == "zotero_key"
+            and unit.unit_kind == "parent_meta"
+            and unit.identity_value not in deleted_parents
+        ]
+        for unit in parent_meta_units:
+            fresh = self._fetch_zotero_metadata_base(zotero_source, unit.identity_value)
+            if fresh is None:
+                continue
+            records = self.registry.chunk_records_for_source("zotero_key", unit.identity_value)
+            ids = [record["chunk_id"] for record in records]
+            if ids:
+                stored = self.vector_store.get_by_ids(ids)
+                existing_by_id = {doc_id: metadata for doc_id, _text, metadata in stored}
+                metadatas = [
+                    self._merge_source_metadata(existing_by_id.get(chunk_id, {}), fresh)
+                    for chunk_id in ids
+                ]
+                self.vector_store.update_metadata(ids, metadatas)
+                self.registry.record_chunks(ids, metadatas)
+            self._record_ledger_unit_states([unit])
+
+    def _fetch_zotero_metadata_base(
+        self, source: ZoteroSource, item_key: str
+    ) -> Optional[Dict[str, Any]]:
+        conn = source._get_db_connection()
+        if not conn:
+            return None
+        try:
+            rows = source._get_items_by_keys(conn, [item_key])
+            if not rows:
+                return None
+            return source._get_item_metadata(conn, rows[0]["itemID"])
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _merge_source_metadata(
+        existing: Dict[str, Any],
+        fresh_source_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        chunk_specific = {
+            "source_type",
+            "source_id",
+            "chunk_level",
+            "chunk_index",
+            "chunk_id_variant",
+            "attachment_id",
+            "attachment_key",
+            "note_id",
+            "note_key",
+            "annotation_id",
+            "annotation_key",
+            "file_name",
+            "file_path",
+            "content_type",
+            "text_source",
+            "fulltext_available",
+            "fulltext_partial_fallback",
+            "page",
+        }
+        merged = dict(existing or {})
+        for key, value in fresh_source_metadata.items():
+            if key not in chunk_specific:
+                merged[key] = value
+        return merged
+
+    def _record_ledger_unit_states(self, units: List[Any]) -> None:
+        if not units:
+            return
+        indexed_at = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        rows = [
+            {
+                "unit_id": unit.unit_id,
+                "identity_field": unit.identity_field,
+                "identity_value": unit.identity_value,
+                "unit_kind": unit.unit_kind,
+                "source_fingerprint": unit.fingerprint,
+                "indexed_at": indexed_at,
+            }
+            for unit in units
+        ]
+        try:
+            self.registry.record_unit_states(rows)
+        except Exception as e:
+            print(f"[WARN] Ledger unit-state update failed: {e}")
+
+    def _delete_zotero_attachment_chunks(
+        self, parent_key: str, attachment_key: str
+    ) -> None:
+        where = {
+            "$and": [
+                {"zotero_key": parent_key},
+                {"source_type": "zotero_fulltext"},
+                {"attachment_key": attachment_key},
+            ]
+        }
+        self.vector_store.delete_where(where)
+        self.registry.delete_chunks_matching(
+            "zotero_key",
+            parent_key,
+            source_types=["zotero_fulltext"],
+            attachment_key=attachment_key,
+        )
+
+    def _delete_zotero_note_annotation_chunks(self, parent_key: str) -> None:
+        source_types = ["zotero_note", "zotero_annotation"]
+        self.vector_store.delete_where(
+            {
+                "$and": [
+                    {"zotero_key": parent_key},
+                    {"source_type": {"$in": source_types}},
+                ]
+            }
+        )
+        self.registry.delete_chunks_matching(
+            "zotero_key",
+            parent_key,
+            source_types=source_types,
+        )
+
+    def _obsidian_create_update_paths(self, plan: WorkPlan) -> List[str]:
+        return sorted(
+            unit.identity_value[len("obsidian-") :]
+            for unit in (*plan.creates, *plan.updates)
+            if unit.unit_kind == "vault_file"
+            and unit.identity_field == "source_id"
+            and unit.identity_value.startswith("obsidian-")
+        )
+
+    def _obsidian_update_paths(self, plan: WorkPlan) -> List[str]:
+        return sorted(
+            unit.identity_value[len("obsidian-") :]
+            for unit in plan.updates
+            if unit.unit_kind == "vault_file"
+            and unit.identity_field == "source_id"
+            and unit.identity_value.startswith("obsidian-")
+        )
+
+    def _obsidian_delete_paths(self, plan: WorkPlan) -> List[str]:
+        prefix = "obsidian:"
+        return sorted(
+            unit_id[len(prefix) :]
+            for unit_id in plan.deletes
+            if unit_id.startswith(prefix)
+        )
+
+    def _group_zotero_states(self, units: List[Any]) -> Dict[str, Dict[str, set[str]]]:
+        groups: Dict[str, Dict[str, set[str]]] = {}
+        for unit in units:
+            if unit.identity_field != "zotero_key":
+                continue
+            group = groups.setdefault(
+                unit.identity_value,
+                {"parent_meta": set(), "attachment": set(), "note": set(), "annotation": set()},
+            )
+            if unit.unit_kind == "parent_meta":
+                group["parent_meta"].add(unit.unit_id)
+                continue
+            child_key = self._child_key_from_unit_id(unit.unit_id)
+            if child_key and unit.unit_kind in group:
+                group[unit.unit_kind].add(child_key)
+        return groups
+
+    def _group_zotero_deletes(self, unit_ids: List[str]) -> Dict[str, Dict[str, set[str]]]:
+        groups: Dict[str, Dict[str, set[str]]] = {}
+        for unit_id in unit_ids:
+            parsed = self._parse_zotero_unit_id(unit_id)
+            if parsed is None:
+                continue
+            parent_key, kind, child_key = parsed
+            group = groups.setdefault(
+                parent_key,
+                {"parent_meta": set(), "attachment": set(), "note": set(), "annotation": set()},
+            )
+            if kind == "parent_meta":
+                group["parent_meta"].add(unit_id)
+            elif child_key and kind in group:
+                group[kind].add(child_key)
+        return groups
+
+    @staticmethod
+    def _parse_zotero_unit_id(unit_id: str) -> Optional[tuple[str, str, Optional[str]]]:
+        parts = str(unit_id).split(":")
+        if len(parts) == 3 and parts[0] == "zotero" and parts[2] == "meta":
+            return parts[1], "parent_meta", None
+        if len(parts) == 4 and parts[0] == "zotero":
+            return parts[1], parts[2], parts[3]
+        return None
+
+    @staticmethod
+    def _child_key_from_unit_id(unit_id: str) -> Optional[str]:
+        parts = str(unit_id).split(":")
+        if len(parts) == 4:
+            return parts[3]
+        return None
+
+    @staticmethod
+    def _unit_id_for_document(doc: Any) -> Optional[str]:
+        metadata = doc.metadata or {}
+        source_type = metadata.get("source_type")
+        zotero_key = metadata.get("zotero_key")
+        if source_type == "zotero_note" and zotero_key and metadata.get("note_key"):
+            return f"zotero:{zotero_key}:note:{metadata['note_key']}"
+        if source_type == "zotero_fulltext" and zotero_key and metadata.get("attachment_key"):
+            return f"zotero:{zotero_key}:attachment:{metadata['attachment_key']}"
+        if source_type == "zotero_annotation" and zotero_key and metadata.get("annotation_key"):
+            return f"zotero:{zotero_key}:annotation:{metadata['annotation_key']}"
+        if source_type == "obsidian" and metadata.get("relative_path"):
+            return f"obsidian:{metadata['relative_path']}"
+        return None
 
     def _delta_state_path(self) -> Path:
         cfg = self._delta_cfg()

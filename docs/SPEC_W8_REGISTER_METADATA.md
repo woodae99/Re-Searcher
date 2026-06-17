@@ -93,10 +93,12 @@ survives to `record_chunks` (it does — `metadata` is passed whole).
 
 ### 2.3 Schema + migration (`src/registry.py`)
 
-- Bump `SCHEMA_VERSION` to `2`.
+- Bump `SCHEMA_VERSION` to the next value. As of the ledger/P3 working tree, `SCHEMA_VERSION = 3`
+  is already used for `index_units` plus child-key columns on `chunks`, so W8 selection metadata
+  should bump to **4**.
 - Add the six columns to the `CREATE TABLE sources` body (default `''`).
-- Extend the existing additive-migration block (currently the `collections` `ALTER TABLE` at
-  lines 136–142) to add each new column when absent — same `PRAGMA table_info(sources)` guard, one
+- Extend the existing additive-migration block to add each new column when absent — same
+  `PRAGMA table_info(sources)` guard, one
   `ALTER TABLE sources ADD COLUMN … TEXT DEFAULT ''` per missing column. This keeps existing
   registries readable without a reset.
 

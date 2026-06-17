@@ -99,7 +99,13 @@ class ZoteroSource(DataSource):
 
         return True
 
-    def fetch_documents(self, item_keys: Optional[List[str]] = None) -> Iterator[Document]:
+    def fetch_documents(
+        self,
+        item_keys: Optional[List[str]] = None,
+        *,
+        kinds: Optional[set[str]] = None,
+        attachment_keys: Optional[set[str]] = None,
+    ) -> Iterator[Document]:
         """
         Fetch all documents from Zotero library.
 
@@ -140,16 +146,47 @@ class ZoteroSource(DataSource):
             conn = None
 
             if self.parallel_enabled:
-                yield from self._fetch_documents_parallel(items, total_items)
+                yield from self._fetch_documents_parallel(
+                    items,
+                    total_items,
+                    kinds=kinds,
+                    attachment_keys=attachment_keys,
+                )
             else:
-                yield from self._fetch_documents_sequential(items, total_items)
+                yield from self._fetch_documents_sequential(
+                    items,
+                    total_items,
+                    kinds=kinds,
+                    attachment_keys=attachment_keys,
+                )
 
         finally:
             if conn:
                 conn.close()
             self._emit_progress("source_complete")
 
-    def _fetch_documents_sequential(self, items: List, total_items: int) -> Iterator[Document]:
+    def fetch_item_documents(
+        self,
+        item_key: str,
+        *,
+        kinds: Optional[set[str]] = None,
+        attachment_keys: Optional[set[str]] = None,
+    ) -> Iterator[Document]:
+        """Fetch documents for one top-level item with optional unit selectors."""
+        yield from self.fetch_documents(
+            item_keys=[item_key],
+            kinds=kinds,
+            attachment_keys=attachment_keys,
+        )
+
+    def _fetch_documents_sequential(
+        self,
+        items: List,
+        total_items: int,
+        *,
+        kinds: Optional[set[str]] = None,
+        attachment_keys: Optional[set[str]] = None,
+    ) -> Iterator[Document]:
         """Process items sequentially (fallback mode)."""
         conn = self._get_db_connection()
         if not conn:
@@ -162,7 +199,12 @@ class ZoteroSource(DataSource):
 
                 try:
                     docs_yielded = 0
-                    for doc in self._process_item(conn, item_id):
+                    for doc in self._process_item(
+                        conn,
+                        item_id,
+                        kinds=kinds,
+                        attachment_keys=attachment_keys,
+                    ):
                         yield doc
                         docs_yielded += 1
 
@@ -183,7 +225,14 @@ class ZoteroSource(DataSource):
         finally:
             conn.close()
 
-    def _fetch_documents_parallel(self, items: List, total_items: int) -> Iterator[Document]:
+    def _fetch_documents_parallel(
+        self,
+        items: List,
+        total_items: int,
+        *,
+        kinds: Optional[set[str]] = None,
+        attachment_keys: Optional[set[str]] = None,
+    ) -> Iterator[Document]:
         """
         Process items in parallel using a sliding window approach.
 
@@ -211,7 +260,9 @@ class ZoteroSource(DataSource):
                     self._process_item_standalone,
                     item_row["itemID"],
                     next_to_submit,
-                    total_items
+                    total_items,
+                    kinds,
+                    attachment_keys,
                 )
                 pending_futures[future] = (next_to_submit, item_row["itemID"])
                 next_to_submit += 1
@@ -262,7 +313,9 @@ class ZoteroSource(DataSource):
                             self._process_item_standalone,
                             item_row["itemID"],
                             next_to_submit,
-                            total_items
+                            total_items,
+                            kinds,
+                            attachment_keys,
                         )
                         pending_futures[new_future] = (next_to_submit, item_row["itemID"])
                         next_to_submit += 1
@@ -279,7 +332,14 @@ class ZoteroSource(DataSource):
                     yield doc
                 next_to_yield += 1
 
-    def _process_item_standalone(self, item_id: int, idx: int, total: int) -> List[Document]:
+    def _process_item_standalone(
+        self,
+        item_id: int,
+        idx: int,
+        total: int,
+        kinds: Optional[set[str]] = None,
+        attachment_keys: Optional[set[str]] = None,
+    ) -> List[Document]:
         """
         Process a single item with its own DB connection (thread-safe).
 
@@ -292,7 +352,14 @@ class ZoteroSource(DataSource):
             return []
 
         try:
-            return list(self._process_item(conn, item_id))
+            return list(
+                self._process_item(
+                    conn,
+                    item_id,
+                    kinds=kinds,
+                    attachment_keys=attachment_keys,
+                )
+            )
         finally:
             conn.close()
 
@@ -1072,21 +1139,39 @@ class ZoteroSource(DataSource):
             return None
         return f"mtime:{stat.st_mtime:.6f}-{stat.st_size}"
 
-    def _process_item(self, conn: sqlite3.Connection, item_id: int) -> Iterator[Document]:
+    def _process_item(
+        self,
+        conn: sqlite3.Connection,
+        item_id: int,
+        *,
+        kinds: Optional[set[str]] = None,
+        attachment_keys: Optional[set[str]] = None,
+    ) -> Iterator[Document]:
         """Process a single Zotero item and yield documents."""
         # Get item metadata
         metadata_base = self._get_item_metadata(conn, item_id)
 
         # Process notes if enabled
-        if self.zotero_config.get("include_notes", True):
+        if self.zotero_config.get("include_notes", True) and (
+            kinds is None or "note" in kinds
+        ):
             yield from self._process_notes(conn, item_id, metadata_base)
 
         # Process attachments if enabled
-        if self.zotero_config.get("extract_attachments", True):
-            yield from self._process_attachments(conn, item_id, metadata_base)
+        if self.zotero_config.get("extract_attachments", True) and (
+            kinds is None or "attachment" in kinds
+        ):
+            yield from self._process_attachments(
+                conn,
+                item_id,
+                metadata_base,
+                attachment_keys=attachment_keys,
+            )
 
         # Process annotations if enabled
-        if self.zotero_config.get("include_annotations", True):
+        if self.zotero_config.get("include_annotations", True) and (
+            kinds is None or "annotation" in kinds
+        ):
             yield from self._process_annotations(conn, item_id, metadata_base)
 
     def _get_item_metadata(self, conn: sqlite3.Connection, item_id: int) -> Dict[str, Any]:
@@ -1173,7 +1258,14 @@ class ZoteroSource(DataSource):
         """Process notes for an item."""
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT note, itemID FROM itemNotes WHERE parentItemID = ?", (item_id,)
+            """
+            SELECT n.note, n.itemID, i.key
+            FROM itemNotes n
+            JOIN items i ON i.itemID = n.itemID
+            WHERE n.parentItemID = ?
+              AND n.itemID NOT IN (SELECT itemID FROM deletedItems)
+            """,
+            (item_id,),
         )
 
         h = html2text.HTML2Text()
@@ -1182,6 +1274,7 @@ class ZoteroSource(DataSource):
         for idx, row in enumerate(cursor.fetchall()):
             note_html = row["note"]
             note_id = row["itemID"]
+            note_key = row["key"]
             note_text = h.handle(note_html).strip()
 
             if note_text:
@@ -1190,6 +1283,7 @@ class ZoteroSource(DataSource):
                     {
                         "source_type": "zotero_note",
                         "note_id": note_id,
+                        "note_key": note_key,
                         "chunk_index": idx,
                     }
                 )
@@ -1201,7 +1295,11 @@ class ZoteroSource(DataSource):
                 )
 
     def _collect_attachment_tasks(
-        self, conn: sqlite3.Connection, item_id: int
+        self,
+        conn: sqlite3.Connection,
+        item_id: int,
+        *,
+        attachment_keys: Optional[set[str]] = None,
     ) -> List[ExtractionTask]:
         """Collect all attachment extraction tasks for an item."""
         cursor = conn.cursor()
@@ -1210,7 +1308,9 @@ class ZoteroSource(DataSource):
             SELECT ia.path, ia.contentType, i.itemID, i.key
             FROM itemAttachments ia
             JOIN items i ON ia.itemID = i.itemID
-            WHERE ia.parentItemID = ? AND ia.path IS NOT NULL
+            WHERE ia.parentItemID = ?
+              AND ia.path IS NOT NULL
+              AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
             """,
             (item_id,),
         )
@@ -1223,6 +1323,8 @@ class ZoteroSource(DataSource):
 
             filename = path_str.split(":", 1)[1]
             attachment_key = row["key"]
+            if attachment_keys is not None and attachment_key not in attachment_keys:
+                continue
             attachment_id = row["itemID"]
             file_path = self.storage_dir / attachment_key / filename
 
@@ -1300,7 +1402,12 @@ class ZoteroSource(DataSource):
         return len(text) < self.fulltext_large_pdf_min_chars
 
     def _process_attachments(
-        self, conn: sqlite3.Connection, item_id: int, metadata_base: Dict[str, Any]
+        self,
+        conn: sqlite3.Connection,
+        item_id: int,
+        metadata_base: Dict[str, Any],
+        *,
+        attachment_keys: Optional[set[str]] = None,
     ) -> Iterator[Document]:
         """Process attachments for an item sequentially.
 
@@ -1308,7 +1415,11 @@ class ZoteroSource(DataSource):
         concurrently), so attachment extraction within an item is sequential.
         """
         # Step 1: Collect all tasks
-        tasks = self._collect_attachment_tasks(conn, item_id)
+        tasks = self._collect_attachment_tasks(
+            conn,
+            item_id,
+            attachment_keys=attachment_keys,
+        )
 
         if not tasks:
             return
@@ -1389,11 +1500,12 @@ class ZoteroSource(DataSource):
 
         cursor.execute(
             """
-            SELECT an.text, an.comment, an.sortIndex, an.pageLabel, i.itemID
+            SELECT an.text, an.comment, an.sortIndex, an.pageLabel, i.itemID, i.key
             FROM itemAnnotations an
             JOIN items i ON an.itemID = i.itemID
             JOIN itemAttachments att ON att.itemID = an.parentItemID
             WHERE att.parentItemID = ?
+              AND an.itemID NOT IN (SELECT itemID FROM deletedItems)
             ORDER BY an.sortIndex
             """,
             (item_id,),
@@ -1403,6 +1515,7 @@ class ZoteroSource(DataSource):
             annotation_text = row["text"] or ""
             annotation_comment = row["comment"] or ""
             annotation_id = row["itemID"]
+            annotation_key = row["key"]
             page = row["pageLabel"] or ""
 
             # Combine highlighted text and comment
@@ -1414,6 +1527,7 @@ class ZoteroSource(DataSource):
                     {
                         "source_type": "zotero_annotation",
                         "annotation_id": annotation_id,
+                        "annotation_key": annotation_key,
                         "page": page,
                         "chunk_index": idx,
                     }

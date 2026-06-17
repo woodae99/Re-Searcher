@@ -1,6 +1,6 @@
 # Architecture Spec — Register as Index Ledger (Reconciliation Authority)
 
-**Status**: proposed (2026-06-17) · **Parent**: `SPEC_V0.6_REBUILD.md` §3a, §3d · **Branch**: `v0.6-rebuild`
+**Status**: partially implemented (2026-06-17) · **Parent**: `SPEC_V0.6_REBUILD.md` §3a, §3d · **Branch**: `v0.6-rebuild`
 **Supersedes**: the standalone "delta sub-item precision" idea (now a *consequence* of this design, §6)
 **Absorbs**: `SPEC_W8_REGISTER_METADATA.md` rides Phase 5 (shared `record_chunks`/registry surface)
 
@@ -93,6 +93,11 @@ CREATE INDEX IF NOT EXISTS idx_units_kind ON index_units(unit_kind);
 - The library-version cursor moves to `meta`: `zotero_item_version`, `zotero_fulltext_version`.
 - `zotero_delta_state.json` is deleted; a one-time migration seeds `meta` from it if present.
 
+Implementation note (2026-06-17): working-tree `SCHEMA_VERSION = 3` currently includes `index_units`
+plus child-key columns on `chunks` (`zotero_key`, `attachment_key`, `note_key`, `annotation_key`) so
+pipeline execution can mirror surgical deletes in the registry and map stored documents back to
+ledger units. P5 selection metadata should use the next schema version.
+
 ## 5. Interfaces (the seams)
 
 ```python
@@ -108,7 +113,7 @@ class SourceRegistry:
     def record_unit_states(self, states, *, meta=None): ...    # upsert, durable, w/ cursor
     def delete_units(self, unit_ids): ...                      # surgical, by unit
 
-# src/indexing/planner.py  (new; source-agnostic)
+# src/reconcile.py  (implemented; source-agnostic)
 def reconcile(world: dict[str, UnitState], ledger: dict[str, str]) -> WorkPlan: ...
     # WorkPlan = {creates: [UnitState], updates: [UnitState], deletes: [unit_id]}
 ```
@@ -174,10 +179,11 @@ re-embed.
   corpora; a touched note changes exactly one fingerprint.
 
 **P2 — Reconciliation planner (parity gate).**
-- Pure `reconcile(world, ledger) -> WorkPlan` in `src/indexing/planner.py`.
+- Pure `reconcile(world, ledger) -> WorkPlan` in `src/reconcile.py`.
 - Run it in *shadow* alongside the existing delta path; assert the create/delete *parent* set
   matches today's `changed_item_keys` on the test corpora.
-- *Test*: unit tests on synthetic states (create/update/delete/no-op); shadow-parity on fixtures.
+- *Status*: complete in the working tree. Unit tests cover synthetic states and shadow parity; a
+  temp-copy disposable Zotero DB mutation run matched SQLite delta parent changes.
 
 **P3 — Granular execution (the Jung win) + retire sidecar.**
 - Pipeline consumes `WorkPlan`: partial-item processing (only changed units), surgical
@@ -187,6 +193,10 @@ re-embed.
 - *Test*: "add note to large item" re-embeds only the note (assert fulltext chunk ids unchanged);
   tag edit triggers metadata-only update, zero embeds; delete is detected from absence; resume after
   kill-9 mid-plan re-plans cleanly.
+- *Status*: core execution path is implemented behind `indexing.ledger.execute`, with tests for
+  note-only, parent-meta-only, attachment-only, and parent-deletion behavior. Sidecar retirement,
+  `vault_files` transition, direct Obsidian execution tests, crash/resume simulation, and a full
+  disposable-collection dry run remain open.
 
 **P4 — Observability & repair.**
 - `index_status` / `sources.py status` surface ledger drift (units in ledger absent in Chroma and
@@ -232,6 +242,6 @@ re-embed.
 
 Stable across runs (uses permanent Zotero item keys, not rowids):
 `zotero:{parent_key}:meta` · `:note:{note_key}` · `:attachment:{attachment_key}` ·
-`:annotation:{annotation_key}`; Obsidian `obsidian:{relative_path}`. P3 must ensure note/annotation
-chunks carry their child *key* (today they carry the rowid `note_id`/`annotation_id`) so units map
-to chunks for surgical delete.
+`:annotation:{annotation_key}`; Obsidian `obsidian:{relative_path}`. Implemented P3 chunks now carry
+child keys (`note_key`, `annotation_key`, and `attachment_key` where applicable) so stored documents
+can map back to ledger units and registry deletes can mirror Chroma deletes.
