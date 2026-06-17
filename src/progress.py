@@ -28,6 +28,8 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.text import Text
 
+from .durable_write import write_json_durable_safe
+
 
 class IndexingStage(Enum):
     """Stages of the indexing pipeline."""
@@ -110,7 +112,7 @@ class ProgressSnapshotWriter:
             self.snapshot_file.parent.mkdir(parents=True, exist_ok=True)
 
     def write(self, payload: Dict[str, Any], force: bool = False) -> None:
-        """Write a snapshot if enough time has elapsed."""
+        """Write a snapshot if enough time has elapsed (best-effort)."""
         if not self.snapshot_file:
             return
 
@@ -121,16 +123,12 @@ class ProgressSnapshotWriter:
         self._last_update = now
         snapshot = dict(payload)
         snapshot["updated_at"] = datetime.now().isoformat()
-        tmp_file = self.snapshot_file.with_suffix(self.snapshot_file.suffix + ".tmp")
 
-        try:
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(snapshot, f, indent=2)
-                f.flush()
-            tmp_file.replace(self.snapshot_file)
-        except Exception:
-            # Snapshot updates are best-effort and should never break indexing.
-            pass
+        # Best-effort durable write — never crash indexing to update a live
+        # progress snapshot.
+        write_json_durable_safe(
+            self.snapshot_file, snapshot, indent=2, fallback_direct=True
+        )
 
 
 class ProgressDisplay(ABC):

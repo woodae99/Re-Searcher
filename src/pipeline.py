@@ -32,6 +32,7 @@ from .sources.base import ProgressCallback
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
 from .storage.chroma import ChromaVectorStore
+from .durable_write import write_json_durable
 
 
 class ResearchRAGPipeline:
@@ -1710,10 +1711,11 @@ class ResearchRAGPipeline:
             "last_sqlite_date_modified": sqlite_date_modified or "",
             "last_sqlite_effective_modified": sqlite_date_modified or "",
             "last_sqlite_date_deleted": sqlite_date_deleted or "",
-            "last_sqlite_attachment_storage_mod_time": int(sqlite_attachment_storage_mod_time or 0),
+            "last_sqlite_attachment_storage_mod_time": int(
+                sqlite_attachment_storage_mod_time or 0
+            ),
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        write_json_durable(path, payload, indent=2)
 
     def _get_zotero_source(self) -> Optional[ZoteroSource]:
         for source in self.sources:
@@ -1958,9 +1960,9 @@ class ResearchRAGPipeline:
         return any(previous.get(key) != value for key, value in current.items())
 
     def _save_source_hash(self):
-        """Save current per-source hashes."""
+        """Save current per-source hashes (durable)."""
         hash_file = self.output_dir / "source_hash.txt"
-        hash_file.write_text(json.dumps(self._compute_source_hashes(), indent=2))
+        write_json_durable(hash_file, self._compute_source_hashes(), indent=2)
 
     def _reset_index_state(self):
         """Reset progress and storage for a full re-index."""

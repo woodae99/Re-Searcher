@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .durable_write import write_json_durable_safe
+
 
 SEVERITIES = {"info", "warn", "error"}
 REMEDIATION_CATEGORIES = {
@@ -181,11 +183,11 @@ class RunReporter:
             "stage_counts": dict(self.stage_counts),
             "remediation_counts": dict(self.remediation_counts),
         }
+        # Best-effort durable write — a corrupted summary is a lost
+        # report, not a crashed indexing run.
         try:
-            self.summary_path.parent.mkdir(parents=True, exist_ok=True)
-            self.summary_path.write_text(
-                json.dumps(summary, ensure_ascii=True, indent=2),
-                encoding="utf-8",
+            write_json_durable_safe(
+                self.summary_path, summary, indent=2, fallback_direct=True
             )
         except Exception as exc:
             self._warn_once(exc)
