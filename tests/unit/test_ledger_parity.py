@@ -209,8 +209,11 @@ def test_planner_parity_note_edit(tmp_path):
         0,
     )
 
-    # Both paths should detect P1 as changed
-    assert "P1" in ledger_parents, f"Ledger path missed P1: {ledger_parents}"
+    # The ledger is per-unit, so it must detect EXACTLY the changed parent — no
+    # spurious extras. The legacy watermark path legitimately over-reports (its
+    # threshold is a single global timestamp); we only require it didn't MISS
+    # the real change.
+    assert ledger_parents == {"P1"}, f"Ledger parents: {ledger_parents}"
     assert "P1" in changed_keys, f"Legacy path missed P1: {changed_keys}"
 
 
@@ -255,8 +258,9 @@ def test_planner_parity_attachment_update(tmp_path):
         50,  # less than original storageModTime of 100
     )
 
-    # Both should detect P1
-    assert "P1" in ledger_parents, f"Ledger missed P1: {ledger_parents}"
+    # Ledger must detect exactly P1; legacy (coarse storageModTime threshold)
+    # may over-report but must not miss it.
+    assert ledger_parents == {"P1"}, f"Ledger parents: {ledger_parents}"
     assert "P1" in changed_keys or "P1" in attachment_keys, (
         f"Legacy missed P1: changed={changed_keys}, attachments={attachment_keys}"
     )
@@ -303,8 +307,13 @@ def test_planner_parity_parent_delete(tmp_path):
         300,
     )
 
-    assert "P3" in ledger_deleted_parents, f"Ledger missed P3 deletes: {ledger_deleted_parents}"
+    # Ledger detects deletions by absence, so it flags exactly P3 here and, in
+    # general, is a superset of (never narrower than) the legacy deletedItems scan.
+    assert ledger_deleted_parents == {"P3"}, f"Ledger deletes: {ledger_deleted_parents}"
     assert "P3" in deleted_keys, f"Legacy missed P3 deletes: {deleted_keys}"
+    assert set(deleted_keys) <= ledger_deleted_parents, (
+        f"Legacy deletes not covered by ledger: legacy={deleted_keys}, ledger={ledger_deleted_parents}"
+    )
 
 
 def test_planner_parity_no_changes(tmp_path):

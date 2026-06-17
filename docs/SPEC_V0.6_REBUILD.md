@@ -75,22 +75,30 @@ longer the 2026-06-13 proposal state.
 - W8 systematic-review selection metadata: `item_type`, `doi`, `abstract`,
   `tags`, `venue`, `language`, filters on CLI/MCP list-source surfaces, and
   annotation `has_comment`.
+- W2 single working grain is the **default** (`chunking.mode: v0.6_single_grain`):
+  recursive `mid` only; the legacy hierarchical chunker / `coarse`/`fine` /
+  `parent_id` path is reachable only via the opt-in `mode: legacy_router`.
+- W1 extraction seam wired: a quality-gated router (Zotero FT cache → pdfminer,
+  deterministic-clean + re-score, Marker/OCR escalation gated off) behind
+  `extraction.router`; extraction provenance (`extractor`/`extract_quality`/
+  `extract_action`) recorded in the register.
+- W8 survey/aggregate-by-source retrieval mode (`src/retrieval/survey.py`, CLI + MCP).
+- W5 fsync-durable state writes (`src/durable_write.py`) for checkpoint/progress/state JSON.
+- Structured run/failure reporting (`src/run_reporting.py`) over extraction/chunk/embed/store.
+- Ledger parity suite (`tests/unit/test_ledger_parity.py`): planner + end-to-end
+  parity vs the legacy delta path, granularity guarantees, and crash/resume convergence.
 
 **Still open before final v0.6**
-- The W2 single-grain cutover is not complete: `router_enabled` + `huge_docs`
-  can still route huge documents through the legacy hierarchical chunker and
-  emit `coarse`/`fine`; `parent_id` logic is still live. This is an
-  implementation gap, not merely stale text.
-- The W8 survey/aggregate-by-source retrieval mode is not implemented.
-- The W1 extraction seam/quality-gated router is researched but not wired into
-  indexing; extraction provenance columns are not yet in the register.
-- W5 fsync-durable JSON/state writes are not implemented.
-- Ledger execution remains intentionally off by default pending a full parity
-  proof; do not retire `zotero_delta_state.json` or `vault_files` until that
-  suite passes.
-- Structured failure reporting is still needed so failed
-  extraction/chunk/embed/store events become both engineering telemetry and
-  corpus-cleanup data.
+- **Ledger cutover is not done.** `indexing.ledger.execute` stays `false` and the
+  legacy `zotero_delta_state.json` / `vault_files` paths remain in place until
+  parity is confirmed on a *real-corpus* run — the unit parity suite passes; the
+  field proof is the chapter-4 mission. Do not flip the flag or retire the sidecar
+  before then.
+- **Extraction router needs real-corpus validation**: the router is on by default
+  (`extraction.router.enabled: true`); confirm its quality gate covers the old
+  large-PDF *partial-fulltext* fallback before the production rebuild.
+- **The production rebuild + chapter-4 process-in-coaching mission acceptance**
+  remain the final gate.
 
 For cold-start implementation details, see
 `docs/V0.6_REMAINING_ACTIONS_HANDOFF.md`.

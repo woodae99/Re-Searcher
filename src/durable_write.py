@@ -20,7 +20,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,44 +64,31 @@ def write_json_durable(
         Also fsync the parent directory so the rename is durable
         (default True).
     """
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_fd = None  # track the raw fd for cleanup on error
+    path = Path(path)
+    tmp_name: Optional[str] = None  # the actual sidecar; cleaned up on error
     try:
         with tempfile.NamedTemporaryFile(
             dir=str(path.parent),
-            suffix=".tmp",
             prefix=path.name + ".",
+            suffix=".tmp",
             delete=False,
             mode="w",
             encoding="utf-8",
         ) as tmp_file:
-            tmp_fd = tmp_file.fileno()
+            tmp_name = tmp_file.name
             json.dump(payload, tmp_file, indent=indent, ensure_ascii=False)
             tmp_file.flush()
-            os.fsync(tmp_fd)
-            # Atomic rename inside the context manager so we have the
-            # file handle available.
-            actual_tmp = Path(tmp_file.name)
-            actual_tmp.rename(path)
-            # Cleanup in case rename didn't remove the sidecar
-            try:
-                actual_tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-
+            os.fsync(tmp_file.fileno())
+        # Data is fsync'd and the handle closed; swap it into place atomically.
+        # On any earlier failure the original file (if any) is left untouched.
+        os.replace(tmp_name, path)
+        tmp_name = None  # consumed by the rename — nothing left to clean up
         if fsync_dir:
             _fsync_directory(path)
     except Exception:
-        # If the sidecar write fails completely, the original file (if any)
-        # is untouched — we do NOT want to corrupt a valid checkpoint.
-        if tmp_fd is not None:
+        if tmp_name is not None:
             try:
-                os.close(tmp_fd)
-            except OSError:
-                pass
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
+                os.unlink(tmp_name)
             except OSError:
                 pass
         raise
