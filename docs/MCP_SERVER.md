@@ -462,9 +462,9 @@ The MCP server follows these principles for maintainability:
    - Formatters tested independently
    - Mock-friendly design
 
-## Hierarchical Chunking (vNext)
+## Hierarchical Chunking
 
-The MCP server supports the vNext hierarchical chunking strategy:
+The MCP server supports the hierarchical chunking strategy:
 
 ### Chunk Levels
 

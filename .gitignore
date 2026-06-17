@@ -162,6 +162,9 @@ config.yaml
 # Local run outputs
 output/
 
+# Disposable local source corpora for Sparky/v0.6 development
+test_sources/
+
 # mypy
 .mypy_cache/
 .dmypy.json

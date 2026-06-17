@@ -1,9 +1,9 @@
-# Re-Searcher vNext: Consolidated Implementation Plan
+# Re-Searcher Legacy Feature Implementation Plan
 
 **Created**: 2026-01-08
 **Updated**: 2026-01-08
 **Status**: Active
-**Branch**: vnext-features
+**Branch**: legacy-feature-work
 
 ---
 

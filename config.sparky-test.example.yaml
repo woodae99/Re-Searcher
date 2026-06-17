@@ -1,0 +1,158 @@
+# Sparky v0.6 local test-source configuration.
+# Copy to config.yaml or pass with --config for disposable dev/test runs.
+
+zotero:
+  enabled: true
+  api_type: local
+  data_directory: "/home/colin/Dev/Re-Searcher/test_sources/Zotero"
+  extract_attachments: true
+  include_notes: true
+  include_annotations: true
+  local_api_base: "http://localhost:23119/api/users/0"
+  local_api_timeout: 20
+  prefer_local_api_fulltext: false
+  fulltext_min_chars: 200
+  fulltext_large_pdf_mb: 20
+  fulltext_large_pdf_min_chars: 20000
+  fulltext_bootstrap_scan: false
+  # Keep first smoke runs small; remove or raise for broader corpus sweeps.
+  limit_items: 20
+
+obsidian:
+  enabled: true
+  vault_path: "/home/colin/Dev/Re-Searcher/test_sources/v0.6 Test Vault"
+  include_folders:
+    - "PhD/_index/research-missions/2026-06-process-in-coaching"
+    - "Dev/Hermes/Inbox"
+    - "Dev/Hermes/Outbox/Research"
+    - "Daily Notes"
+  exclude_folders:
+    - ".obsidian"
+    - "Templates"
+    - "Resources"
+    - "Skills"
+  use_obsidian_ignore_filters: true
+
+local_files:
+  enabled: false
+  input_folder: ""
+  file_types:
+    - .pdf
+    - .md
+    - .epub
+    - .docx
+    - .html
+    - .htm
+
+embedding:
+  provider: lmstudio
+  endpoint: "http://localhost:1234/v1"
+  api_key: "sk-lmstudio"
+  model: "text-embedding-bge-m3"
+  batch_size: 32
+  max_concurrent_requests: 2
+  timeout: 30
+  context_length: 8192
+  lmstudio:
+    base_url: "http://localhost:1234/v1"
+    api_key: "sk-lmstudio"
+    model: "text-embedding-bge-m3"
+    batch_size: 32
+    max_concurrent_requests: 2
+    timeout_seconds: 120
+
+storage:
+  provider: chroma
+  endpoint: "http://localhost:8000"
+  collection_name: "research_test"
+  distance_metric: cosine
+
+extraction:
+  parallel: true
+  workers: 4
+  mode: thread
+
+chunking:
+  chunk_size: 2048
+  chunk_overlap: 256
+  strategy: character
+  router_enabled: true
+  id_strategy: stable_hash
+  max_tokens_per_chunk: 7000
+  oversize_policy: split
+  token_estimator: heuristic
+  quality_filter:
+    enabled: false
+    dry_run: false
+    min_alnum_chars: 40
+    min_alnum_ratio: 0.20
+    max_whitespace_ratio: 0.85
+    min_token_est: 20
+    min_unique_char_ratio: 0.08
+    max_line_repeat_ratio: 0.30
+    drop_if_matches:
+      - "^[0-9]{1,3}$"
+      - "^\\*{3,}$"
+      - "^(SUMMARY|ABSTRACT|CONTENTS)$"
+    keep_if_metadata_present:
+      - "heading_path"
+      - "zotero_key"
+    skip_source_types:
+      - "obsidian"
+    whitelist_source_ids: []
+    blacklist_source_ids: []
+    report:
+      enabled: true
+      top_n: 50
+      output_path: "runs/{RUN_ID}/quality_report.json"
+  defaults:
+    strategy: recursive
+    chunk_size: 2048
+    chunk_overlap: 256
+  markdown:
+    enabled: true
+    header_levels: [1, 2, 3]
+    max_section_tokens: 900
+  huge_docs:
+    enabled: true
+    huge_doc_tokens: 25000
+    levels:
+      coarse: { chunk_size: 2200, chunk_overlap: 200 }
+      mid: { chunk_size: 700, chunk_overlap: 100 }
+      fine: { chunk_size: 220, chunk_overlap: 40 }
+
+retrieval:
+  k_recall: 50
+  mode_default: fast
+  telemetry:
+    enabled: true
+  rerank:
+    enabled: false
+  diversity:
+    enabled: true
+    key_priority: ["source_id", "zotero_key", "title"]
+    max_per_key: 2
+  expand:
+    include_parent: true
+    max_parents: 1
+
+output_folder: ./output/sparky-test
+log_progress: true
+
+indexing:
+  batch_size: 20
+  dashboard:
+    enabled: true
+    snapshot_file: "indexing_dashboard.json"
+    snapshot_interval_seconds: 1.0
+  stop_after_batch:
+    flag_file: "stop_after_batch.flag"
+  delta:
+    enabled: false
+    state_file: "zotero_delta_state.json"
+    delete_batch_size: 100
+  embed_store_pipeline:
+    enabled: false
+    queue_max_items: 4
+    embed_sub_batch_size: 32
+    store_sub_batch_size: 32

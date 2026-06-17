@@ -8,8 +8,10 @@
   three different conventions (system Python hardcoded / `.venv` hardcoded /
   `.venv`-preferred); they now all prefer the project `.venv` and fall back to
   system Python 3.13, matching `routine_update`/`warmup`. The repo `.venv` had
-  drifted empty — repopulate from `requirements.txt` (chromadb pinned to the
-  running server's 1.3.0). See `docs/SPEC_VNEXT.md` for the planned rebuild.
+  drifted empty — repopulate from `requirements.txt`. For v0.6/Sparky,
+  Chroma is pinned to 1.5.9 via `requirements.txt` and
+  `constraints-sparky.txt`; see `docs/SPEC_V0.6_REBUILD.md` for the planned
+  rebuild.
 
 ## 0.5.0
 

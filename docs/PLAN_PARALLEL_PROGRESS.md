@@ -2,7 +2,7 @@
 
 **Created**: 2026-01-08
 **Status**: Draft - awaiting refinements
-**Branch**: vnext-features
+**Branch**: legacy-feature-work
 
 ---
 
@@ -388,7 +388,7 @@ progress:
 
 This plan was created during a session where:
 - Overnight indexing completed with 585,234 chunks from 12,874 documents
-- But hierarchical chunking (vNext) was not enabled in config - all chunks were "mid" level only
+- But hierarchical chunking was not enabled in config - all chunks were "mid" level only
 - Config was updated to add `router_enabled: true` and `id_strategy: stable_hash`
 - Database was cleared for re-indexing
 - User requested parallel extraction and progress display before running the re-index

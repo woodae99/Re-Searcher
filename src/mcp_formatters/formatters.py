@@ -38,7 +38,7 @@ def format_search_results(
         result["authors"] = metadata.get("authors", "Unknown")
         result["source_type"] = metadata.get("source_type", "unknown")
 
-        # Hierarchical chunking metadata (vNext)
+        # Hierarchical chunking metadata
         result["chunk_level"] = metadata.get("chunk_level", "unknown")
         if "parent_id" in metadata:
             result["parent_id"] = metadata["parent_id"]

@@ -1,0 +1,10 @@
+{
+  "quotes": [
+    {
+      "chunk_id": "example-chunk-id",
+      "identity_field": "zotero_key",
+      "identity_value": "EXAMPLE",
+      "quote": "A short verbatim quote from the chunk text."
+    }
+  ]
+}

@@ -571,7 +571,7 @@ class ResearchMCPServer:
                 response_parts.append(f"Authors: {result['authors']}")
                 response_parts.append(f"Source: {result['source_type']}")
 
-                # Hierarchical context (vNext)
+                # Hierarchical context
                 chunk_level = result.get("chunk_level", "unknown")
                 response_parts.append(f"Chunk Level: {chunk_level}")
 

@@ -1,4 +1,4 @@
-# Chunking vNext
+# Legacy Chunking Plan
 
 ## Design statement
 
@@ -57,7 +57,7 @@ See `config.example.yaml` for the full configuration:
 
 ## Verification Test Plan
 
-Use this plan to verify the vNext chunking strategy after making changes.
+Use this plan to verify the hierarchical chunking strategy after making changes.
 
 ### Prerequisites
 
