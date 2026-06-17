@@ -1,6 +1,9 @@
 """Hermetic tests for the retrieval-eval metrics (fake search_fn, no embeddings)."""
 
 from src.retrieval_eval import EvalProbe, compare_configs, evaluate
+from src.pipeline import ResearchRAGPipeline
+from src.registry import SourceRegistry
+from src.retrieval.survey import aggregate_hits_by_source
 
 
 def _fake_search(ranking_by_query):
@@ -60,3 +63,190 @@ def test_compare_configs_ranks_by_headline_k():
     assert rows[0]["config"] == "good"
     assert rows[0]["hit@1"] == 1.0
     assert rows[1]["config"] == "worse"
+
+
+def test_survey_aggregates_hits_by_source_and_ranks(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["z1-c1", "z1-c2", "z2-c1"],
+        [
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-Z1-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+                "title": "Alpha",
+                "authors": "A. Author",
+                "item_type": "book",
+                "language": "en",
+                "tags": ["Process"],
+                "abstractNote": "Alpha abstract.",
+            },
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-Z1-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 1,
+                "title": "Alpha",
+                "authors": "A. Author",
+                "item_type": "book",
+                "language": "en",
+                "tags": ["Process"],
+            },
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z2",
+                "source_id": "zotero-Z2-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+                "title": "Beta",
+                "authors": "B. Author",
+                "item_type": "book",
+                "language": "en",
+                "tags": ["Process"],
+            },
+        ],
+    )
+    registry.refresh_sources()
+
+    results = [
+        (
+            "z1-c1",
+            "best alpha text",
+            0.91,
+            {"source_type": "zotero_fulltext", "zotero_key": "Z1", "chunk_level": "mid", "chunk_index": 0},
+        ),
+        (
+            "z2-c1",
+            "beta text",
+            0.88,
+            {"source_type": "zotero_fulltext", "zotero_key": "Z2", "chunk_level": "mid", "chunk_index": 0},
+        ),
+        (
+            "z1-c2",
+            "second alpha text",
+            0.70,
+            {"source_type": "zotero_fulltext", "zotero_key": "Z1", "chunk_level": "mid", "chunk_index": 1},
+        ),
+    ]
+
+    payload = aggregate_hits_by_source(
+        results,
+        registry,
+        item_type="book",
+        language="en",
+        tag="Process",
+    )
+
+    assert payload["total_sources"] == 2
+    assert [row["identity_value"] for row in payload["sources"]] == ["Z1", "Z2"]
+    first = payload["sources"][0]
+    assert first["hit_count"] == 2
+    assert first["best_score"] == 0.91
+    assert first["title"] == "Alpha"
+    assert first["item_type"] == "book"
+    assert first["abstract"] == "Alpha abstract."
+    assert first["representative_chunks"][0]["chunk_id"] == "z1-c1"
+    assert first["representative_chunks"][0]["snippet"] == "best alpha text"
+
+
+def test_survey_hit_count_breaks_score_ties(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["z1-c1", "z1-c2", "z2-c1"],
+        [
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-Z1-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+                "title": "Alpha",
+            },
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-Z1-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 1,
+                "title": "Alpha",
+            },
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z2",
+                "source_id": "zotero-Z2-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+                "title": "Beta",
+            },
+        ],
+    )
+    registry.refresh_sources()
+
+    payload = aggregate_hits_by_source(
+        [
+            ("z2-c1", "beta", 0.9, {"source_type": "zotero_fulltext", "zotero_key": "Z2"}),
+            ("z1-c1", "alpha one", 0.9, {"source_type": "zotero_fulltext", "zotero_key": "Z1"}),
+            ("z1-c2", "alpha two", 0.5, {"source_type": "zotero_fulltext", "zotero_key": "Z1"}),
+        ],
+        registry,
+    )
+
+    assert [row["identity_value"] for row in payload["sources"]] == ["Z1", "Z2"]
+
+
+def test_pipeline_survey_sources_uses_mid_recall_and_returns_sources(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["z1-c1"],
+        [
+            {
+                "source_type": "zotero_fulltext",
+                "zotero_key": "Z1",
+                "source_id": "zotero-Z1-attachment-1",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+                "title": "Alpha",
+            }
+        ],
+    )
+    registry.refresh_sources()
+
+    class Embedder:
+        def embed_query(self, query):
+            assert query == "process coaching"
+            return [0.1, 0.2]
+
+    class VectorStore:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, embedding, *, k, filter=None):
+            self.calls.append({"embedding": embedding, "k": k, "filter": filter})
+            return [
+                (
+                    "z1-c1",
+                    "alpha evidence",
+                    0.93,
+                    {
+                        "source_type": "zotero_fulltext",
+                        "zotero_key": "Z1",
+                        "chunk_level": "mid",
+                        "chunk_index": 0,
+                    },
+                )
+            ]
+
+    pipeline = ResearchRAGPipeline.__new__(ResearchRAGPipeline)
+    pipeline.config = {"retrieval": {"k_recall": 10, "telemetry": {"enabled": False}}}
+    pipeline.embedder = Embedder()
+    pipeline.vector_store = VectorStore()
+    pipeline.registry = registry
+
+    payload = pipeline.survey_sources("process coaching", k=5)
+
+    assert pipeline.vector_store.calls[0]["filter"] == {"chunk_level": "mid"}
+    assert payload["sources"][0]["identity_value"] == "Z1"
+    assert payload["sources"][0]["representative_chunks"][0]["chunk_id"] == "z1-c1"

@@ -12,6 +12,7 @@ import html2text
 import requests
 
 from ..extract_text import extract_text
+from ..processing.extraction import ExtractionInput, ExtractionRouter
 from .base import DataSource, Document, ProgressCallback, UnitState
 
 
@@ -68,6 +69,7 @@ class ZoteroSource(DataSource):
             self.zotero_config.get("fulltext_large_pdf_min_chars", 20000)
         )
         self.fulltext_bootstrap_scan = bool(self.zotero_config.get("fulltext_bootstrap_scan", False))
+        self.extraction_router = ExtractionRouter(config)
 
         if self.is_enabled():
             self.data_dir = Path(self.zotero_config.get("data_directory", "")).expanduser()
@@ -1182,11 +1184,18 @@ class ZoteroSource(DataSource):
         # for version-keyed progress; a changed item is never skipped as
         # already-stored even if delta detection missed it)
         cursor.execute(
-            "SELECT key, dateModified FROM items WHERE itemID = ?", (item_id,)
+            """
+            SELECT i.key, i.dateModified, it.typeName AS item_type
+            FROM items i
+            LEFT JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+            WHERE i.itemID = ?
+            """,
+            (item_id,),
         )
         key_row = cursor.fetchone()
         zotero_key = key_row["key"] if key_row else str(item_id)
         content_version = (key_row["dateModified"] or "") if key_row else ""
+        item_type = (key_row["item_type"] or "") if key_row else ""
 
         # Get field values
         cursor.execute(
@@ -1242,6 +1251,7 @@ class ZoteroSource(DataSource):
             "source_type": "zotero",
             "zotero_key": zotero_key,
             "zotero_id": item_id,
+            "item_type": item_type,
             "content_version": content_version,
             "title": fields.get("title", "Untitled"),
             "authors": ", ".join(creators) if creators else "Unknown",
@@ -1369,6 +1379,37 @@ class ZoteroSource(DataSource):
             elapsed = time.time() - start_time
             return ExtractionResult(task=task, text=None, error=str(e), elapsed_seconds=elapsed)
 
+    def _extract_attachment_with_router(self, task: ExtractionTask) -> ExtractionResult:
+        """Extract attachment text through the v0.6 quality-gated seam."""
+        extraction_input = ExtractionInput(
+            file_path=task.file_path,
+            attachment_key=task.attachment_key,
+            content_type=task.content_type,
+            source_metadata={
+                "attachment_id": task.attachment_id,
+                "attachment_key": task.attachment_key,
+                "file_name": task.filename,
+            },
+            file_size_mb=task.file_size_mb,
+            fulltext_fetcher=(
+                self._fetch_local_api_fulltext
+                if self.prefer_local_api_fulltext
+                else None
+            ),
+            partial_fulltext_checker=lambda text: self._is_likely_partial_fulltext(
+                task, text
+            ),
+        )
+        output = self.extraction_router.extract(extraction_input)
+        result = ExtractionResult(
+            task=task,
+            text=output.text if output.ok else None,
+            error=None if output.ok else "; ".join(output.errors or output.warnings),
+            elapsed_seconds=output.elapsed_seconds,
+        )
+        result.output = output  # type: ignore[attr-defined]
+        return result
+
     def _fetch_local_api_fulltext(self, attachment_key: str) -> Optional[str]:
         """Fetch indexed fulltext for an attachment from Zotero local API."""
         url = f"{self.local_api_base}/items/{attachment_key}/fulltext"
@@ -1432,24 +1473,41 @@ class ZoteroSource(DataSource):
         error_count = 0
 
         for task in tasks:
-            fulltext = None
-            text_source = "pdf_extraction"
-            partial_fulltext = False
-
-            if self.prefer_local_api_fulltext:
-                fulltext = self._fetch_local_api_fulltext(task.attachment_key)
-                if fulltext:
-                    partial_fulltext = self._is_likely_partial_fulltext(task, fulltext)
-
-            if fulltext and not partial_fulltext:
-                result = ExtractionResult(task=task, text=fulltext, error=None, elapsed_seconds=0.0)
-                text_source = "zotero_local_api_fulltext"
-            else:
-                result = self._extract_single_attachment(task)
-                text_source = "pdf_extraction"
+            result = self._extract_attachment_with_router(task)
+            extraction_output = getattr(result, "output", None)
+            if extraction_output is not None:
+                event_payload = {
+                    "item_id": item_id,
+                    "zotero_key": metadata_base.get("zotero_key"),
+                    "attachment_id": task.attachment_id,
+                    "attachment_key": task.attachment_key,
+                    "file_name": task.filename,
+                    "file_path": str(task.file_path),
+                    "file_size_mb": task.file_size_mb,
+                    "source_type": "zotero_fulltext",
+                    "extractor": extraction_output.extractor,
+                    "extractor_version": extraction_output.extractor_version,
+                    "extract_quality": extraction_output.provenance().get("extract_quality", ""),
+                    "extract_action": extraction_output.action,
+                    "extract_route": extraction_output.route,
+                    "warnings": extraction_output.warnings,
+                    "errors": extraction_output.errors,
+                    "text_length": len(extraction_output.text or ""),
+                }
+                if extraction_output.warnings:
+                    self._emit_progress("extraction_warning", **event_payload)
+                if extraction_output.action == "escalate":
+                    self._emit_progress("extraction_escalate", **event_payload)
+                elif not extraction_output.ok:
+                    self._emit_progress("extraction_reject", **event_payload)
 
             if result.text:
                 metadata = metadata_base.copy()
+                provenance = (
+                    extraction_output.provenance()
+                    if extraction_output is not None
+                    else {}
+                )
                 metadata.update(
                     {
                         "source_type": "zotero_fulltext",
@@ -1458,9 +1516,8 @@ class ZoteroSource(DataSource):
                         "file_name": task.filename,
                         "file_path": str(task.file_path),
                         "content_type": task.content_type,
-                        "text_source": text_source,
-                        "fulltext_available": bool(fulltext),
-                        "fulltext_partial_fallback": bool(partial_fulltext),
+                        "text_source": provenance.get("extractor", "unknown"),
+                        **provenance,
                     }
                 )
 
@@ -1528,6 +1585,7 @@ class ZoteroSource(DataSource):
                         "source_type": "zotero_annotation",
                         "annotation_id": annotation_id,
                         "annotation_key": annotation_key,
+                        "has_comment": bool(annotation_comment.strip()),
                         "page": page,
                         "chunk_index": idx,
                     }

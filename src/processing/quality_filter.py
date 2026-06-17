@@ -8,7 +8,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -116,7 +116,7 @@ def is_low_info(text: str, cfg: Dict[str, Any]) -> Tuple[bool, List[str]]:
 class QualityFilterGuard:
     """Guard that drops low-information chunks before embedding."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], reporter: Optional[Any] = None):
         chunking_cfg = config.get("chunking", {})
         self.cfg = chunking_cfg.get("quality_filter", {}) or {}
         self.enabled = bool(self.cfg.get("enabled", False))
@@ -129,6 +129,10 @@ class QualityFilterGuard:
         self.blacklist_source_ids = set(self.cfg.get("blacklist_source_ids", []) or [])
         self.report_cfg = self.cfg.get("report", {}) or {}
         self.stats = QualityFilterStats()
+        self.reporter = reporter
+
+    def set_reporter(self, reporter: Any) -> None:
+        self.reporter = reporter
 
     def is_active(self) -> bool:
         return self.enabled or self.dry_run or bool(self.blacklist_source_ids)
@@ -198,6 +202,8 @@ class QualityFilterGuard:
                     text,
                     ["blacklisted_source"],
                     is_candidate=False,
+                    metadata=meta if isinstance(meta, dict) else {},
+                    chunk_id=chunk_id,
                 )
                 batch_dropped += 1
                 batch_reason_counts.update(["blacklisted_source"])
@@ -229,6 +235,8 @@ class QualityFilterGuard:
                     text,
                     reasons,
                     is_candidate=self.dry_run,
+                    metadata=meta if isinstance(meta, dict) else {},
+                    chunk_id=chunk_id,
                 )
                 batch_dropped += 1
                 batch_reason_counts.update(reasons)
@@ -250,7 +258,16 @@ class QualityFilterGuard:
 
         return kept_items
 
-    def _record_drop(self, source_id: str, text: str, reasons: List[str], is_candidate: bool) -> None:
+    def _record_drop(
+        self,
+        source_id: str,
+        text: str,
+        reasons: List[str],
+        is_candidate: bool,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+        chunk_id: Optional[str] = None,
+    ) -> None:
         if is_candidate:
             self.stats.dropped_candidates += 1
         else:
@@ -264,6 +281,21 @@ class QualityFilterGuard:
         if len(previews) < 5:
             preview = text.strip().replace("\n", " ")[:120] if isinstance(text, str) else ""
             previews.append(preview)
+
+        if self.reporter is not None:
+            self.reporter.record(
+                stage="quality_filter",
+                severity="warn",
+                remediation="chunking",
+                message="Chunk dropped by quality filter"
+                if not is_candidate
+                else "Chunk would be dropped by quality filter dry run",
+                metadata=metadata or {"source_id": source_id},
+                chunk_id=chunk_id,
+                text_length=len(text) if isinstance(text, str) else None,
+                token_estimate=(len(text) // 4 if isinstance(text, str) else None),
+                extra={"reasons": reasons, "dry_run": is_candidate},
+            )
 
     def _log_batch_summary(
         self,
@@ -327,6 +359,8 @@ class QualityFilterGuard:
         path.write_text(json.dumps(report, ensure_ascii=True, indent=2), encoding="utf-8")
 
 
-def create_quality_filter_guard(config: Dict[str, Any]) -> QualityFilterGuard:
+def create_quality_filter_guard(
+    config: Dict[str, Any], reporter: Optional[Any] = None
+) -> QualityFilterGuard:
     """Create a QualityFilterGuard from configuration."""
-    return QualityFilterGuard(config)
+    return QualityFilterGuard(config, reporter=reporter)

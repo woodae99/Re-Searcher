@@ -26,6 +26,8 @@ from .registry import SourceRegistry, registry_path_for
 from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
 from .retrieval.filters import apply_post_filters, build_where_filter
+from .retrieval.survey import aggregate_hits_by_source
+from .run_reporting import RunReporter
 from .sources.base import ProgressCallback
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
@@ -49,6 +51,7 @@ class ResearchRAGPipeline:
         # Output directory for metadata and live control files.
         self.output_dir = Path(self.config.get("output_folder", "./output"))
         self.output_dir.mkdir(exist_ok=True)
+        self.reporter = RunReporter.from_config(self.config, self.output_dir)
 
         dashboard_cfg = self.config.get("indexing", {}).get("dashboard", {}) or {}
         snapshot_file = None
@@ -68,8 +71,15 @@ class ResearchRAGPipeline:
         # Initialize components
         self.sources = self._initialize_sources()
         self.chunker = create_chunker(self.config)
+        self.chunking_mode = self.config.get("chunking", {}).get(
+            "mode", "v0.6_single_grain"
+        )
         self.oversize_guard = create_oversize_guard(self.config)
-        self.quality_filter = create_quality_filter_guard(self.config)
+        self.quality_filter = create_quality_filter_guard(
+            self.config, reporter=self.reporter
+        )
+        if hasattr(self.oversize_guard, "set_reporter"):
+            self.oversize_guard.set_reporter(self.reporter)
         self.embedder = create_embedder(self.config)
         self.reranker = create_reranker(self.config)
         self.vector_store = ChromaVectorStore(self.config)
@@ -108,6 +118,68 @@ class ResearchRAGPipeline:
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
 
+    def _report_event(
+        self,
+        *,
+        stage: str,
+        severity: str,
+        remediation: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+        text_length: Optional[int] = None,
+        token_estimate: Optional[int] = None,
+        exception: Optional[BaseException] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        reporter = getattr(self, "reporter", None)
+        if reporter is None:
+            return
+        reporter.record(
+            stage=stage,
+            severity=severity,
+            remediation=remediation,
+            message=message,
+            metadata=metadata,
+            document_id=document_id,
+            chunk_id=chunk_id,
+            text_length=text_length,
+            token_estimate=token_estimate,
+            exception=exception,
+            extra=extra,
+        )
+
+    def _report_exception(
+        self,
+        *,
+        stage: str,
+        remediation: str,
+        message: str,
+        exception: BaseException,
+        metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+        text_length: Optional[int] = None,
+        token_estimate: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        reporter = getattr(self, "reporter", None)
+        if reporter is None:
+            return
+        reporter.record_exception(
+            stage=stage,
+            remediation=remediation,
+            message=message,
+            exception=exception,
+            metadata=metadata,
+            document_id=document_id,
+            chunk_id=chunk_id,
+            text_length=text_length,
+            token_estimate=token_estimate,
+            extra=extra,
+        )
+
     def _create_source_progress_callback(self, source_name: str) -> ProgressCallback:
         """Create a progress callback for a data source."""
 
@@ -127,6 +199,14 @@ class ResearchRAGPipeline:
 
             elif event_type == "item_error":
                 self.progress_display.update_source(source_name, processed=1, errors=1)
+                self._report_event(
+                    stage="source_fetch",
+                    severity="error",
+                    remediation="source_data",
+                    message=f"{source_name} item fetch failed",
+                    metadata=event,
+                    extra=event,
+                )
 
             elif event_type == "attachment_start":
                 file_name = event.get("file_name", "")
@@ -147,6 +227,36 @@ class ResearchRAGPipeline:
             elif event_type == "attachment_error":
                 error = event.get("error", "unknown error")
                 self.progress_display.set_activity(f"Attachment error: {error}")
+                self._report_event(
+                    stage="extraction",
+                    severity="error",
+                    remediation="extraction_quality",
+                    message=f"{source_name} attachment extraction failed",
+                    metadata=event,
+                    extra=event,
+                )
+
+            elif event_type in {"extraction_reject", "extraction_escalate"}:
+                self._report_event(
+                    stage="extraction_quality_gate",
+                    severity="error" if event_type == "extraction_reject" else "warn",
+                    remediation="extraction_quality",
+                    message=f"{source_name} extraction {event.get('action', 'failed')}",
+                    metadata=event,
+                    text_length=event.get("text_length"),
+                    extra=event,
+                )
+
+            elif event_type == "extraction_warning":
+                self._report_event(
+                    stage="extraction_quality_gate",
+                    severity="warn",
+                    remediation="extraction_quality",
+                    message=f"{source_name} extraction warning",
+                    metadata=event,
+                    text_length=event.get("text_length"),
+                    extra=event,
+                )
 
         return callback
 
@@ -408,6 +518,9 @@ class ResearchRAGPipeline:
         finally:
             # Persist quality-filter diagnostics when enabled.
             self.quality_filter.write_report()
+            reporter = getattr(self, "reporter", None)
+            if reporter is not None:
+                reporter.write_summary()
             # Always stop progress display
             self.progress_display.stop()
 
@@ -485,6 +598,16 @@ class ResearchRAGPipeline:
                             total_batches,
                         )
                     except Exception as e:
+                        self._report_batch_failure(
+                            "embedding",
+                            "embedder_limit",
+                            "Embedding/store pipeline failed",
+                            e,
+                            pending_docs,
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                        )
                         for doc in pending_docs:
                             self.progress.set_document_status(
                                 doc.doc_id,
@@ -506,6 +629,16 @@ class ResearchRAGPipeline:
                     try:
                         embeddings = self._generate_embeddings(chunks)
                     except Exception as e:
+                        self._report_batch_failure(
+                            "embedding",
+                            "embedder_limit",
+                            "Embedding failed",
+                            e,
+                            pending_docs,
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                        )
                         for doc in pending_docs:
                             self.progress.set_document_status(
                                 doc.doc_id,
@@ -529,6 +662,16 @@ class ResearchRAGPipeline:
                     try:
                         self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
                     except Exception as e:
+                        self._report_batch_failure(
+                            "storage",
+                            "vector_store",
+                            "Vector-store write failed",
+                            e,
+                            pending_docs,
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                        )
                         for doc in pending_docs:
                             self.progress.set_document_status(
                                 doc.doc_id,
@@ -547,6 +690,13 @@ class ResearchRAGPipeline:
                     )
 
             except Exception as e:
+                self._report_batch_failure(
+                    "chunking",
+                    "code_bug",
+                    "Batch processing failed",
+                    e,
+                    pending_docs,
+                )
                 for doc in pending_docs:
                     self.progress.set_document_status(
                         doc.doc_id,
@@ -555,6 +705,46 @@ class ResearchRAGPipeline:
                     )
 
         return True
+
+    def _report_batch_failure(
+        self,
+        stage: str,
+        remediation: str,
+        message: str,
+        exception: BaseException,
+        docs: List[Any],
+        chunks: Optional[List[str]] = None,
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None,
+    ) -> None:
+        chunks = chunks or []
+        metadatas = metadatas or []
+        ids = ids or []
+        if chunks and metadatas:
+            for idx, (text, metadata) in enumerate(zip(chunks, metadatas)):
+                self._report_exception(
+                    stage=stage,
+                    remediation=remediation,
+                    message=message,
+                    exception=exception,
+                    metadata=metadata,
+                    document_id=metadata.get("source_id"),
+                    chunk_id=ids[idx] if idx < len(ids) else None,
+                    text_length=len(text),
+                    token_estimate=len(text) // 4,
+                )
+            return
+
+        for doc in docs:
+            self._report_exception(
+                stage=stage,
+                remediation=remediation,
+                message=message,
+                exception=exception,
+                metadata=getattr(doc, "metadata", {}),
+                document_id=getattr(doc, "doc_id", None),
+                text_length=len(getattr(doc, "content", "") or ""),
+            )
 
     def _consume_stop_request(self) -> bool:
         """Return True when a stop-after-batch request is present and consume it."""
@@ -620,6 +810,13 @@ class ResearchRAGPipeline:
             except Exception as e:
                 # Log error but continue with other sources
                 self.progress_display.set_activity(f"Error fetching from {source_name}: {e}")
+                self._report_exception(
+                    stage="source_fetch",
+                    remediation="source_data",
+                    message=f"{source_name} fetch failed",
+                    exception=e,
+                    extra={"source": source_name},
+                )
                 if isinstance(source, ZoteroSource) and zotero_strict:
                     raise
 
@@ -646,6 +843,16 @@ class ResearchRAGPipeline:
 
             except Exception as e:
                 print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
+                self._report_exception(
+                    stage="chunking",
+                    remediation="chunking",
+                    message="Document chunking failed",
+                    exception=e,
+                    metadata=doc.metadata,
+                    document_id=doc.doc_id,
+                    text_length=len(doc.content or ""),
+                    token_estimate=len(doc.content or "") // 4,
+                )
 
         # Step 2: Apply oversize guard (CRITICAL - runs after all chunking, before IDs)
         all_chunk_data = self.oversize_guard.process(all_chunk_data)
@@ -696,8 +903,14 @@ class ResearchRAGPipeline:
             all_ids,
         )
 
-        # Step 5: Attach parent IDs
-        attach_parent_ids(all_metadatas, all_ids)
+        # Step 5: Attach parent IDs only for the legacy hierarchy path.
+        chunking_mode = getattr(
+            self,
+            "chunking_mode",
+            self.config.get("chunking", {}).get("mode", "v0.6_single_grain"),
+        )
+        if chunking_mode == "legacy_router":
+            attach_parent_ids(all_metadatas, all_ids)
 
         return all_chunks, all_metadatas, all_ids
 
@@ -900,6 +1113,16 @@ class ResearchRAGPipeline:
                 f"[WARN] Registry update failed; registry may drift from the vector "
                 f"store until 'python scripts/build_registry.py' is re-run. Error: {e}"
             )
+            for idx, metadata in enumerate(metadatas):
+                self._report_exception(
+                    stage="registry_write",
+                    remediation="registry",
+                    message="Registry chunk mirror failed after vector-store write",
+                    exception=e,
+                    metadata=metadata,
+                    document_id=metadata.get("source_id"),
+                    chunk_id=ids[idx] if idx < len(ids) else None,
+                )
 
     def _refresh_registry(self):
         """Rebuild registry source aggregates after a run's writes/deletes."""
@@ -914,6 +1137,12 @@ class ResearchRAGPipeline:
             )
         except Exception as e:
             print(f"[WARN] Registry refresh failed: {e}")
+            self._report_exception(
+                stage="registry_refresh",
+                remediation="registry",
+                message="Registry aggregate refresh failed",
+                exception=e,
+            )
 
     def _delta_cfg(self) -> Dict[str, Any]:
         return self.config.get("indexing", {}).get("delta", {}) or {}
@@ -985,6 +1214,12 @@ class ResearchRAGPipeline:
                 )
         except Exception as e:
             print(f"[WARN] Ledger shadow reconciliation failed: {e}")
+            self._report_exception(
+                stage="ledger_reconciliation",
+                remediation="ledger",
+                message="Ledger shadow reconciliation failed",
+                exception=e,
+            )
 
     @staticmethod
     def _zotero_parent_from_unit_id(unit_id: str) -> Optional[str]:
@@ -1099,6 +1334,13 @@ class ResearchRAGPipeline:
             self.registry.delete_units(deleted_unit_ids)
         except Exception as e:
             print(f"[WARN] Ledger delete-unit cleanup failed: {e}")
+            self._report_exception(
+                stage="ledger_write",
+                remediation="ledger",
+                message="Ledger delete-unit cleanup failed",
+                exception=e,
+                extra={"unit_ids": deleted_unit_ids[:20]},
+            )
 
     def _fetch_ledger_documents(self, plan: WorkPlan) -> tuple[List[Any], Dict[str, Any]]:
         """Fetch only documents needed by the ledger work plan."""
@@ -1264,6 +1506,13 @@ class ResearchRAGPipeline:
             self.registry.record_unit_states(rows)
         except Exception as e:
             print(f"[WARN] Ledger unit-state update failed: {e}")
+            self._report_exception(
+                stage="ledger_write",
+                remediation="ledger",
+                message="Ledger unit-state update failed",
+                exception=e,
+                extra={"unit_ids": [row["unit_id"] for row in rows[:20]]},
+            )
 
     def _delete_zotero_attachment_chunks(
         self, parent_key: str, attachment_key: str
@@ -1776,7 +2025,7 @@ class ResearchRAGPipeline:
             zotero_key: Filter by specific Zotero item key
             year_min: Filter results published on or after this year
             year_max: Filter results published on or before this year
-            chunk_level: Filter by chunk granularity (coarse/mid/fine for context control)
+            chunk_level: Filter by chunk level (v0.6: mid/atomic; legacy: coarse/fine)
             author_contains: Filter results where author field contains this string
             title_contains: Filter results where title field contains this string
             where: Advanced Chroma where clause for custom filtering
@@ -1909,3 +2158,124 @@ class ResearchRAGPipeline:
                 + " ".join(f"{k}={v:.1f}" for k, v in timings.items())
             )
         return results
+
+    def survey_sources(
+        self,
+        query_text: str,
+        k: int = 20,
+        *,
+        retrieval_mode: Optional[str] = None,
+        k_recall_override: Optional[int] = None,
+        source_type: Optional[str] = None,
+        zotero_key: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        chunk_level: Optional[str] = None,
+        author_contains: Optional[str] = None,
+        title_contains: Optional[str] = None,
+        collection: Optional[str] = None,
+        item_type: Optional[str] = None,
+        doi: Optional[str] = None,
+        language: Optional[str] = None,
+        tag: Optional[str] = None,
+        representative_limit: int = 3,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run a broad survey by aggregating chunk hits into source rows."""
+        print(f"\nSurvey query: {query_text}\n")
+        t_total_start = time.perf_counter()
+        timings: Dict[str, float] = {}
+
+        retrieval_config = self.config.get("retrieval", {})
+        survey_config = retrieval_config.get("survey", {}) or {}
+        k_recall_cfg = survey_config.get("k_recall", retrieval_config.get("k_recall", 50))
+        k_recall = int(k_recall_override) if k_recall_override is not None else int(k_recall_cfg)
+        survey_chunk_level = chunk_level or survey_config.get("chunk_level", "mid")
+
+        mode_default = str(retrieval_config.get("mode_default", "fast")).lower()
+        mode = str(retrieval_mode or mode_default).lower()
+        if mode not in {"fast", "strict"}:
+            mode = "fast"
+
+        t_embed_start = time.perf_counter()
+        query_embedding = self.embedder.embed_query(query_text)
+        timings["embed_ms"] = (time.perf_counter() - t_embed_start) * 1000.0
+
+        where_filter = build_where_filter(
+            source_type=source_type,
+            zotero_key=zotero_key,
+            chunk_level=survey_chunk_level,
+            extra_where=where,
+        )
+        if mode == "strict":
+            where_filter = build_where_filter(
+                source_type=source_type,
+                zotero_key=zotero_key,
+                year_min=year_min,
+                year_max=year_max,
+                chunk_level=survey_chunk_level,
+                extra_where=where,
+            )
+
+        t_vector_start = time.perf_counter()
+        results = self.vector_store.search(query_embedding, k=k_recall, filter=where_filter)
+        timings["vector_ms"] = (time.perf_counter() - t_vector_start) * 1000.0
+
+        t_post_filter_start = time.perf_counter()
+        if (
+            author_contains
+            or title_contains
+            or (mode == "fast" and (year_min is not None or year_max is not None))
+        ):
+            results = apply_post_filters(
+                results,
+                year_min=(year_min if mode == "fast" else None),
+                year_max=(year_max if mode == "fast" else None),
+                author_contains=author_contains,
+                title_contains=title_contains,
+            )
+        timings["postfilter_ms"] = (time.perf_counter() - t_post_filter_start) * 1000.0
+
+        t_aggregate_start = time.perf_counter()
+        payload = aggregate_hits_by_source(
+            results,
+            self.registry,
+            limit=k,
+            representative_limit=representative_limit,
+            source_type=source_type,
+            title_contains=title_contains,
+            author=author_contains,
+            collection=collection,
+            item_type=item_type,
+            doi=doi,
+            language=language,
+            tag=tag,
+        )
+        timings["aggregate_ms"] = (time.perf_counter() - t_aggregate_start) * 1000.0
+        timings["total_ms"] = (time.perf_counter() - t_total_start) * 1000.0
+
+        payload["query"] = query_text
+        payload["filters"] = {
+            "source_type": source_type,
+            "zotero_key": zotero_key,
+            "year_min": year_min,
+            "year_max": year_max,
+            "chunk_level": survey_chunk_level,
+            "author": author_contains,
+            "title_contains": title_contains,
+            "collection": collection,
+            "item_type": item_type,
+            "doi": doi,
+            "language": language,
+            "tag": tag,
+        }
+        payload["recall"] = {"k_recall": k_recall, "mode": mode}
+
+        telemetry_cfg = retrieval_config.get("telemetry", {})
+        if telemetry_cfg.get("enabled", True):
+            print(
+                "[TIMING] "
+                f"mode={mode} survey=true "
+                + " ".join(f"{key}={value:.1f}" for key, value in timings.items())
+            )
+        return payload

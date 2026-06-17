@@ -308,6 +308,29 @@ def _zotero_fixture_db(tmp_path):
         INSERT INTO items VALUES (20, 2, '', '2026-01-01 00:00:00', 'ATTACH');
         INSERT INTO items VALUES (30, 3, '', '2026-01-01 00:00:00', 'ANNOT');
         INSERT INTO items VALUES (40, 4, '', '2026-01-01 00:00:00', 'NOTEKEY');
+        INSERT INTO fields VALUES
+            (1, 'title'),
+            (2, 'DOI'),
+            (3, 'abstractNote'),
+            (4, 'publicationTitle'),
+            (5, 'language'),
+            (6, 'date');
+        INSERT INTO itemDataValues VALUES
+            (1, 'The Parent Book'),
+            (2, '10.1234/example'),
+            (3, 'A useful abstract.'),
+            (4, 'Coaching Studies'),
+            (5, 'en'),
+            (6, '2026');
+        INSERT INTO itemData VALUES
+            (10, 1, 1),
+            (10, 2, 2),
+            (10, 3, 3),
+            (10, 4, 4),
+            (10, 5, 5),
+            (10, 6, 6);
+        INSERT INTO tags VALUES (1, 'Process');
+        INSERT INTO itemTags VALUES (10, 1);
         INSERT INTO itemAttachments VALUES (20, 10, 'storage:test.pdf', 'application/pdf');
         INSERT INTO itemAnnotations VALUES (30, 20, 'highlighted text', 'my comment', '0001', '12');
         INSERT INTO itemNotes VALUES (40, 10, '<p>note text</p>');
@@ -349,8 +372,26 @@ def test_annotations_attributed_to_parent_item_key(tmp_path):
     assert doc.metadata["zotero_key"] == "PARENT"  # NOT the attachment's key
     assert doc.metadata["source_type"] == "zotero_annotation"
     assert doc.metadata["annotation_key"] == "ANNOT"
+    assert doc.metadata["has_comment"] is True
     assert "highlighted text" in doc.content
     assert doc.doc_id == "zotero-10-annotation-30"
+
+
+def test_item_metadata_includes_selection_fields(tmp_path):
+    db_path = _zotero_fixture_db(tmp_path)
+    source = ZoteroSource({"zotero": {"enabled": True, "data_directory": str(db_path.parent)}})
+    conn = source._get_db_connection()
+    try:
+        metadata = source._get_item_metadata(conn, 10)
+    finally:
+        conn.close()
+
+    assert metadata["item_type"] == "book"
+    assert metadata["DOI"] == "10.1234/example"
+    assert metadata["abstractNote"] == "A useful abstract."
+    assert metadata["publicationTitle"] == "Coaching Studies"
+    assert metadata["language"] == "en"
+    assert metadata["tags"] == ["Process"]
 
 
 def test_partial_zotero_fetch_selects_notes_and_child_keys(tmp_path):

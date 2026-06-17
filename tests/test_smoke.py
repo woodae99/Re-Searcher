@@ -12,16 +12,17 @@ from src.processing.id_utils import attach_parent_ids, stable_chunk_id
 
 
 @pytest.mark.unit
-def test_small_run_with_router_produces_hierarchical_chunks():
+def test_small_run_with_v06_router_produces_mid_chunks():
     """
-    Smoke test: Router should produce hierarchical chunks for huge documents.
+    Smoke test: v0.6 router should produce mid chunks even for huge documents.
 
     This test verifies the core chunking pipeline works with:
-    - Router enabled and routing to hierarchical chunker
-    - At least one coarse, mid, or fine chunk produced
+    - Router enabled in v0.6 single-grain mode
+    - Huge-doc settings do not route production chunks to hierarchy
     """
     config = {
         "chunking": {
+            "mode": "v0.6_single_grain",
             "router_enabled": True,
             "markdown": {"enabled": False},  # Disable to force huge_docs path
             "huge_docs": {
@@ -63,13 +64,40 @@ def test_small_run_with_router_produces_hierarchical_chunks():
     # Should have produced chunks
     assert len(all_chunks) > 0
 
-    # Should have at least one hierarchical chunk (coarse, mid, or fine level)
-    hierarchical_levels = {"coarse", "mid", "fine"}
     levels_found = {meta.get("chunk_level") for _, meta in all_chunks}
 
-    assert levels_found & hierarchical_levels, (
-        f"Expected at least one hierarchical level, got: {levels_found}"
-    )
+    assert levels_found == {"mid"}
+    assert all("parent_id" not in meta for _, meta in all_chunks)
+
+
+@pytest.mark.unit
+def test_small_run_with_legacy_router_produces_hierarchical_chunks():
+    """Legacy router mode may still produce hierarchical chunks for experiments."""
+    config = {
+        "chunking": {
+            "mode": "legacy_router",
+            "router_enabled": True,
+            "markdown": {"enabled": False},
+            "huge_docs": {
+                "enabled": True,
+                "huge_doc_tokens": 50,
+                "levels": {
+                    "coarse": {"chunk_size": 200, "chunk_overlap": 20},
+                    "mid": {"chunk_size": 100, "chunk_overlap": 10},
+                    "fine": {"chunk_size": 50, "chunk_overlap": 5},
+                },
+            },
+            "defaults": {"chunk_size": 100, "chunk_overlap": 10, "strategy": "recursive"},
+        }
+    }
+
+    router = ChunkerRouter(config)
+    metadata = {"doc_id": "legacy-doc", "source_id": "legacy-doc", "source_type": "pdf"}
+    chunks = router.chunk_with_metadata("Document content. " * 100, metadata)
+    levels_found = {meta.get("chunk_level") for _, meta in chunks}
+
+    assert "coarse" in levels_found
+    assert "fine" in levels_found
 
 
 @pytest.mark.unit
@@ -81,6 +109,7 @@ def test_smoke_oversize_guard_with_router():
     """
     config = {
         "chunking": {
+            "mode": "v0.6_single_grain",
             "router_enabled": True,
             "huge_docs": {"enabled": False},
             "markdown": {"enabled": False},
@@ -160,14 +189,15 @@ def test_smoke_id_generation_and_parent_attachment():
 
 
 @pytest.mark.unit
-def test_smoke_full_chunking_pipeline():
+def test_smoke_full_v06_chunking_pipeline():
     """
     Smoke test: Full chunking pipeline from text to final chunks.
 
-    Tests: Router -> Chunks -> IDs -> Parent attachment -> Oversize guard.
+    Tests: Router -> Chunks -> IDs -> Oversize guard.
     """
     config = {
         "chunking": {
+            "mode": "v0.6_single_grain",
             "router_enabled": True,
             "huge_docs": {
                 "enabled": True,
@@ -199,6 +229,7 @@ def test_smoke_full_chunking_pipeline():
     # Step 1: Route and chunk
     chunks = router.chunk_with_metadata(text, metadata)
     assert len(chunks) > 0
+    assert {chunk_meta.get("chunk_level") for _, chunk_meta in chunks} == {"mid"}
 
     # Step 2: Generate IDs
     ids = []
@@ -211,9 +242,9 @@ def test_smoke_full_chunking_pipeline():
     assert len(ids) == len(chunks)
     assert len(set(ids)) == len(ids)  # All unique
 
-    # Step 3: Attach parent IDs
+    # Step 3: v0.6 chunks do not carry parent metadata
     metadatas = [meta for _, meta in chunks]
-    attach_parent_ids(metadatas, ids)
+    assert all("parent_id" not in metadata for metadata in metadatas)
 
     # Step 4: Oversize guard
     guarded_chunks = guard.process(chunks)

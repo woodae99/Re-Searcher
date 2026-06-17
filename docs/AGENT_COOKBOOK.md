@@ -12,11 +12,12 @@ It describes:
 
 ## Core idea
 
-The library is indexed into Chroma as **chunks** (coarse/mid/fine). A good mission usually follows a loop:
+The v0.6 library is indexed into Chroma as **chunks** (`mid` for text/markdown,
+`atomic` for Zotero annotations). A good mission usually follows a loop:
 
 1) **Recall** (semantic search): pull candidate chunks
 2) **Refine** (filters/diversity/rerank): improve precision and coverage
-3) **Expand** (context): fetch parent chunks for understanding
+3) **Expand** (context): enumerate neighbouring chunks from the same source
 4) **Synthesize** (optional): draft answer with citations/backlinks
 
 ---
@@ -24,6 +25,12 @@ The library is indexed into Chroma as **chunks** (coarse/mid/fine). A good missi
 ## Available interfaces
 
 ### 1) MCP tools (preferred for agents)
+
+Tool: `survey_research_sources`
+
+Use this for broad survey / candidate discovery. It searches `mid` chunks, groups
+hits by registry identity, and returns source rows with hit counts, best scores,
+selection metadata, and representative chunk IDs/snippets.
 
 Tool: `search_research_library`
 

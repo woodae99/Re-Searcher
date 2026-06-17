@@ -76,18 +76,23 @@ def validate_config(
             )
         chunking = {}
 
-    # Check router_enabled
+    # Check chunking mode/router
+    chunking_mode = chunking.get("mode", "v0.6_single_grain")
     router_enabled = chunking.get("router_enabled", False)
-    if not router_enabled:
+    if chunking_mode not in {"v0.6_single_grain", "legacy_router"}:
+        errors.append(
+            "chunking.mode must be 'v0.6_single_grain' or 'legacy_router'."
+        )
+    if chunking_mode == "legacy_router" and not router_enabled:
         if not allow_legacy_chunking:
             errors.append(
                 "chunking.router_enabled is false (or missing). "
-                "This will use legacy chunking which may not produce hierarchical chunks.\n"
+                "legacy_router mode requires the router to produce hierarchical chunks.\n"
                 "  Set router_enabled: true or use --allow-legacy-chunking to proceed."
             )
         else:
             warnings.append(
-                PreflightWarning("Router is disabled - using legacy chunking")
+                PreflightWarning("Legacy router mode is set but router is disabled")
             )
 
     # Check id_strategy
@@ -173,8 +178,11 @@ def print_config_header(
     lines.append("")
     lines.append("Chunking:")
 
+    chunking_mode = chunking.get("mode", "v0.6_single_grain")
+    lines.append(f"  mode:                 {chunking_mode}")
+
     router_enabled = chunking.get("router_enabled", False)
-    router_marker = " <- VALIDATED" if router_enabled else " <- WARNING: disabled"
+    router_marker = " <- enabled" if router_enabled else " <- disabled"
     lines.append(f"  router_enabled:       {router_enabled}{router_marker}")
 
     lines.append(f"  id_strategy:          {chunking.get('id_strategy', 'legacy')}")

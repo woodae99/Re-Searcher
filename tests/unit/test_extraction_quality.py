@@ -12,6 +12,9 @@ from src.extraction_quality import (
     profile_text,
     strip_non_text,
 )
+from src.processing.extraction import ExtractionInput, ExtractionOutput, ExtractionRouter
+from src.processing.extraction.extractors import ZoteroFulltextExtractor
+from src.sources.zotero import ExtractionTask, ZoteroSource
 
 CLEAN_WORDS = [
     "the", "coaching", "process", "helps", "people", "grow", "and", "learn",
@@ -119,3 +122,185 @@ def test_deterministic_clean_dehyphenates_and_collapses_spaces():
 def test_load_dictionary_handles_missing_paths():
     # Non-existent paths must not raise; they just contribute no words.
     assert load_dictionary(("/nonexistent/wordlist",)) == frozenset()
+
+
+def test_zotero_fulltext_extractor_uses_fetcher(tmp_path):
+    extractor = ZoteroFulltextExtractor()
+    source = ExtractionInput(
+        file_path=tmp_path / "paper.pdf",
+        attachment_key="ATT1",
+        fulltext_fetcher=lambda key: _clean_text() if key == "ATT1" else None,
+    )
+
+    output = extractor.extract(source)
+
+    assert output.text == _clean_text()
+    assert output.extractor == "zotero-ft-cache"
+    assert output.route == "zotero_ft_candidate"
+
+
+def test_extraction_router_accepts_good_zotero_fulltext(tmp_path):
+    router = ExtractionRouter(
+        {"extraction": {"router": {"enabled": True}}},
+        dictionary=DICT,
+    )
+    source = ExtractionInput(
+        file_path=tmp_path / "paper.pdf",
+        attachment_key="ATT1",
+        fulltext_fetcher=lambda _key: _clean_text(),
+        partial_fulltext_checker=lambda _text: False,
+    )
+
+    output = router.extract(source)
+
+    assert output.ok
+    assert output.extractor == "zotero-ft-cache"
+    assert output.action == "accept"
+    assert output.provenance()["extractor"] == "zotero-ft-cache"
+    assert output.provenance()["extract_quality"].startswith("good:accept:")
+
+
+def test_extraction_router_falls_back_to_pdfminer_when_zotero_missing(tmp_path):
+    class MissingZotero:
+        name = "zotero-ft-cache"
+
+        def extract(self, source):
+            return ExtractionOutput(
+                text="",
+                extractor=self.name,
+                action="reject",
+                route="zotero_ft_missing",
+                errors=["missing"],
+            )
+
+    class GoodPdfminer:
+        name = "pdfminer"
+
+        def extract(self, source):
+            return ExtractionOutput(
+                text=_clean_text(),
+                extractor=self.name,
+                route="pdfminer_candidate",
+            )
+
+    router = ExtractionRouter(
+        {"extraction": {"router": {"enabled": True}}},
+        candidates=[MissingZotero(), GoodPdfminer()],
+        dictionary=DICT,
+    )
+
+    output = router.extract(
+        ExtractionInput(file_path=tmp_path / "paper.pdf", attachment_key="ATT1")
+    )
+
+    assert output.ok
+    assert output.extractor == "pdfminer"
+    assert output.fallbacks[0]["extractor"] == "zotero-ft-cache"
+    assert output.route == "pdfminer_passed"
+
+
+def test_extraction_router_falls_back_when_zotero_fulltext_is_partial(tmp_path):
+    class GoodPdfminer:
+        name = "pdfminer"
+
+        def extract(self, source):
+            return ExtractionOutput(text=_clean_text(), extractor=self.name)
+
+    router = ExtractionRouter(
+        {"extraction": {"router": {"enabled": True}}},
+        candidates=[ZoteroFulltextExtractor(), GoodPdfminer()],
+        dictionary=DICT,
+    )
+    source = ExtractionInput(
+        file_path=tmp_path / "paper.pdf",
+        attachment_key="ATT1",
+        fulltext_fetcher=lambda _key: _clean_text(),
+        partial_fulltext_checker=lambda _text: True,
+    )
+
+    output = router.extract(source)
+
+    assert output.ok
+    assert output.extractor == "pdfminer"
+    assert output.fallbacks[0]["route"] == "zotero_ft_partial"
+
+
+def test_extraction_router_cleans_recoverable_noise(tmp_path):
+    noisy = ".  ".join(["  ".join(CLEAN_WORDS)] * 6) + "."
+
+    class NoisyCandidate:
+        name = "pdfminer"
+
+        def extract(self, source):
+            return ExtractionOutput(text=noisy, extractor=self.name)
+
+    router = ExtractionRouter(
+        {"extraction": {"router": {"enabled": True}}},
+        candidates=[NoisyCandidate()],
+        dictionary=DICT,
+    )
+
+    output = router.extract(
+        ExtractionInput(file_path=tmp_path / "paper.pdf", attachment_key="ATT1")
+    )
+
+    assert output.ok
+    assert output.action == "clean"
+    assert output.route == "pdfminer_cleaned"
+    assert "  " not in output.text
+
+
+def test_extraction_router_marks_bad_text_for_escalation(tmp_path):
+    class BadCandidate:
+        name = "pdfminer"
+
+        def extract(self, source):
+            garbage = " ".join(["xqwzk", "frbnp", "zzxqv", "mwktl", "vbnpq", "kxzwf"] * 10)
+            return ExtractionOutput(text=garbage, extractor=self.name)
+
+    router = ExtractionRouter(
+        {"extraction": {"router": {"enabled": True, "marker_enabled": False}}},
+        candidates=[BadCandidate()],
+        dictionary=DICT,
+    )
+
+    output = router.extract(
+        ExtractionInput(file_path=tmp_path / "paper.pdf", attachment_key="ATT1")
+    )
+
+    assert not output.ok
+    assert output.action == "escalate"
+    assert output.extractor == "pdfminer"
+    assert "marker escalation disabled by config" in output.warnings
+
+
+def test_zotero_attachment_document_metadata_carries_extraction_provenance(tmp_path):
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4\n")
+    source = ZoteroSource({"zotero": {"enabled": False}, "extraction": {"router": {"enabled": True}}})
+    source.extraction_router = ExtractionRouter(
+        {"extraction": {"router": {"enabled": True}}},
+        dictionary=DICT,
+    )
+    source._fetch_local_api_fulltext = lambda _key: _clean_text()  # type: ignore[method-assign]
+    source._collect_attachment_tasks = lambda *_args, **_kwargs: [  # type: ignore[method-assign]
+        ExtractionTask(
+            file_path=pdf_path,
+            attachment_id=10,
+            attachment_key="ATT1",
+            filename="paper.pdf",
+            content_type="application/pdf",
+            file_size_mb=0.01,
+            zotero_item_id=1,
+        )
+    ]
+
+    docs = list(source._process_attachments(None, 1, {"zotero_key": "Z1", "title": "Title"}))
+
+    assert len(docs) == 1
+    metadata = docs[0].metadata
+    assert metadata["source_type"] == "zotero_fulltext"
+    assert metadata["extractor"] == "zotero-ft-cache"
+    assert metadata["extract_action"] == "accept"
+    assert metadata["extract_quality"].startswith("good:accept:")
+    assert metadata["extract_route"] == "zotero_ft_cache_passed"

@@ -137,9 +137,23 @@ extraction:
   workers: auto
   # Execution mode: 'thread' (recommended) or 'process'
   mode: thread
+  router:
+    # v0.6 PDF/fulltext seam. Zotero FT cache is tried first, then pdfminer.
+    # Candidate text is quality-scored; recoverable noise is deterministically
+    # cleaned and re-scored; unresolved failures are recorded as provenance.
+    enabled: true
+    pdfminer_timeout_seconds: 60
+    # Marker/OCR remains an opt-in expensive escalation backstop.
+    marker_enabled: false
 
 # Text chunking configuration
 chunking:
+  # v0.6 production mode: a single retrieval grain in Chroma.
+  # - Zotero/fulltext/default text -> recursive mid chunks
+  # - Zotero annotations -> atomic chunks
+  # - Obsidian markdown -> mid chunks with heading_path
+  # Legacy hierarchy remains available only by setting mode: legacy_router.
+  mode: v0.6_single_grain  # v0.6_single_grain | legacy_router
   # v0.6 working grain — recursive 700/100, settled by measured retrieval evals.
   # 'recursive' decisively beats 'character' (which only splits on blank lines and
   # so can't break over-long paragraphs); size 700/100 wins on passage-retrieval
@@ -151,7 +165,8 @@ chunking:
   chunk_overlap: 100
   # Chunking strategy: 'character' | 'recursive' | 'token' | 'semantic'
   strategy: recursive
-  # Router configuration
+  # Router configuration. In v0.6_single_grain mode, this router never routes
+  # huge documents to the legacy hierarchical chunker.
   router_enabled: true
   id_strategy: stable_hash  # stable_hash | legacy
   # Oversize guard settings (prevents embedder truncation)
@@ -190,8 +205,10 @@ chunking:
     enabled: true
     header_levels: [1, 2, 3]
     max_section_tokens: 900
+  # Legacy/experimental hierarchy settings. These are ignored unless
+  # chunking.mode is legacy_router.
   huge_docs:
-    enabled: true
+    enabled: false
     huge_doc_tokens: 25000
     levels:
       coarse: { chunk_size: 2200, chunk_overlap: 200 }
@@ -249,6 +266,13 @@ retrieval:
 # Output configuration
 output_folder: ./output
 log_progress: true
+
+# Structured per-run event stream for long indexing jobs. Events are written to
+# <output_folder>/runs/<run_id>/events.jsonl, with a compact summary at the end.
+run_reporting:
+  enabled: true
+  events_file: "events.jsonl"
+  summary_file: "summary.json"
 
 # Indexing configuration
 indexing:

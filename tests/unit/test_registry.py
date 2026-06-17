@@ -103,6 +103,105 @@ def test_record_refresh_and_list_roundtrip(tmp_path):
     assert zotero_row["freshness"] == "2026-06-01T00:00:00Z"
 
 
+def test_record_chunks_lifts_selection_metadata_and_filters(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    book = _zotero_chunk(
+        "c1",
+        "Z1",
+        item_type="book",
+        DOI="10.1111/book",
+        abstractNote="A chapter-four screening abstract.",
+        tags=["Process", "Theory"],
+        publicationTitle="Coaching Books",
+        language="en",
+    )["metadata"]
+    article = _zotero_chunk(
+        "c2",
+        "Z2",
+        item_type="journalArticle",
+        DOI="10.2222/article",
+        abstractNote="A different abstract.",
+        tags="Methods",
+        publicationTitle="Journal of Coaching",
+        language="fr",
+    )["metadata"]
+    registry.record_chunks(["c1", "c2"], [book, article])
+    registry.refresh_sources()
+
+    row = registry.list_sources_payload(item_type="book")["sources"][0]
+    assert row["identity_value"] == "Z1"
+    assert row["item_type"] == "book"
+    assert row["doi"] == "10.1111/book"
+    assert row["abstract"] == "A chapter-four screening abstract."
+    assert row["tags"] == "Process, Theory"
+    assert row["venue"] == "Coaching Books"
+    assert row["language"] == "en"
+
+    assert registry.list_sources_payload(language="en")["total_sources"] == 1
+    assert registry.list_sources_payload(doi="2222")["sources"][0]["identity_value"] == "Z2"
+    assert registry.list_sources_payload(tag="Theory")["sources"][0]["identity_value"] == "Z1"
+    assert registry.list_sources_payload(tag="Process")["sources"][0]["identity_value"] == "Z1"
+
+
+def test_record_chunks_lifts_extraction_provenance(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    metadata = _zotero_chunk(
+        "c1",
+        "Z1",
+        extractor="zotero-ft-cache",
+        extract_quality="good:accept:0.9900",
+        extract_action="accept",
+    )["metadata"]
+
+    registry.record_chunks(["c1"], [metadata])
+    registry.refresh_sources()
+
+    row = registry.list_sources_payload()["sources"][0]
+    assert row["extractor"] == "zotero-ft-cache"
+    assert row["extract_quality"] == "good:accept:0.9900"
+    assert row["extract_action"] == "accept"
+
+
+def test_sources_by_identity_returns_filtered_source_metadata(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    book = _zotero_chunk(
+        "c1",
+        "Z1",
+        item_type="book",
+        DOI="10.1111/book",
+        abstractNote="A chapter-four screening abstract.",
+        tags=["Process", "Theory"],
+        publicationTitle="Coaching Books",
+        language="en",
+    )["metadata"]
+    article = _zotero_chunk(
+        "c2",
+        "Z2",
+        item_type="journalArticle",
+        tags="Methods",
+        language="fr",
+    )["metadata"]
+    registry.record_chunks(["c1", "c2"], [book, article])
+    registry.refresh_sources()
+
+    rows = registry.sources_by_identity(
+        [("zotero_key", "Z1"), ("zotero_key", "Z2")],
+        item_type="book",
+        language="en",
+        tag="Theory",
+    )
+
+    assert list(rows) == [("zotero_key", "Z1")]
+    row = rows[("zotero_key", "Z1")]
+    assert row["title"] == "Title Z1"
+    assert row["item_type"] == "book"
+    assert row["doi"] == "10.1111/book"
+    assert row["abstract"] == "A chapter-four screening abstract."
+    assert row["tags"] == "Process, Theory"
+    assert row["venue"] == "Coaching Books"
+    assert row["language"] == "en"
+
+
 def test_record_chunks_is_idempotent(tmp_path):
     registry = SourceRegistry(tmp_path / "r.sqlite")
     ids = ["c1", "c2"]
@@ -323,10 +422,52 @@ def test_additive_migration_adds_ledger_to_v1_registry(tmp_path):
 
     # Re-opening runs the additive migration.
     reopened = SourceRegistry(db_path)
-    assert reopened.get_meta("schema_version") == "3"
+    assert reopened.get_meta("schema_version") == "5"
     # Round-trips, proving the table is back.
     reopened.record_unit_states([_unit("zotero-Z1-note-1", "Z1", "note", "v1")])
     assert reopened.get_unit_states() == {"zotero-Z1-note-1": "v1"}
+
+
+def test_additive_migration_adds_source_metadata_to_v3_registry(tmp_path):
+    """An existing v3 registry gains W8/W1 source columns on re-open."""
+    import sqlite3
+
+    db_path = tmp_path / "r.sqlite"
+    SourceRegistry(db_path)
+
+    with sqlite3.connect(str(db_path)) as conn:
+        for column in (
+            "item_type",
+            "doi",
+            "abstract",
+            "tags",
+            "venue",
+            "language",
+            "extractor",
+            "extract_quality",
+            "extract_action",
+        ):
+            conn.execute(f"ALTER TABLE sources DROP COLUMN {column}")
+        conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+
+    reopened = SourceRegistry(db_path)
+    assert reopened.get_meta("schema_version") == "5"
+    reopened.record_chunks(
+        ["c1"],
+        [
+            _zotero_chunk(
+                "c1",
+                "Z1",
+                item_type="book",
+                language="en",
+                extractor="pdfminer",
+            )["metadata"]
+        ],
+    )
+    reopened.refresh_sources()
+    row = reopened.list_sources_payload(item_type="book")["sources"][0]
+    assert row["language"] == "en"
+    assert row["extractor"] == "pdfminer"
 
 
 def test_registry_records_and_deletes_child_key_chunks(tmp_path):
@@ -362,6 +503,74 @@ def test_registry_records_and_deletes_child_key_chunks(tmp_path):
     assert deleted == 1
     remaining = {row["chunk_id"] for row in registry.chunk_records_for_source("zotero_key", "Z1")}
     assert remaining == {"a2", "n1"}
+
+
+def test_status_reports_ledger_drift(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["n1", "orphan"],
+        [
+            {
+                "source_type": "zotero_note",
+                "zotero_key": "Z1",
+                "source_id": "zotero-1-note-20",
+                "chunk_level": "atomic",
+                "chunk_index": 0,
+                "note_key": "NOTE1",
+            },
+            _zotero_chunk("orphan", "Z2")["metadata"],
+        ],
+    )
+    registry.record_unit_states(
+        [
+            _unit("zotero:Z1:note:NOTE1", "Z1", "note", "v1"),
+            _unit("zotero:Z1:note:MISSING", "Z1", "note", "v2"),
+        ]
+    )
+
+    status = registry.status()
+    drift = status["ledger_drift"]
+
+    assert status["index_unit_count"] == 2
+    assert drift["ok"] is False
+    assert drift["chunkless_unit_count"] == 1
+    assert drift["chunkless_unit_samples"][0]["unit_id"] == "zotero:Z1:note:MISSING"
+    assert drift["orphan_identity_count"] == 1
+    assert drift["orphan_chunk_count"] == 1
+    assert drift["orphan_identity_samples"][0]["identity_value"] == "Z2"
+
+
+def test_status_reports_clean_ledger(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["a1", "o1"],
+        [
+            _zotero_chunk("a1", "Z1")["metadata"] | {"attachment_key": "ATT1"},
+            {
+                "source_type": "obsidian",
+                "source_id": "obsidian-a.md",
+                "chunk_level": "mid",
+                "chunk_index": 0,
+            },
+        ],
+    )
+    registry.record_unit_states(
+        [
+            _unit("zotero:Z1:attachment:ATT1", "Z1", "attachment", "h1"),
+            {
+                "unit_id": "obsidian:a.md",
+                "identity_field": "source_id",
+                "identity_value": "obsidian-a.md",
+                "unit_kind": "vault_file",
+                "source_fingerprint": "mtime:1-1",
+            },
+        ]
+    )
+
+    drift = registry.status()["ledger_drift"]
+    assert drift["ok"] is True
+    assert drift["chunkless_unit_count"] == 0
+    assert drift["orphan_identity_count"] == 0
 
 
 def test_list_sources_collection_filter(tmp_path):

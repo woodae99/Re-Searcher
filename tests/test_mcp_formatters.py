@@ -11,6 +11,7 @@ from src.mcp_formatters.formatters import (
     format_error_response,
     format_source_chunks,
     format_list_sources,
+    format_index_status,
 )
 
 
@@ -146,6 +147,12 @@ def test_format_list_sources_missing_fields_empty_and_pagination():
                     "identity_field": "source_id",
                     "identity_value": "obsidian-A.md",
                     "title": "A",
+                    "item_type": "book",
+                    "doi": "10.1234/example",
+                    "abstract": "A" * 300,
+                    "tags": "Process, Theory",
+                    "venue": "Coaching Studies",
+                    "language": "en",
                     "chunk_counts": {"mid": 2},
                     "total_chunks": 2,
                     "freshness": "2026-06-10T12:00:00Z",
@@ -156,6 +163,11 @@ def test_format_list_sources_missing_fields_empty_and_pagination():
 
     assert "Page: offset=0, limit=1, returned=1" in text
     assert "Identity: source_id=obsidian-A.md" in text
+    assert "Item Type: book" in text
+    assert "DOI: 10.1234/example" in text
+    assert "Tags: Process, Theory" in text
+    assert "Abstract: " in text
+    assert "A" * 300 not in text
     assert "Freshness: 2026-06-10T12:00:00Z" in text
 
 
@@ -168,6 +180,44 @@ def test_format_error_response():
     assert formatted["message"] == "Test error message"
 
     print("✅ Error formatter test passed!")
+
+
+def test_format_index_status_includes_ledger_drift():
+    text = format_index_status(
+        {
+            "collection_name": "test",
+            "endpoint": "memory",
+            "git_sha": "abc123",
+            "chroma_chunk_count": 4,
+            "drift": 0,
+            "registry": {
+                "chunk_count": 4,
+                "source_count": 2,
+                "index_unit_count": 3,
+                "backfill_complete": False,
+                "ledger_drift": {
+                    "ok": False,
+                    "chunkless_unit_count": 1,
+                    "chunkless_unit_samples": [
+                        {"unit_id": "zotero:Z1:note:MISSING"}
+                    ],
+                    "orphan_identity_count": 1,
+                    "orphan_chunk_count": 2,
+                    "orphan_identity_samples": [
+                        {"identity_field": "zotero_key", "identity_value": "Z2"}
+                    ],
+                },
+            },
+        }
+    )
+
+    assert "Index Ledger Units: 3" in text
+    assert "Ledger Drift:" in text
+    assert "Chunkless text units: 1" in text
+    assert "Orphan chunk identities: 1 (2 chunks)" in text
+    assert "Ledger Sync: DRIFT DETECTED" in text
+    assert "zotero:Z1:note:MISSING" in text
+    assert "zotero_key=Z2" in text
 
 
 if __name__ == "__main__":

@@ -1,5 +1,11 @@
 # Legacy Chunking Plan
 
+This document describes the pre-v0.6 hierarchical router. The v0.6 production
+default is `chunking.mode: v0.6_single_grain`, which emits `mid` text/markdown
+chunks and `atomic` Zotero annotation chunks. Set `chunking.mode: legacy_router`
+only for experiments or legacy tests that intentionally need `coarse`/`fine`
+chunks and `parent_id` navigation.
+
 ## Design statement
 
 Obsidian notes are treated as Markdown with an additional semantic layer (frontmatter, tags, links). All such semantics must be parsed, preserved, and surfaced as metadata. Generic Markdown parsing is insufficient.
@@ -71,6 +77,7 @@ The test config at `tests/fixtures/configs/config.pipeline.yaml` should have:
 
 ```yaml
 chunking:
+  mode: legacy_router
   router_enabled: true
   id_strategy: stable_hash
   debug_router: true  # Enable router debug output

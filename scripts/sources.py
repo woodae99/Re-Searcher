@@ -59,6 +59,10 @@ def cmd_list(args) -> None:
         title_contains=args.title_contains,
         author=args.author,
         collection=args.collection,
+        item_type=args.item_type,
+        doi=args.doi,
+        language=args.language,
+        tag=args.tag,
         limit=args.limit,
         offset=args.offset,
     )
@@ -153,6 +157,10 @@ def main():
         default=None,
         help="Case-insensitive Zotero collection name substring (scope a register to one collection)",
     )
+    p_list.add_argument("--item-type", default=None, help="Exact Zotero item type, e.g. book")
+    p_list.add_argument("--doi", default=None, help="Case-insensitive DOI substring filter")
+    p_list.add_argument("--language", default=None, help="Exact Zotero language code, e.g. en")
+    p_list.add_argument("--tag", default=None, help="Exact Zotero tag name")
     p_list.add_argument("--limit", type=int, default=100, help="Max sources per page (default 100, max 500)")
     p_list.add_argument("--offset", type=int, default=0, help="Page offset after sorting")
     p_list.add_argument("--json", action="store_true", help="Emit raw JSON payload")

@@ -73,9 +73,10 @@ extraction:
   mode: thread
 
 chunking:
-  chunk_size: 2048
-  chunk_overlap: 256
-  strategy: character
+  mode: v0.6_single_grain
+  chunk_size: 700
+  chunk_overlap: 100
+  strategy: recursive
   router_enabled: true
   id_strategy: stable_hash
   max_tokens_per_chunk: 7000
@@ -107,14 +108,14 @@ chunking:
       output_path: "runs/{RUN_ID}/quality_report.json"
   defaults:
     strategy: recursive
-    chunk_size: 2048
-    chunk_overlap: 256
+    chunk_size: 700
+    chunk_overlap: 100
   markdown:
     enabled: true
     header_levels: [1, 2, 3]
     max_section_tokens: 900
   huge_docs:
-    enabled: true
+    enabled: false
     huge_doc_tokens: 25000
     levels:
       coarse: { chunk_size: 2200, chunk_overlap: 200 }

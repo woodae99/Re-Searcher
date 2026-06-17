@@ -7,8 +7,8 @@ It should run AFTER all routing/chunking and BEFORE embedding.
 
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 from .token_utils import create_token_estimator, heuristic_token_estimate
 
@@ -48,6 +48,7 @@ class OversizeGuard:
         max_tokens: int,
         policy: str = "split",
         token_estimator: str = "heuristic",
+        reporter: Optional[Any] = None,
     ):
         """
         Initialize the oversize guard.
@@ -61,6 +62,7 @@ class OversizeGuard:
         self.policy = policy
         self.estimate_tokens = create_token_estimator(token_estimator)
         self.stats = OversizeGuardStats()
+        self.reporter = reporter
 
         # Validate policy
         if policy not in ("split", "truncate", "skip"):
@@ -94,6 +96,9 @@ class OversizeGuard:
         self.stats.total_output = len(result)
         return result
 
+    def set_reporter(self, reporter: Any) -> None:
+        self.reporter = reporter
+
     def _handle_oversize(
         self, text: str, metadata: Dict[str, Any], tokens: int
     ) -> List[Tuple[str, Dict[str, Any]]]:
@@ -113,6 +118,7 @@ class OversizeGuard:
 
         if self.policy == "split":
             self.stats.split += 1
+            self._report_oversize("split", metadata, text, tokens)
             logger.warning(
                 f"Splitting oversize chunk: source_id={source_id}, "
                 f"level={chunk_level}, tokens={tokens} > {self.max_tokens}"
@@ -121,6 +127,7 @@ class OversizeGuard:
 
         elif self.policy == "truncate":
             self.stats.truncated += 1
+            self._report_oversize("truncate", metadata, text, tokens)
             logger.warning(
                 f"Truncating oversize chunk: source_id={source_id}, "
                 f"level={chunk_level}, tokens={tokens} -> {self.max_tokens}"
@@ -131,11 +138,37 @@ class OversizeGuard:
 
         else:  # skip
             self.stats.skipped += 1
+            self._report_oversize("skip", metadata, text, tokens)
             logger.warning(
                 f"Skipping oversize chunk: source_id={source_id}, "
                 f"level={chunk_level}, tokens={tokens}"
             )
             return []
+
+    def _report_oversize(
+        self,
+        action: str,
+        metadata: Dict[str, Any],
+        text: str,
+        tokens: int,
+    ) -> None:
+        if self.reporter is None:
+            return
+        self.reporter.record(
+            stage="oversize_guard",
+            severity="warn",
+            remediation="embedder_limit",
+            message=f"Oversize chunk {action}",
+            metadata=metadata,
+            text_length=len(text),
+            token_estimate=tokens,
+            extra={
+                "policy": self.policy,
+                "action": action,
+                "max_tokens": self.max_tokens,
+                "chunk_level": metadata.get("chunk_level", ""),
+            },
+        )
 
     def _recursive_split(
         self, text: str, metadata: Dict[str, Any], depth: int = 0
@@ -159,6 +192,17 @@ class OversizeGuard:
         # Safety: prevent infinite recursion
         if depth > 10:
             logger.error(f"Recursive split exceeded depth limit, truncating")
+            if self.reporter is not None:
+                self.reporter.record(
+                    stage="oversize_guard",
+                    severity="error",
+                    remediation="chunking",
+                    message="Recursive oversize split exceeded depth limit",
+                    metadata=metadata,
+                    text_length=len(text),
+                    token_estimate=self.estimate_tokens(text),
+                    extra={"max_tokens": self.max_tokens},
+                )
             return [(self._truncate_to_tokens(text, self.max_tokens), metadata)]
 
         tokens = self.estimate_tokens(text)

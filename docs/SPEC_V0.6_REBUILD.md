@@ -6,9 +6,9 @@
 **Supersedes/extends**: the shipped Jan-2026 legacy feature effort (parallel extraction,
 oversize guard, progress UI, chunking router, document-scoped parent IDs — all in
 `main`). The throughput machinery (`EMBED_STORE_PIPELINE_SPEC.md`'s producer/consumer
-overlap and concurrent embedding) is **already implemented** in `pipeline.py` /
-`embedding/lmstudio.py`, just conservatively configured — so v0.6 enables and tunes it
-rather than building it.
+overlap and concurrent embedding) is **already implemented** in `pipeline.py`; v0.6
+enables/tunes it where it still helps, but the biggest measured throughput win is now
+the vLLM/Qwen3 embedding backend rather than LM Studio concurrency alone.
 
 > **Code-state note (verified 2026-06-13).** The older legacy feature docs and
 > `PLAN_PARALLEL_PROGRESS.md` describe *completed, shipped* work; they are history,
@@ -53,6 +53,47 @@ Decision (Colin, 2026-06-13): **leave the current noisy DB as-is** (usable, not 
 fix all of the above in v0.6 with a **clean rebuild against empty databases** for
 production going forward. Cleaning the existing DB is throwaway work and is not done unless
 mission pressure forces it before v0.6 lands.
+
+## 1a. Current implementation status (2026-06-17)
+
+This spec has evolved through evidence and implementation. The current branch is no
+longer the 2026-06-13 proposal state.
+
+**Implemented / substantially implemented**
+- vLLM embedding backend with Qwen3-Embedding-0.6B, managed lifecycle, query
+  instruction, and `context_length`/`max_model_len = 8192` (must remain above
+  the 7000-token oversize guard). LM Studio remains an interactive/fallback
+  provider, not the production default.
+- vLLM cross-encoder reranking path.
+- ChromaDB 1.5.9 dependency pin for the fresh rebuild path.
+- Recursive 700/100 working grain as the measured `mid` default.
+- Acceptance harness core for registry-vs-collection exactness, duplicate audit,
+  artifact scan, and quote verification.
+- Register-as-index-ledger foundation: `index_units`, source `enumerate_state()`,
+  reconciler, shadow parity logging, gated granular execution, and ledger drift
+  reporting.
+- W8 systematic-review selection metadata: `item_type`, `doi`, `abstract`,
+  `tags`, `venue`, `language`, filters on CLI/MCP list-source surfaces, and
+  annotation `has_comment`.
+
+**Still open before final v0.6**
+- The W2 single-grain cutover is not complete: `router_enabled` + `huge_docs`
+  can still route huge documents through the legacy hierarchical chunker and
+  emit `coarse`/`fine`; `parent_id` logic is still live. This is an
+  implementation gap, not merely stale text.
+- The W8 survey/aggregate-by-source retrieval mode is not implemented.
+- The W1 extraction seam/quality-gated router is researched but not wired into
+  indexing; extraction provenance columns are not yet in the register.
+- W5 fsync-durable JSON/state writes are not implemented.
+- Ledger execution remains intentionally off by default pending a full parity
+  proof; do not retire `zotero_delta_state.json` or `vault_files` until that
+  suite passes.
+- Structured failure reporting is still needed so failed
+  extraction/chunk/embed/store events become both engineering telemetry and
+  corpus-cleanup data.
+
+For cold-start implementation details, see
+`docs/V0.6_REMAINING_ACTIONS_HANDOFF.md`.
 
 ## 2. Goals / non-goals
 
@@ -216,7 +257,7 @@ representative, fast-to-rebuild** corpus so variables can be swept cheaply.
 - *Survey strategy*: mid-aggregate-by-source vs coarse-search vs hybrid; recall vs precision at
   the "raise your hand" stage (we *want* the unsure to surface).
 - *Extractor*: which candidate clears the acceptance gates for each source class, and when
-  should the router escalate from Zotero FT cache / `pdfminer` to Marker, Docling, or a
+  should the router escalate from Zotero FT cache / `pdfminer` to Marker/OCR or a
   hybrid LLM pass?
 - *Chunker*: ~~Docling HybridChunker vs our chunker~~ — **resolved (2026-06-15)**: Docling dropped;
   use a **recursive** splitter, `mid` 700/100, settled by the retrieval eval (`docs/CHUNKING_EVAL.md`).
@@ -243,7 +284,7 @@ What makes the router safe:
 - **Scope is PDFs only.** The extractor router handles the Zotero **PDF/fulltext** path.
   Obsidian markdown and Zotero
   notes/annotations keep their existing clean paths. Items with no accessible PDF are a coverage
-  boundary, not a Docling failure — the register records "no fulltext" (the 5WPQDBL5 case).
+  boundary, not an extractor failure — the register records "no fulltext" (the 5WPQDBL5 case).
 - **Register-tracked provenance + leak flagging.** Add `extractor` and `extract_quality` to the
   register; a source that fails the acceptance gates is flagged, so leak-plugging is a per-source
   re-extraction (`reindex.py --zotero-keys`), never a re-architecture.
@@ -252,7 +293,7 @@ What makes the router safe:
   normalization. Keep it config-toggled, reversible, and recorded in metadata.
 
 **Acceptance criteria** (measured per extractor on the nasty `test_zotero`, via the W7 harness —
-used to confirm the Docling bet and to characterise any leak):
+used to validate the quality-gated router and to characterise any leak):
 
 | Criterion | Measure | Why it matters |
 |---|---|---|
@@ -315,9 +356,10 @@ and an **open one, settled by iteration** (§3d), not committed up front:
 ### W3 — Throughput  *(enable + tune; machinery already exists)*
 The infrastructure is built, just conservative — this is largely a config + validation task,
 not new development:
-- Raise embedding concurrency (`embedding.max_concurrent_requests`, currently capped at 2) to
-  a value swept against the local LM Studio / 5090 ceiling (`lmstudio.py` already runs batches
-  in a thread pool sized by this knob).
+- vLLM/Qwen3 is now the production embedding path and has already delivered the primary
+  throughput improvement. Continue to tune `embedding.max_concurrent_requests`,
+  `embedding.batch_size`, and vLLM managed-server settings against Sparky's actual ceiling.
+  LM Studio remains a fallback/interactive backend rather than the performance target.
 - Turn the **producer/consumer embed↔store overlap on by default** after validation
   (`indexing.embed_store_pipeline` is implemented in `pipeline.py`); tune `queue_max_items`,
   `embed_sub_batch_size`, `store_sub_batch_size`; bounded queue gives backpressure; determinism
@@ -370,9 +412,9 @@ The support the two-plane model needs so nothing in the functional profile regre
   title/authors/year/backlink/collections — under-representative for systematic review. Add, in
   priority order:
   1. **`item_type`** ("kind": book / article / chapter / thesis / report) — the spec's §3b parity
-     map already promises "kind" as a register selection field, but it is **not currently even
-     extracted**: `_get_item_metadata` queries `itemTypeID` but never resolves `typeName` into
-     metadata. Fix in *both* extraction (resolve `typeName`) and the register.
+     map already promises "kind" as a register selection field. **Implemented 2026-06-17**:
+     `_get_item_metadata` resolves Zotero `typeName`, and the register lifts it into
+     `sources.item_type`.
   2. **`doi`** — canonical systematic-review dedup + citation key (PRISMA dedup runs on DOI).
   3. **`abstract`** (Zotero `abstractNote`) — title/abstract screening is PRISMA stage 1; directly
      powers the survey/filter steps. Larger than the rest, but one row per source in SQLite is fine.
@@ -380,11 +422,12 @@ The support the two-plane model needs so nothing in the functional profile regre
      (`zotero.py`) but not lifted to the register. Store comma-joined, like `collections`.
   5. **`venue`** (`publicationTitle`) and **`language`** — standard inclusion/exclusion filters.
 
-  All of (2)–(5) are *already extracted* into Chroma chunk metadata via the `**fields` spread in
-  `_get_item_metadata`; the work is lifting them into the register `sources` table in
-  `record_chunks`, not new extraction. Only `item_type` needs an extraction change. **Do not** dump
-  all `**fields` blindly — keep ISBN/ISSN/pages/volume in chunk metadata; the register gets the
-  systematic-review filter set only. Full implementation spec: `docs/SPEC_W8_REGISTER_METADATA.md`.
+  All of (2)–(5) were already extracted into Chroma chunk metadata via the `**fields` spread in
+  `_get_item_metadata`; **implemented 2026-06-17**: they are now lifted into the register
+  `sources` table in `record_chunks` and exposed as list-source filters. **Do not** dump all
+  `**fields` blindly — keep ISBN/ISSN/pages/volume in chunk metadata; the register gets the
+  systematic-review filter set only. Full implementation spec:
+  `docs/SPEC_W8_REGISTER_METADATA.md`.
 - **Acceptance**: the §3b parity table is fully satisfiable with these in place; the mission's
   survey→select→drill runs end-to-end with no reliance on `coarse` or `parent_id`; a register
   source view can be filtered by `item_type`, `doi`, `language`, `tags` without a Chroma scan.
@@ -400,15 +443,16 @@ missions run overnight with Bambino asleep.
   always-ready). **Bambino = optional rebuild accelerator** — the one-time initial embed burst can
   borrow her 5090 by pointing `embedding.endpoint` at Bambino; deltas run on Sparky. **RocknRolla
   = always-on Hermes + canonical Zotero/Obsidian host.**
-- **Inference server**: **LM Studio already runs headless/systemd on Sparky** (confirmed working)
-  — no swap needed; the embedding/rerank endpoint is just Sparky's LM Studio. Bambino's LM Studio
-  is the borrow-target for the big rebuild.
+- **Inference server**: **vLLM is now the production inference path** for both embeddings
+  and cross-encoder reranking (managed containers from config). LM Studio remains useful
+  as an interactive/fallback OpenAI-compatible endpoint, but the v0.6 rebuild should be
+  validated against vLLM on Sparky.
 - **No data migration**: v0.6 builds a blank collection on Sparky's new ChromaDB — nothing to port.
-- **Source-of-truth access (Docling needs raw PDFs, not Zotero FT)**: Zotero is kept in sync across
+- **Source-of-truth access (extractor backstops need raw PDFs, not only Zotero FT)**: Zotero is kept in sync across
   laptop/Bambino/RocknRolla by Zotero's own sync (all canonical); the Obsidian vault is synced
   Bambino↔RocknRolla by Syncthing (per-host `.obsidian/`). **Decision for Sparky: add Sparky as a
   sync target so it holds LOCAL copies** of (a) the Zotero **storage dir + `zotero.sqlite`** and
-  (b) the vault — Re-Searcher reads *files* directly (Docling on PDFs, `zotero.sqlite` for
+  (b) the vault — Re-Searcher reads *files* directly (PDF extractors on attachments, `zotero.sqlite` for
   metadata, `.md` for notes), so it needs the **data synced, not the GUI apps running**. Local
   copies beat the LAN/tailnet-to-RnR alternative for the heavy rebuild (1 gbps switched is the
   ceiling) and for overnight autonomy (no dependency on RnR serving mid-run). Caveat to handle:
@@ -416,7 +460,8 @@ missions run overnight with Bambino asleep.
   already tolerates a locked `zotero.sqlite`. (Alternative kept on file: reach RnR's Zotero/Obsidian
   local APIs over the tailnet — simpler, but LAN-limited and RnR-dependent.)
 - **Portability port (absorb into the rebuild, cheapest now)**: verify ARM64 wheels for
-  `chromadb` (+ `chromadb_rust_bindings`) and `torch`/Docling on ARM64+Blackwell CUDA; replace the
+  `chromadb` (+ `chromadb_rust_bindings`) and any optional heavy extractor dependencies on
+  ARM64+Blackwell CUDA; replace the
   Windows launchers (NSSM, `.cmd`/`.ps1`) with `systemd` units + shell; make every path
   config-driven (no `C:\...` constants) — feeds W6.
 - **Dev access**: run **Claude Code natively on Sparky** (Node CLI, ARM64 Linux) against the repo
@@ -472,29 +517,38 @@ built on a different box, so the old one keeps serving untouched until cutover.
 3. Point Hermes/MCP clients at Sparky's MCP endpoint; keep Bambino's stack until confidence is
    high; then retire it and reclaim space on Bambino (incl. the 121 GB `data_recovery_test`).
 
-## 8. Phasing & gates (suggested order)
+## 8. Phasing & gates (current order, 2026-06-17)
 Phases are **iterative loops on the small test corpus**, not a waterfall — survey/classify/drill,
-read what it shows, adjust, repeat. Each "gate" is a convergence check, not a one-shot. Only P6
-commits to the full rebuild, once the evidence has stopped surprising us.
-- **P0 — Sparky dev env + test harness + test corpora (W9, W7, §4).** Stand up the Sparky
-  environment (ARM64 deps, Chroma on the new version, LM Studio endpoint, synced sources, Claude
-  Code), then the harness and corpora. Gate: harness runs *on Sparky* and reproduces this
-  session's findings; a tiny end-to-end ingest+query works on Sparky.
-- **P1 — Docling extraction behind the seam + single-grain chunking (W1, W2)** on `test_*`,
-  thrashed against the nasty fixtures. Gate: extraction acceptance gates pass (artifacts ≈ 0,
-  quotes verify, reading order intact); level-eval confirms `mid` (+ coarse only if justified);
-  leaks flagged and clustered.
-- **P2 — Register control-plane capabilities (W8)** so survey→select→drill works without
-  `coarse`/`parent_id`. Gate: §3b parity table fully satisfied.
-- **P3 — ChromaDB upgrade + durability (W5, W4)** on `test_*`. Gate: fresh build serves on new
-  version; unclean-stop recovers; checkpoints survive kill.
-- **P4 — Throughput (W3).** Gate: rebuild-time projection acceptable; counts reconcile.
-- **P5 — Config/modularity hardening (W6)** continuous; final audit before rebuild.
-- **P6 — Production rebuild + cutover (§7) + mission acceptance (§6).**
+read what it shows, adjust, repeat. Each "gate" is a convergence check, not a one-shot. Only the
+final rebuild commits to production, once the evidence has stopped surprising us.
+
+The exact cold-start implementation checklist lives in
+`docs/V0.6_REMAINING_ACTIONS_HANDOFF.md`. In short:
+- **P1 — W2 single-grain chunking cutover.** Make the v0.6 default emit `mid` +
+  `atomic` only; keep hierarchical chunking as legacy/experimental code, not the
+  production path. Gate: fresh test-corpus build has no `fine` and no navigation
+  dependence on `parent_id`.
+- **P2 — W8 survey/aggregate-by-source retrieval mode.** Replace coarse survey
+  behavior with mid-search grouped/ranked by source via the register. Gate: §3b
+  broad-survey/select/drill parity works without `coarse`.
+- **P3 — W1 extraction seam + provenance.** Wire the measured extractor plan
+  behind a one-method seam, score output with the quality gate, and record
+  extractor/quality provenance in the register. Gate: bad extraction is reportable
+  per source and can feed a repair/re-extraction queue.
+- **P4 — structured failure reporting.** Produce durable run reports for extraction,
+  chunking, oversize, embedding, storage, registry, and ledger failures. Gate:
+  "0 errors" cannot hide dropped documents/chunks, and the report doubles as corpus
+  cleanup data.
+- **P5 — W5 durability.** Add shared fsync-durable JSON/state writes. Gate:
+  checkpoint/state files survive interruption as previous-valid or next-valid JSON.
+- **P6 — W10 ledger parity suite.** Prove legacy-delta and ledger-execution parity
+  on the full test Zotero + Obsidian corpora before flipping `ledger.execute` or
+  retiring `zotero_delta_state.json` / `vault_files`.
+- **P7 — Production rebuild + cutover (§7) + mission acceptance (§6).**
 
 ## 9. Risks & open questions
-- **Embedding concurrency ceiling** is set by LM Studio / the 5090, not just config — sweep to
-  find it; watch for OOM / throughput collapse.
+- **Embedding concurrency ceiling** is set by vLLM/Sparky GPU memory and request
+  batching, not just config — sweep to find it; watch for OOM / throughput collapse.
 - **ChromaDB version choice**: pick the latest stable that's proven to recover from an unclean
   WAL backlog; pin client==server; re-verify on the test build.
 - **Cleaning aggressiveness**: reference-list/boilerplate stripping must be conservative —
@@ -503,17 +557,16 @@ commits to the full rebuild, once the evidence has stopped surprising us.
 - **Coarse size vs embedding precision**: larger coarse aids framing but blurs the vector —
   the level-eval decides, not intuition.
 - **Mission timing pressure** vs v0.6 timeline — the stopgap dedup is the release valve.
-- **Docling cost/coverage** — ML inference is slower than raw PyMuPDF; the full-rebuild budget
-  is the real risk. Mitigation: GPU on Bambino, OCR/table toggles save 50–60%, and extraction
-  (Docling, GPU) and embedding (LM Studio, GPU) are *sequential* pipeline stages so they don't
-  contend. Measure on the test corpus before committing; the seam means a faster fallback is
-  slottable if Docling proves too slow for a class of items.
-- **Determinism of the extractor** — stable IDs depend on stable text; Zotero-FT drifts when
-  Zotero re-indexes (a cause of past duplication), so it is not a default for a stable corpus.
-  Docling/PyMuPDF are pinned/deterministic.
-- **ARM64 build availability** — `chromadb_rust_bindings` and `torch`/Docling on ARM64+Blackwell
-  must have working wheels; verify in P0 before betting the port on them (LM Studio already proven
-  on Sparky, so embedding/rerank is de-risked).
+- **Extractor cost/coverage** — Zotero FT cache is cheap and usually passes; pdfminer
+  is the cheap fallback; Marker/OCR is the rare expensive backstop. Measure on the
+  test corpus before expanding the router. The seam means heavier extractors remain
+  slottable for specific leak classes.
+- **Determinism of the extractor** — stable IDs depend on stable text. Zotero FT is
+  now accepted as the zero-cost first candidate when it passes quality gates, but
+  provenance and quality reporting must make any drift/leak visible.
+- **ARM64 build availability** — `chromadb_rust_bindings` and any optional heavy extractor
+  stack must have working wheels; verify in the test build before betting the port on them
+  (vLLM is now the production embedding/rerank path to validate on Sparky).
 - **1 gbps source pull** — if sources aren't synced locally to Sparky, streaming the whole PDF
   corpus from RnR for the initial rebuild is LAN-capped (~100 MB/s); the local-sync decision (W9)
   avoids this. Deltas are small either way.
@@ -534,13 +587,15 @@ commits to the full rebuild, once the evidence has stopped surprising us.
 | 2026-06-13 | **Retire `parent_id`-as-navigation**; single working grain `mid`; `coarse` only if the eval shows broad-survey recall needs it |
 | 2026-06-13 | **Bet on Docling** as the single PDF extractor behind a one-method seam; do NOT pre-build a 3-tier stack; plug specific leaks (register-flagged) only where the nasty test corpus exposes them |
 | 2026-06-13 | Superseded 2026-06-15: Zotero-FT was initially rejected as a default extractor because of drift/stable-ID concerns, coverage gaps, and lack of control |
-| 2026-06-15 | **Extractor decision updated by Sparky bake-off**: route by quality gate instead of single Docling default. Zotero FT cache is the zero-cost first candidate; `pdfminer` is the cheap fallback/comparator; Marker is the primary local quality path on Hudson; Docling is an alternate quality path; PyMuPDF4LLM is candidate-only for born-digital PDFs. See `docs/EXTRACTION_BAKEOFF_AND_ROUTING.md` |
+| 2026-06-15 | **Extractor decision updated by Sparky bake-off**: route by quality gate instead of single Docling default. Zotero FT cache is the zero-cost first candidate; `pdfminer` is the cheap fallback/comparator; Marker/OCR is the rare expensive backstop for scans. Docling and PyMuPDF4LLM were evaluated and dropped from the active stack, but remain re-addable behind the future seam if a fixture class justifies them. See `docs/EXTRACTION_BAKEOFF_AND_ROUTING.md` |
 | 2026-06-13 | Add register provenance (`extractor`, `extract_quality`) + survey-by-source mode + `heading_path` in enumeration (W8) to recover navigation without chunk hierarchy |
 | 2026-06-13 | **Deployment moves to Sparky** (DGX Spark, ARM64 Linux, always-on, big unified memory) as Re-Searcher's home: Chroma + MCP serving + deltas + dev. Delivers "always-ready" + overnight missions with Bambino asleep |
 | 2026-06-13 | **Bambino = optional rebuild accelerator** only (borrow her 5090 for the one-time embed burst via `embedding.endpoint`); **RocknRolla = always-on Hermes + canonical source host** |
-| 2026-06-13 | LM Studio already headless/systemd on Sparky → no inference-server swap; blank-DB rebuild → no data migration |
-| 2026-06-13 | **Sources synced locally to Sparky** (Zotero storage+`zotero.sqlite`, Obsidian vault) so Docling reads raw PDFs locally (overnight-autonomous, not 1 gbps-limited); RnR-local-API access kept as the fallback |
+| 2026-06-13 | Superseded 2026-06-17: LM Studio already headless/systemd on Sparky was initially treated as sufficient inference infrastructure. vLLM later replaced it as the production embedding/rerank backend for performance; LM Studio remains an interactive/fallback endpoint. Blank-DB rebuild → no data migration still stands |
+| 2026-06-13 | **Sources synced locally to Sparky** (Zotero storage+`zotero.sqlite`, Obsidian vault) so PDF extractors read raw attachments locally (overnight-autonomous, not 1 gbps-limited); RnR-local-API access kept as the fallback |
 | 2026-06-13 | Port to ARM64 Linux (systemd not NSSM; config-driven paths) absorbed into the v0.6 rebuild; dev via Claude Code native on Sparky (or VS Code Remote-SSH) |
 | 2026-06-17 | **Annotations stay `atomic`** (not folded into recursive): one human-curated unit; oversize guard already backstops the truncation risk. Add `has_comment` flag (+ optional `color`/`type`) for screening. See W2 |
 | 2026-06-17 | **Register gains systematic-review selection metadata** (W8): `item_type`/"kind" (needs new extraction — resolve `typeName`), `doi`, `abstract`, `tags`, `venue`, `language`. Register is the filter plane for survey→filter→re-ask; (2)–(5) already extracted, just lifted into `sources`. Spec: `docs/SPEC_W8_REGISTER_METADATA.md` |
 | 2026-06-17 | **Register is the index ledger** (W10): "what needs processing" = diff(source current state, register per-unit fingerprints); detection in adapters, decision in register/planner, Chroma follows. Retire `zotero_delta_state.json` (version → `meta` cursor); subsume `vault_files`. Granular Zotero updates (the Jung-note case) become a property of the ledger key, not a special case. Spec + phased plan: `docs/SPEC_REGISTER_AS_INDEX_LEDGER.md` |
+| 2026-06-17 | **vLLM becomes production inference**: Qwen3-Embedding-0.6B via vLLM is the production embedder; vLLM `/rerank` cross-encoder is the production rerank path. Keep `context_length`/`max_model_len` above the oversize guard. |
+| 2026-06-17 | **Remaining v0.6 action sequence recorded**: single-grain chunking, survey-by-source mode, extraction seam/provenance, structured failure reporting, fsync-durable state writes, and ledger parity suite before sidecar retirement. See `docs/V0.6_REMAINING_ACTIONS_HANDOFF.md`. |
