@@ -443,6 +443,7 @@ class ResearchRAGPipeline:
                     self._save_source_hash()
                     self._persist_vault_state(obsidian_delta)
                     self._refresh_registry()
+                    self._seed_ledger_from_world()
                     print("[INFO] No documents to re-index; deletions (if any) have been applied.")
                 else:
                     print("[WARNING] No documents to index!")
@@ -505,6 +506,9 @@ class ResearchRAGPipeline:
             # registry aggregates in step with this run's writes.
             self._persist_vault_state(obsidian_delta)
             self._refresh_registry()
+            # Mirror the indexed world into the ledger so ledger.shadow parity
+            # is meaningful on the next run (legacy path doesn't self-record).
+            self._seed_ledger_from_world()
 
             # Stage 4: Complete
             self.progress_display.set_stage(IndexingStage.COMPLETE, 4, 4)
@@ -1142,6 +1146,38 @@ class ResearchRAGPipeline:
                 stage="registry_refresh",
                 remediation="registry",
                 message="Registry aggregate refresh failed",
+                exception=e,
+            )
+
+    def _seed_ledger_from_world(self) -> None:
+        """Mirror current source state into the ledger for indexed identities.
+
+        The ledger.execute path records units as it runs; the legacy delta path
+        does not. Without this, a legacy-mode run leaves `index_units` empty, so
+        `ledger.shadow` reconciles against an empty ledger and reports the whole
+        corpus as 'create' — useless for parity. Recording the current
+        enumerate_state for identities that have chunks makes shadow parity
+        meaningful on the next run. Call after `_refresh_registry()` so the
+        indexed-identity set is current. No-op under ledger.execute (that path
+        returns before reaching here).
+        """
+        try:
+            indexed = self.registry.indexed_identities()
+            units = [
+                unit
+                for source in self.sources
+                if source.is_enabled()
+                for unit in source.enumerate_state().values()
+                if (unit.identity_field, unit.identity_value) in indexed
+            ]
+            self._record_ledger_unit_states(units)
+            print(f"[INFO] Ledger mirror updated for {len(units)} indexed units.")
+        except Exception as e:
+            print(f"[WARN] Ledger seed-from-world failed: {e}")
+            self._report_exception(
+                stage="ledger_seed",
+                remediation="ledger",
+                message="Ledger seed-from-world failed",
                 exception=e,
             )
 

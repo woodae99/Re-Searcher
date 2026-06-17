@@ -10,6 +10,7 @@ from pathlib import Path
 from src.indexing import DocumentStatus, IndexingProgress
 from src.pipeline import ResearchRAGPipeline
 from src.registry import SourceRegistry
+from src.sources.base import UnitState
 from src.sources.obsidian import ObsidianSource
 from src.sources import zotero as zotero_module
 from src.sources.zotero import ZoteroSource
@@ -48,6 +49,45 @@ def _make_vault(tmp_path, files):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     return vault
+
+
+class _FakeLedgerSource:
+    """Minimal source exposing enumerate_state for ledger-seed tests."""
+
+    def __init__(self, units):
+        self._units = units
+
+    def is_enabled(self):
+        return True
+
+    def enumerate_state(self):
+        return {u.unit_id: u for u in self._units}
+
+
+def test_seed_ledger_from_world_records_only_indexed_identities(tmp_path):
+    pipeline = _make_pipeline(tmp_path)
+
+    # Z1 has chunks (indexed); Z2 has none (e.g. failed/empty).
+    pipeline.registry.record_chunks(
+        ["c1"],
+        [{"source_type": "zotero_fulltext", "zotero_key": "Z1",
+          "source_id": "zotero-Z1-attachment-1", "chunk_level": "mid", "chunk_index": 0}],
+    )
+    pipeline.registry.refresh_sources()
+
+    pipeline.sources = [
+        _FakeLedgerSource([
+            UnitState("zotero:Z1:meta", "zotero_key", "Z1", "parent_meta", "mod:1"),
+            UnitState("zotero:Z1:attachment:A1", "zotero_key", "Z1", "attachment", "hash:x"),
+            UnitState("zotero:Z2:meta", "zotero_key", "Z2", "parent_meta", "mod:1"),
+        ])
+    ]
+
+    pipeline._seed_ledger_from_world()
+
+    states = pipeline.registry.get_unit_states()
+    # Z1 units (incl. parent_meta) recorded; the unindexed Z2 unit is not.
+    assert set(states) == {"zotero:Z1:meta", "zotero:Z1:attachment:A1"}
 
 
 # ---------------------------------------------------------------- deletes

@@ -486,6 +486,20 @@ class SourceRegistry:
                 )
             }
 
+    def indexed_identities(self) -> set:
+        """Source identities that currently have chunks (i.e. are in the index).
+
+        Used to seed the ledger from world state after a legacy-mode run: only
+        identities with chunks are recorded, so failed/empty items are not
+        marked as indexed and `parent_meta` units (which produce no chunks of
+        their own) are still covered via their parent identity.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT identity_field, identity_value FROM sources WHERE total_chunks > 0"
+            ).fetchall()
+        return {(row["identity_field"], row["identity_value"]) for row in rows}
+
     def record_unit_states(
         self,
         units: List[Dict[str, Any]],
