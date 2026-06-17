@@ -269,7 +269,9 @@ indexing:
   ledger:
     # Behavior-changing P3 path: execute updates from the register-ledger
     # work plan instead of the legacy Zotero sidecar / vault snapshot delta.
-    execute: true
+    # Kept OFF until shadow parity (below) is confirmed on a real run; flip to
+    # true at the chapter-4 cutover, then retire the sidecar. Matches code default.
+    execute: false
     # P2 parity gate: compute the register-ledger work plan and log it beside
     # the current delta path, without letting it drive execution yet.
     shadow: true

@@ -11,6 +11,53 @@ implemented behind `indexing.ledger.execute`**, with important cleanup/acceptanc
 independently shippable. Current focused command:
 `.venv/bin/python -m pytest tests/unit --ignore=tests/unit/test_mcp_server.py -q`.
 
+---
+
+## ⮕ CODEX — START HERE (state as of 2026-06-17, commit `5339015`)
+
+**Everything below is on `v0.6-rebuild` and committed.** Run the full check first to confirm a green
+baseline (expect **221 passed**; the **only** acceptable failures are the 7 documented ones in
+`tests/test_rerank_json.py` + `tests/test_resumable_indexing.py`, which need an OpenAI-compatible API
+key — ignore them):
+`.venv/bin/python -m pytest tests/ --ignore=tests/integration --ignore=tests/pipeline -q`
+
+**Done & committed**
+- P0 ledger schema + register methods; P1 adapter `enumerate_state`; P2 `src/reconcile.py` + shadow
+  parity wired into `pipeline.py`; P3 granular execution behind `indexing.ledger.execute`.
+- vLLM embedding backend + cross-encoder rerank are now integrated on this branch (was a separate
+  branch; merged). Embedder `context_length`/vLLM `max_model_len` = 8192 (must exceed the 7000
+  oversize guard — do not lower).
+- Repo is consolidated: only `main` + `v0.6-rebuild` exist; stale `claude/*` branches and worktrees
+  removed.
+
+**Decisions already made (do not relitigate)**
+- `indexing.ledger.execute` stays **`false`** (legacy delta is primary; the reconciler runs in
+  shadow). The cutover to `true` + sidecar retirement happens **only after** the chapter-4 mission
+  validates shadow parity — that is **not** a Codex task; leave the flag and the sidecar alone.
+- Annotation `color`/`type` capture is **dropped** (single-colour corpus). Only `has_comment` (P5).
+
+**Your tasks, in order: P5 then P4** (P5 is lower-risk and unblocks the chapter-4 metadata needs)
+1. **P5 — W8 selection metadata + `has_comment`** (§ "P5" below + `docs/SPEC_W8_REGISTER_METADATA.md`,
+   which is authoritative for the column/extraction/filter details). Note: `chunks` is already at
+   `SCHEMA_VERSION = 3` with child-key columns, so the `sources` selection columns bump to **4**.
+   This shares the `record_chunks`/`list_sources_payload` surface — keep CLI/MCP parity (add the
+   same filters to `scripts/sources.py` and `src/mcp_server.py`, format in `src/mcp_formatters/`).
+2. **P4 — ledger drift observability** (§ "P4" below). Prioritise the drift report in
+   `index_status` / `scripts/sources.py status`; the `build_registry.py` backfill of `index_units`
+   is **optional** (the fresh v0.6 build populates the ledger natively) — only do it if time allows.
+
+**Hard rules (from `CLAUDE.md`)**
+- Any Chroma write/delete updates the registry **and** the ledger in the same step.
+- Every new config knob lands in `config.example.yaml` with a default and is printed by preflight.
+- Thin MCP/CLI wrappers; business logic stays in pipeline/registry; keep CLI↔MCP parity.
+- Add tests for each phase; do not mark a phase done with failing tests. Do not commit secrets or
+  the gitignored `output/`/Chroma data. Commit message trailer:
+  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` is the house style for AI commits — use
+  your own attribution as appropriate, but keep messages scoped per phase.
+
+**When done**: leave the work committed on `v0.6-rebuild` with a clean tree and green suite; Colin
+will return here for a review.
+
 Known test caveats as of 2026-06-17:
 - `tests/unit/test_mcp_server.py` times out independently after its first test in this workspace.
 - Older broad-suite caveats still apply for API-key-dependent tests outside `tests/unit`
