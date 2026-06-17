@@ -12,7 +12,7 @@ import html2text
 import requests
 
 from ..extract_text import extract_text
-from .base import DataSource, Document, ProgressCallback
+from .base import DataSource, Document, ProgressCallback, UnitState
 
 
 @dataclass
@@ -931,6 +931,146 @@ class ZoteroSource(DataSource):
             return parent if isinstance(parent, str) and parent else item_key
         except Exception:
             return None
+
+    def enumerate_state(self) -> Dict[str, UnitState]:
+        """Enumerate current Zotero units → {unit_id: UnitState}.
+
+        One ``parent_meta`` unit per top-level item plus one unit per child
+        note / attachment / annotation, each rolled up to the parent's
+        ``zotero_key`` (the source-identity rule). Fingerprints:
+        - parent_meta / note / annotation → item ``dateModified``
+        - attachment → ``storageHash`` when present, else ``mtime:size`` of the
+          resolved file (storageHash covers only ~43% of attachments, and
+          storageModTime shares its gaps — see the index-ledger spec).
+
+        Read-only; uses set-based queries so the whole library is enumerated in
+        a handful of round-trips, not per-item.
+        """
+        if not self.validate_config():
+            return {}
+        conn = self._get_db_connection()
+        if not conn:
+            return {}
+
+        units: Dict[str, UnitState] = {}
+        try:
+            cursor = conn.cursor()
+
+            # parent_meta: top-level, non-deleted items
+            cursor.execute(
+                """
+                SELECT i.key AS key, i.dateModified AS dm
+                FROM items i
+                JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+                WHERE it.typeName NOT IN ('attachment', 'note', 'annotation')
+                  AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                """
+            )
+            for row in cursor.fetchall():
+                key = row["key"]
+                if not key:
+                    continue
+                unit_id = f"zotero:{key}:meta"
+                units[unit_id] = UnitState(
+                    unit_id, "zotero_key", key, "parent_meta",
+                    f"mod:{row['dm'] or ''}",
+                )
+
+            # notes (child note's own dateModified)
+            cursor.execute(
+                """
+                SELECT parent.key AS parent_key, child.key AS child_key,
+                       child.dateModified AS dm
+                FROM itemNotes n
+                JOIN items child ON child.itemID = n.itemID
+                JOIN items parent ON parent.itemID = n.parentItemID
+                WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                """
+            )
+            for row in cursor.fetchall():
+                pk, ck = row["parent_key"], row["child_key"]
+                if not pk or not ck:
+                    continue
+                unit_id = f"zotero:{pk}:note:{ck}"
+                units[unit_id] = UnitState(
+                    unit_id, "zotero_key", pk, "note", f"mod:{row['dm'] or ''}",
+                )
+
+            # annotations (hang off attachments; attributed to the parent item)
+            cursor.execute(
+                """
+                SELECT parent.key AS parent_key, child.key AS child_key,
+                       child.dateModified AS dm
+                FROM itemAnnotations an
+                JOIN items child ON child.itemID = an.itemID
+                JOIN itemAttachments att ON att.itemID = an.parentItemID
+                JOIN items parent ON parent.itemID = att.parentItemID
+                WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND att.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                """
+            )
+            for row in cursor.fetchall():
+                pk, ck = row["parent_key"], row["child_key"]
+                if not pk or not ck:
+                    continue
+                unit_id = f"zotero:{pk}:annotation:{ck}"
+                units[unit_id] = UnitState(
+                    unit_id, "zotero_key", pk, "annotation", f"mod:{row['dm'] or ''}",
+                )
+
+            # attachments (composite fingerprint: storageHash else file mtime:size)
+            cursor.execute(
+                """
+                SELECT parent.key AS parent_key, child.key AS child_key,
+                       ia.storageHash AS storage_hash, ia.path AS path
+                FROM itemAttachments ia
+                JOIN items child ON child.itemID = ia.itemID
+                JOIN items parent ON parent.itemID = ia.parentItemID
+                WHERE child.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND parent.itemID NOT IN (SELECT itemID FROM deletedItems)
+                  AND ia.path IS NOT NULL
+                """
+            )
+            for row in cursor.fetchall():
+                pk, ck = row["parent_key"], row["child_key"]
+                if not pk or not ck:
+                    continue
+                fingerprint = self._attachment_fingerprint(
+                    ck, row["storage_hash"], row["path"]
+                )
+                if fingerprint is None:
+                    # No content hash and no resolvable local file → not
+                    # indexable; omit so it never appears as a phantom unit.
+                    continue
+                unit_id = f"zotero:{pk}:attachment:{ck}"
+                units[unit_id] = UnitState(
+                    unit_id, "zotero_key", pk, "attachment", fingerprint,
+                )
+
+            return units
+        finally:
+            conn.close()
+
+    def _attachment_fingerprint(
+        self, attachment_key: str, storage_hash: Optional[str], path: Optional[str]
+    ) -> Optional[str]:
+        """Composite attachment fingerprint; None when nothing identifies content."""
+        if storage_hash:
+            return f"hash:{storage_hash}"
+        if not path:
+            return None
+        if path.startswith("storage:"):
+            filename = path.split(":", 1)[1]
+            file_path = self.storage_dir / attachment_key / filename
+        else:
+            file_path = Path(path).expanduser()
+        try:
+            stat = file_path.stat()
+        except OSError:
+            return None
+        return f"mtime:{stat.st_mtime:.6f}-{stat.st_size}"
 
     def _process_item(self, conn: sqlite3.Connection, item_id: int) -> Iterator[Document]:
         """Process a single Zotero item and yield documents."""

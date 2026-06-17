@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _PLACEHOLDER_TITLES = {"", "Untitled"}
 _PLACEHOLDER_AUTHORS = {"", "Unknown"}
@@ -131,6 +131,20 @@ class SourceRegistry:
                     last_indexed_at TEXT DEFAULT '',
                     PRIMARY KEY (identity_field, identity_value)
                 );
+                CREATE TABLE IF NOT EXISTS index_units (
+                    unit_id TEXT PRIMARY KEY,
+                    identity_field TEXT NOT NULL,
+                    identity_value TEXT NOT NULL,
+                    unit_kind TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    indexed_grain TEXT DEFAULT '',
+                    indexed_at TEXT DEFAULT '',
+                    chunk_count INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_units_identity
+                    ON index_units(identity_field, identity_value);
+                CREATE INDEX IF NOT EXISTS idx_units_kind
+                    ON index_units(unit_kind);
                 """
             )
             existing = {
@@ -140,8 +154,12 @@ class SourceRegistry:
                 conn.execute(
                     "ALTER TABLE sources ADD COLUMN collections TEXT DEFAULT ''"
                 )
+            # Upsert (not INSERT OR IGNORE) so the version reflects the migrations
+            # actually applied: the additive CREATE/ALTER statements above run on
+            # every init, so an existing v1 registry is now at SCHEMA_VERSION.
             conn.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (str(SCHEMA_VERSION),),
             )
 
@@ -301,6 +319,115 @@ class SourceRegistry:
 
         return len(chunk_rows)
 
+    # --------------------------------------------------------------- ledger
+    #
+    # The index ledger (index_units) records, per smallest-independently-changing
+    # unit, the source-side fingerprint it was last indexed at. It is the
+    # authority for reconciliation: "what needs processing" is a diff between a
+    # source's current state (enumerated by the adapter) and these rows. The
+    # register treats fingerprints as opaque strings — it compares them, never
+    # parses them — so it stays source-agnostic. See
+    # docs/SPEC_REGISTER_AS_INDEX_LEDGER.md.
+
+    def get_unit_states(self) -> Dict[str, str]:
+        """Return the recorded ledger as {unit_id: source_fingerprint}."""
+        with self._connect() as conn:
+            return {
+                row["unit_id"]: row["source_fingerprint"]
+                for row in conn.execute(
+                    "SELECT unit_id, source_fingerprint FROM index_units"
+                )
+            }
+
+    def record_unit_states(
+        self,
+        units: List[Dict[str, Any]],
+        meta_updates: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """Upsert ledger rows for indexed units, optionally with meta in the same txn.
+
+        Each unit dict carries: unit_id, identity_field, identity_value,
+        unit_kind, source_fingerprint, and optionally indexed_grain,
+        indexed_at, chunk_count. A unit should be recorded only after its
+        vectors are committed to Chroma, so an interrupted run re-plans the
+        un-recorded unit (idempotent by stable id).
+        """
+        rows: List[Tuple] = []
+        for unit in units:
+            unit_id = str(unit.get("unit_id") or "")
+            if not unit_id:
+                continue
+            rows.append(
+                (
+                    unit_id,
+                    str(unit.get("identity_field") or ""),
+                    str(unit.get("identity_value") or ""),
+                    str(unit.get("unit_kind") or "unknown"),
+                    str(unit.get("source_fingerprint") or ""),
+                    str(unit.get("indexed_grain") or ""),
+                    str(unit.get("indexed_at") or ""),
+                    int(unit.get("chunk_count") or 0),
+                )
+            )
+
+        if not rows and not meta_updates:
+            return 0
+
+        with self._connect() as conn:
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO index_units(
+                        unit_id, identity_field, identity_value, unit_kind,
+                        source_fingerprint, indexed_grain, indexed_at, chunk_count
+                    ) VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(unit_id) DO UPDATE SET
+                        identity_field = excluded.identity_field,
+                        identity_value = excluded.identity_value,
+                        unit_kind = excluded.unit_kind,
+                        source_fingerprint = excluded.source_fingerprint,
+                        indexed_grain = excluded.indexed_grain,
+                        indexed_at = excluded.indexed_at,
+                        chunk_count = excluded.chunk_count
+                    """,
+                    rows,
+                )
+            for key, value in (meta_updates or {}).items():
+                conn.execute(
+                    "INSERT INTO meta(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, str(value)),
+                )
+        return len(rows)
+
+    def delete_units(self, unit_ids: List[str]) -> int:
+        """Remove ledger rows by unit id (mirrors a surgical Chroma delete)."""
+        ids = [str(uid) for uid in unit_ids if uid]
+        if not ids:
+            return 0
+        deleted = 0
+        with self._connect() as conn:
+            for start in range(0, len(ids), 500):
+                batch = ids[start : start + 500]
+                placeholders = ",".join("?" for _ in batch)
+                cursor = conn.execute(
+                    f"DELETE FROM index_units WHERE unit_id IN ({placeholders})",
+                    tuple(batch),
+                )
+                deleted += cursor.rowcount
+        return deleted
+
+    def delete_units_for_source(
+        self, identity_field: str, identity_value: str
+    ) -> int:
+        """Remove all ledger rows for one source identity (full-source delete)."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM index_units WHERE identity_field = ? AND identity_value = ?",
+                (identity_field, str(identity_value)),
+            )
+        return cursor.rowcount
+
     def delete_source_chunks(self, identity_field: str, identity_value: str) -> int:
         """Remove all chunk rows for one source (mirrors a Chroma delete_where)."""
         with self._connect() as conn:
@@ -310,6 +437,10 @@ class SourceRegistry:
             )
             conn.execute(
                 "DELETE FROM sources WHERE identity_field = ? AND identity_value = ?",
+                (identity_field, str(identity_value)),
+            )
+            conn.execute(
+                "DELETE FROM index_units WHERE identity_field = ? AND identity_value = ?",
                 (identity_field, str(identity_value)),
             )
         return cursor.rowcount
@@ -327,6 +458,10 @@ class SourceRegistry:
             )
             conn.execute(
                 "DELETE FROM sources WHERE identity_field = ? AND identity_value LIKE ?",
+                (identity_field, like_pattern),
+            )
+            conn.execute(
+                "DELETE FROM index_units WHERE identity_field = ? AND identity_value LIKE ?",
                 (identity_field, like_pattern),
             )
         return cursor.rowcount
@@ -439,6 +574,7 @@ class SourceRegistry:
             conn.execute("DELETE FROM chunks")
             conn.execute("DELETE FROM sources")
             conn.execute("DELETE FROM vault_files")
+            conn.execute("DELETE FROM index_units")
             conn.execute(
                 "DELETE FROM meta WHERE key NOT IN ('schema_version')"
             )

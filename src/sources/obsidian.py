@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set
 
 import yaml
 
-from .base import DataSource, Document, ProgressCallback
+from .base import DataSource, Document, ProgressCallback, UnitState
 
 
 class ObsidianSource(DataSource):
@@ -152,6 +152,26 @@ class ObsidianSource(DataSource):
         """Stable content-version string from a (mtime, size) state."""
         mtime, size = state
         return f"{mtime:.6f}-{size}"
+
+    def enumerate_state(self) -> Dict[str, UnitState]:
+        """One ``vault_file`` unit per markdown note, fingerprinted by mtime:size.
+
+        Mirrors the source-identity rule: a note's identity is
+        ``source_id = obsidian-<relative_path>``; its unit_id is
+        ``obsidian:<relative_path>``.
+        """
+        units: Dict[str, UnitState] = {}
+        for relative, state in self.get_file_states().items():
+            identity_value = f"obsidian-{relative}"
+            unit_id = f"obsidian:{relative}"
+            units[unit_id] = UnitState(
+                unit_id=unit_id,
+                identity_field="source_id",
+                identity_value=identity_value,
+                unit_kind="vault_file",
+                fingerprint=self.content_version_for_state(state),
+            )
+        return units
 
     def _find_markdown_files(
         self, include_folders: List[str], exclude_patterns: List[str]

@@ -231,6 +231,104 @@ def test_audit_duplicates_detects_double_slots(tmp_path):
     assert report["affected_sources"] == 1
 
 
+def _unit(unit_id, key, kind, fingerprint, **extra):
+    unit = {
+        "unit_id": unit_id,
+        "identity_field": "zotero_key",
+        "identity_value": key,
+        "unit_kind": kind,
+        "source_fingerprint": fingerprint,
+    }
+    unit.update(extra)
+    return unit
+
+
+def test_ledger_roundtrip_and_upsert(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    assert registry.get_unit_states() == {}
+
+    n = registry.record_unit_states(
+        [
+            _unit("zotero-Z1-attachment-1", "Z1", "attachment", "hashA"),
+            _unit("zotero-Z1-note-9", "Z1", "note", "2026-06-01"),
+        ]
+    )
+    assert n == 2
+    assert registry.get_unit_states() == {
+        "zotero-Z1-attachment-1": "hashA",
+        "zotero-Z1-note-9": "2026-06-01",
+    }
+
+    # Re-recording the same unit_id with a new fingerprint updates in place.
+    registry.record_unit_states([_unit("zotero-Z1-attachment-1", "Z1", "attachment", "hashB")])
+    states = registry.get_unit_states()
+    assert states["zotero-Z1-attachment-1"] == "hashB"
+    assert len(states) == 2
+
+
+def test_ledger_meta_cursor_roundtrip(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_unit_states(
+        [_unit("zotero-Z1-note-1", "Z1", "note", "v1")],
+        meta_updates={"zotero_item_version": "4321"},
+    )
+    assert registry.get_meta("zotero_item_version") == "4321"
+
+
+def test_delete_units_and_for_source(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_unit_states(
+        [
+            _unit("zotero-Z1-attachment-1", "Z1", "attachment", "h1"),
+            _unit("zotero-Z1-note-9", "Z1", "note", "n9"),
+            _unit("zotero-Z2-attachment-1", "Z2", "attachment", "h2"),
+        ]
+    )
+
+    assert registry.delete_units(["zotero-Z1-note-9", "missing-id"]) == 1
+    assert "zotero-Z1-note-9" not in registry.get_unit_states()
+
+    assert registry.delete_units_for_source("zotero_key", "Z1") == 1
+    remaining = registry.get_unit_states()
+    assert set(remaining) == {"zotero-Z2-attachment-1"}
+
+
+def test_delete_source_chunks_also_clears_ledger(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(["c1"], [_zotero_chunk("c1", "Z1")["metadata"]])
+    registry.record_unit_states([_unit("zotero-Z1-attachment-1", "Z1", "attachment", "h1")])
+
+    registry.delete_source_chunks("zotero_key", "Z1")
+    assert registry.get_unit_states() == {}
+
+
+def test_reset_clears_ledger(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_unit_states([_unit("zotero-Z1-note-1", "Z1", "note", "v1")])
+    registry.reset()
+    assert registry.get_unit_states() == {}
+
+
+def test_additive_migration_adds_ledger_to_v1_registry(tmp_path):
+    """An existing v1 registry (no index_units) gains the table on re-open."""
+    import sqlite3
+
+    db_path = tmp_path / "r.sqlite"
+    SourceRegistry(db_path)  # creates current schema
+
+    # Simulate a pre-ledger (v1) database: drop the table, mark schema_version=1.
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute("DROP TABLE index_units")
+        conn.execute("UPDATE meta SET value='1' WHERE key='schema_version'")
+
+    # Re-opening runs the additive migration.
+    reopened = SourceRegistry(db_path)
+    assert reopened.get_meta("schema_version") == "2"
+    # Round-trips, proving the table is back.
+    reopened.record_unit_states([_unit("zotero-Z1-note-1", "Z1", "note", "v1")])
+    assert reopened.get_unit_states() == {"zotero-Z1-note-1": "v1"}
+
+
 def test_list_sources_collection_filter(tmp_path):
     registry = SourceRegistry(tmp_path / "r.sqlite")
     in_process = _zotero_chunk("c1", "Z1")["metadata"]

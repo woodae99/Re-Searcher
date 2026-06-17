@@ -94,7 +94,9 @@ so v0.6 splits the system into two planes:
   navigational genealogy baked in.
 - **Control/navigation plane (registry)** — "smart": source identity, source↔chunk membership
   and ordering, selection metadata (title/authors/year/kind/collection/counts), per-source
-  structure outline, and extractor/quality provenance.
+  structure outline, extractor/quality provenance, **and sync/reconciliation state — the
+  register is the *index ledger* that decides what needs (re)processing; Chroma follows** (see
+  `docs/SPEC_REGISTER_AS_INDEX_LEDGER.md`).
 
 The user-facing **functional profile is unchanged** ("broadly survey → select candidates →
 drill in"); only the *means* change. `parent_id`-as-navigation is **retired** (the register is
@@ -131,8 +133,12 @@ cutover gate.
   without touching the pipeline (see W1).
 - **Determinism & resumability**: stable IDs, reproducible ordering, checkpointed state
   (now fsync-durable). Extractor output must be deterministic — a precondition for stable IDs.
-- **Registry is the source of truth** for source/chunk identity, genealogy, navigation, and
-  provenance — now elevated from mirror to control plane.
+- **Registry is the source of truth** for source/chunk identity, genealogy, navigation,
+  provenance, **and sync state** — now elevated from mirror to control plane. It is the **index
+  ledger**: an update run computes its work as a diff between each source's current state
+  (enumerated by the adapters) and the register's recorded per-unit fingerprints. Detection lives
+  in the adapters, the decision lives in the register/planner, Chroma only executes the result
+  (W10; `docs/SPEC_REGISTER_AS_INDEX_LEDGER.md`).
 - **Modularity for maintenance**: a new chunker / cleaner / extractor / source must not require
   touching the pipeline core; register via config + a small interface.
 - **Agile / evidence-led**: where a design choice is genuinely open (chunk grain, survey
@@ -269,7 +275,7 @@ whether a backstop is needed and for what.
 Now that the register owns genealogy (§3a), chunking is *only* a retrieval-grain decision —
 and an **open one, settled by iteration** (§3d), not committed up front:
 - **Working hypothesis: `mid` is the single working grain** (evidence/quote), `atomic` for
-  annotations (unchanged). `fine` retired (its cost/benefit failed in pilot-02).
+  annotations (unchanged — see annotation note below). `fine` retired (its cost/benefit failed in pilot-02).
   **`parent_id`-as-navigation retired** — keep `chunk_index` ordering and `heading_path`; the
   register + `get_source_chunks`/`get_chunk_context` provide all navigation. This is the
   *starting* configuration to test, not a final decision — the loop's recall/drill needs decide.
@@ -292,6 +298,19 @@ and an **open one, settled by iteration** (§3d), not committed up front:
 - **Acceptance**: eval confirms `mid` is the best quotable grain and that "mid + register
   aggregation" recovers survey (or that coarse is justified); no chunk exceeds the oversize
   guard; rerun doesn't balloon counts; no `fine`, no `parent_id`-navigation.
+- **Annotation chunking decision *(confirmed 2026-06-17)*: keep `atomic`; do not fold into
+  recursive.** An annotation is one human-curated unit — a highlight (`an.text`) plus optionally
+  Colin's own comment (`an.comment`) — and is the highest-value text in the corpus for sense
+  classification. Recursive splitting could sever a highlight from its comment; folding gains
+  nothing for normal short annotations (each is its own `Document`, so recursive would only act
+  *within* one). The lone risk — a giant annotation truncated at the embedder — is already covered:
+  the oversize guard runs on *all* chunks post-router (`pipeline.py:641-642`) and splits anything
+  over `max_tokens_per_chunk`. Atomic is a deliberate second *grain* (variable size, one unit), not
+  a second hierarchy *level* — not the `parent_id` genealogy v0.6 retired. Two small refinements
+  (see implementation spec): (a) add a **`has_comment`** flag so screening can filter annotations
+  that carry Colin's commentary vs bare highlights; (b) optionally capture annotation **`color`/`type`**
+  if color-coding is used as a coding scheme (currently the query pulls only `text, comment,
+  sortIndex, pageLabel`).
 
 ### W3 — Throughput  *(enable + tune; machinery already exists)*
 The infrastructure is built, just conservative — this is largely a config + validation task,
@@ -344,8 +363,31 @@ The support the two-plane model needs so nothing in the functional profile regre
   "drill into section X" = enumerate-by-`heading_path`; optionally a per-source outline view.
 - **Register provenance columns**: `extractor`, `extract_quality` (+ optional structure outline)
   — powers the W1 leak-tracking and per-source re-extraction.
+- **Register selection metadata for systematic review** *(added 2026-06-17)*: the register is the
+  **control/filter plane** for the loop's survey→filter→re-ask steps (§3d steps 1, 2, 4), so the
+  fields those steps filter on must live *in the register*, not buried in Chroma chunk metadata
+  (where filtering = a collection scan). The current `sources` table carries only
+  title/authors/year/backlink/collections — under-representative for systematic review. Add, in
+  priority order:
+  1. **`item_type`** ("kind": book / article / chapter / thesis / report) — the spec's §3b parity
+     map already promises "kind" as a register selection field, but it is **not currently even
+     extracted**: `_get_item_metadata` queries `itemTypeID` but never resolves `typeName` into
+     metadata. Fix in *both* extraction (resolve `typeName`) and the register.
+  2. **`doi`** — canonical systematic-review dedup + citation key (PRISMA dedup runs on DOI).
+  3. **`abstract`** (Zotero `abstractNote`) — title/abstract screening is PRISMA stage 1; directly
+     powers the survey/filter steps. Larger than the rest, but one row per source in SQLite is fine.
+  4. **`tags`** — Colin's own manual coding/screening labels; already extracted into metadata
+     (`zotero.py`) but not lifted to the register. Store comma-joined, like `collections`.
+  5. **`venue`** (`publicationTitle`) and **`language`** — standard inclusion/exclusion filters.
+
+  All of (2)–(5) are *already extracted* into Chroma chunk metadata via the `**fields` spread in
+  `_get_item_metadata`; the work is lifting them into the register `sources` table in
+  `record_chunks`, not new extraction. Only `item_type` needs an extraction change. **Do not** dump
+  all `**fields` blindly — keep ISBN/ISSN/pages/volume in chunk metadata; the register gets the
+  systematic-review filter set only. Full implementation spec: `docs/SPEC_W8_REGISTER_METADATA.md`.
 - **Acceptance**: the §3b parity table is fully satisfiable with these in place; the mission's
-  survey→select→drill runs end-to-end with no reliance on `coarse` or `parent_id`.
+  survey→select→drill runs end-to-end with no reliance on `coarse` or `parent_id`; a register
+  source view can be filtered by `item_type`, `doi`, `language`, `tags` without a Chroma scan.
 
 ### W9 — Deployment & host: Sparky as home  *(new; decided 2026-06-13)*
 **Re-Searcher v0.6 moves off Bambino (Windows / RTX 5090 workstation) to Sparky (NVIDIA DGX
@@ -383,6 +425,30 @@ missions run overnight with Bambino asleep.
 - **Acceptance**: Chroma + MCP HTTP come up as always-ready `systemd` services on Sparky;
   Hermes-on-RocknRolla runs a mission end-to-end with Bambino powered off; a delta ingest runs
   fully on Sparky; the big-rebuild borrow-Bambino path works via config alone.
+
+### W10 — Register as index ledger: reconciliation-driven updates  *(new; decided 2026-06-17)*
+Finishes §3a's logic: the register owns **sync state**, not just identity/navigation. "What needs
+processing" becomes a **diff between each source's current state and the register's recorded
+per-unit fingerprints**, not an event tracked in a sidecar file. Detection stays in the adapters,
+the decision moves to the register + a source-agnostic planner, Chroma strictly follows.
+
+- **Ledger**: a register `index_units` table records, per smallest-independently-changing unit
+  (Zotero `parent_meta`/`note`/`attachment`/`annotation`; Obsidian `vault_file`), the source-side
+  fingerprint it was indexed at (`dateModified`, attachment `storageHash`/`storageModTime`,
+  fulltext version, vault `mtime:size`). Fingerprints are **opaque to the register** — compared,
+  never parsed — so the register stays source-agnostic.
+- **Retire `zotero_delta_state.json`**: its library-version watermark becomes a fast-path *cursor*
+  in register `meta`; the per-unit fingerprints are the correctness authority. `vault_files` (which
+  already implements this pattern for Obsidian) is subsumed into `index_units`.
+- **Granular updates fall out for free**: adding a note/annotation/tag to a 12,000-page item
+  re-embeds only the changed unit, never the unchanged fulltext (the prior "sub-item precision"
+  problem is a *consequence* of the ledger key, not a special case). Metadata-only changes
+  (tags/collections) take a Chroma `update`, not a re-embed.
+- **Parity gate**: the reconciler must reproduce today's change set (parent grain) in shadow on the
+  test corpora before granular execution is switched on.
+- **Acceptance**: an update run decides its work without querying Chroma; the Jung-note case skips
+  the fulltext re-embed; deletions are detected from ledger-minus-world without `/deleted`; the
+  sidecar file is gone. Full spec + phased plan: `docs/SPEC_REGISTER_AS_INDEX_LEDGER.md`.
 
 ## 6. Acceptance scenario — the process-in-coaching mission
 
@@ -475,3 +541,6 @@ commits to the full rebuild, once the evidence has stopped surprising us.
 | 2026-06-13 | LM Studio already headless/systemd on Sparky → no inference-server swap; blank-DB rebuild → no data migration |
 | 2026-06-13 | **Sources synced locally to Sparky** (Zotero storage+`zotero.sqlite`, Obsidian vault) so Docling reads raw PDFs locally (overnight-autonomous, not 1 gbps-limited); RnR-local-API access kept as the fallback |
 | 2026-06-13 | Port to ARM64 Linux (systemd not NSSM; config-driven paths) absorbed into the v0.6 rebuild; dev via Claude Code native on Sparky (or VS Code Remote-SSH) |
+| 2026-06-17 | **Annotations stay `atomic`** (not folded into recursive): one human-curated unit; oversize guard already backstops the truncation risk. Add `has_comment` flag (+ optional `color`/`type`) for screening. See W2 |
+| 2026-06-17 | **Register gains systematic-review selection metadata** (W8): `item_type`/"kind" (needs new extraction — resolve `typeName`), `doi`, `abstract`, `tags`, `venue`, `language`. Register is the filter plane for survey→filter→re-ask; (2)–(5) already extracted, just lifted into `sources`. Spec: `docs/SPEC_W8_REGISTER_METADATA.md` |
+| 2026-06-17 | **Register is the index ledger** (W10): "what needs processing" = diff(source current state, register per-unit fingerprints); detection in adapters, decision in register/planner, Chroma follows. Retire `zotero_delta_state.json` (version → `meta` cursor); subsume `vault_files`. Granular Zotero updates (the Jung-note case) become a property of the ledger key, not a special case. Spec + phased plan: `docs/SPEC_REGISTER_AS_INDEX_LEDGER.md` |
