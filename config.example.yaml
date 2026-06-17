@@ -81,9 +81,11 @@ embedding:
   max_concurrent_requests: 8
   # Timeout for API requests (seconds).
   timeout: 120
-  # Model context length. Chunks are ~200 tokens, so a small window is faster and
-  # uses far less VRAM (32K context made a 639 MB model occupy 25 GB).
-  context_length: 1024
+  # Model context length. MUST exceed chunking.max_tokens_per_chunk (the oversize
+  # guard) — Markdown chunks (conversation logs / tables with no paragraph breaks) can
+  # be large, and a batch with ANY over-context chunk fails entirely (fail-loud embed).
+  # On vLLM a larger window costs little (token-batched); on llama.cpp it's slower.
+  context_length: 8192
   # --- vLLM backend (OpenAI-compatible) + managed lifecycle -------------------
   vllm:
     base_url: "http://localhost:8002/v1"
@@ -97,7 +99,7 @@ embedding:
       port: 8002
       gpus: "all"
       runner: "pooling"           # vLLM's embedding/pooling runner
-      max_model_len: 1024
+      max_model_len: 8192         # must exceed chunking.max_tokens_per_chunk (7000)
       gpu_memory_utilization: 0.3
       hf_cache: "~/.cache/huggingface"
       startup_timeout: 900        # first run downloads weights + compiles
