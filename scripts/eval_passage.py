@@ -209,18 +209,16 @@ def make_chunk_search_fn(coll, embedder):
 
 
 def build_reranker(base_cfg: Dict, model: str):
-    """Production LLMReranker, configured for LM Studio with the given model.
-
-    max_tokens is generous (2048) because the local gemma models emit
-    reasoning_content before the JSON answer — a tight budget gets the reasoning
-    truncated and returns empty content. Candidates/chars are bounded to keep
-    per-call latency reasonable across the sweep.
-    """
+    """Production cross-encoder reranker configured for the supplied model."""
     cfg = json.loads(json.dumps(base_cfg))  # deep copy; don't mutate base_cfg
     cfg.setdefault("retrieval", {})["rerank"] = {
-        "enabled": True, "type": "llm",
+        "enabled": True, "type": "cross_encoder",
         "max_candidates": 20, "max_chars_per_candidate": 800,
-        "llm": {"provider": "lmstudio", "model": model, "max_tokens": 2048, "temperature": 0.0},
+        "cross_encoder": {
+            "base_url": "http://localhost:8005/v1",
+            "model": model,
+            "timeout_seconds": 60,
+        },
     }
     return create_reranker(cfg)
 
@@ -500,9 +498,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--variants", nargs="+", default=["all"])
     p.add_argument("--headline-k", type=int, default=5)
     p.add_argument("--no-mission", action="store_true", help="Skip qualitative reading-window dump.")
-    p.add_argument("--rerank", action="store_true", help="Also evaluate the production LLM rerank path.")
-    p.add_argument("--rerank-model", default="google/gemma-4-12b",
-                   help="Rerank LLM (granite-4-micro is prod default but not downloaded locally).")
+    p.add_argument("--rerank", action="store_true", help="Also evaluate the production cross-encoder rerank path.")
+    p.add_argument("--rerank-model", default="BAAI/bge-reranker-v2-m3",
+                   help="Cross-encoder model served by the vLLM reranker endpoint.")
     p.add_argument("--k-recall", type=int, default=50, help="Candidates retrieved before rerank.")
     p.add_argument("--llm-model", default="google/gemma-4-12b")
     p.add_argument("--gold", type=Path, default=REPO_ROOT / "output" / "eval" / "gold_passage.json")

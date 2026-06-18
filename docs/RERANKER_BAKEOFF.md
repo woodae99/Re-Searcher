@@ -50,22 +50,19 @@ completeness are grain properties and are held fixed).
 | spec | backend |
 |---|---|
 | `none` | raw vector order (baseline) |
-| `lmstudio:<model>` | production `LLMReranker` via LM Studio (listwise JSON scoring) |
 | `http://host:port/rerank[#model]` | HTTP cross-encoder service (TEI / Infinity / vLLM) |
 
 ## What we already know (2026-06-16, on the 700/100 grain, 25 probes)
 
 - **`gemma-4-e4b` (7.5B)**: ~11 s/query, and it recovered the chosen grain well
-  (rr hit@1 0.80, hit@5 0.92, MRR 0.843, strict@5 0.88). Used as the production
-  stand-in in `PASSAGE_EVAL.md`.
+  (rr hit@1 0.80, hit@5 0.92, MRR 0.843, strict@5 0.88). This was an evaluation
+  stand-in only; the v0.6 production reranker is the vLLM cross-encoder.
 - **`gemma-4-12b` (dense)**: ~44 s/query for the same 30-candidate payload —
   reliable JSON but ~4× slower, so not worth it as a per-query reranker unless it
   proves materially more accurate.
-- **Gotcha**: the gemma models emit `reasoning_content` *before* the JSON answer,
-  and none of the disable-thinking knobs (`reasoning_effort`,
-  `chat_template_kwargs.enable_thinking`, `reasoning.enabled`) work in this LM
-  Studio build. A tight `max_tokens` lets the reasoning starve the answer →
-  empty content → fallback. `build_reranker()` sets `max_tokens=2048` for headroom.
+- **Retired path**: the gemma/LM Studio JSON-score reranker was removed before
+  production because the cross-encoder is purpose-built and does not rely on LLM
+  JSON formatting.
 - **Untested but interesting**: `qwen3.6-35b-a3b` (MoE) — the bake-off's reason for
   existing. The a3b's small active-parameter count *should* make it faster than a
   dense model of similar quality, but see VRAM.
@@ -85,9 +82,8 @@ The two hosts have opposite constraints:
   `qwen3.6-35b-a3b` (~38) would CPU-offload. Good for "is the *deployable* small
   model fast and good enough" questions.
 
-Use `--autoload` to load/unload each LM Studio model in turn (bge-m3 stays
-resident). On Sparky `--autoload` is optional (everything co-resides); on Bambino
-it's needed to avoid OOM when sweeping larger models.
+Historical LM Studio bake-offs used `--autoload`; current v0.6 production tests
+should target the HTTP `/rerank` cross-encoder service.
 
 ## BGE rerank service (the cross-encoder option to consider)
 
@@ -123,7 +119,7 @@ mirroring the existing CLI/MCP parity convention.
 
 1. Does `qwen3.6-35b-a3b` (MoE) beat `gemma-4-12b` on accuracy, and is its
    speed competitive despite offload?
-2. Does a real `bge-reranker-v2-m3` cross-encoder beat the LLM rerankers on both
-   axes (expected: much faster, at least as accurate)?
+2. Answered for v0.6: use `bge-reranker-v2-m3` via the vLLM `/rerank`
+   cross-encoder service; the LLM JSON reranker path is retired.
 3. Re-confirm the grain decision under the *best* reranker — 700 led under e4b; a
    stronger/cross-encoder reranker shouldn't change the ordering, but verify.

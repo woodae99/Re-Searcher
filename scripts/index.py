@@ -48,7 +48,7 @@ def main():
     parser.add_argument(
         "--allow-legacy-chunking",
         action="store_true",
-        help="Allow running with router_enabled=false (legacy chunking)",
+        help="Deprecated no-op; legacy hierarchical chunking is retired in v0.6.",
     )
     parser.add_argument(
         "--allow-default-config",

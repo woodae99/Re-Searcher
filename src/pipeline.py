@@ -18,7 +18,7 @@ from .factories.chunker_factory import create_chunker
 from .factories.embedding_factory import create_embedder
 from .factories.reranker_factory import create_reranker
 from .indexing import DocumentStatus, IndexingProgress
-from .processing.id_utils import attach_parent_ids, stable_chunk_id
+from .processing.id_utils import stable_chunk_id
 from .processing.oversize_guard import create_oversize_guard
 from .processing.quality_filter import create_quality_filter_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
@@ -95,6 +95,9 @@ class ResearchRAGPipeline:
             collection_slug = "research_library"
         progress_file = self.output_dir / f"indexing_progress.{collection_slug}.json"
         self.progress = IndexingProgress(progress_file)
+        self._overall_total_chunks = 0
+        self._overall_embedded = 0
+        self._overall_stored = 0
 
         # Source registry: SQLite mirror of source/chunk identity, updated in
         # the same code paths as vector-store writes so enumeration surfaces
@@ -909,15 +912,6 @@ class ResearchRAGPipeline:
             all_ids,
         )
 
-        # Step 5: Attach parent IDs only for the legacy hierarchy path.
-        chunking_mode = getattr(
-            self,
-            "chunking_mode",
-            self.config.get("chunking", {}).get("mode", "v0.6_single_grain"),
-        )
-        if chunking_mode == "legacy_router":
-            attach_parent_ids(all_metadatas, all_ids)
-
         return all_chunks, all_metadatas, all_ids
 
     def _generate_embeddings(self, chunks: List[str]) -> List[List[float]]:
@@ -1153,14 +1147,14 @@ class ResearchRAGPipeline:
     def _seed_ledger_from_world(self) -> None:
         """Mirror current source state into the ledger for indexed identities.
 
-        The ledger.execute path records units as it runs; the legacy delta path
+        The ledger execution path records units as it runs; the legacy delta path
         does not. Without this, a legacy-mode run leaves `index_units` empty, so
         `ledger.shadow` reconciles against an empty ledger and reports the whole
         corpus as 'create' — useless for parity. Recording the current
         enumerate_state for identities that have chunks makes shadow parity
         meaningful on the next run. Call after `_refresh_registry()` so the
-        indexed-identity set is current. No-op under ledger.execute (that path
-        returns before reaching here).
+        indexed-identity set is current. This exists only for old shadow-mode
+        diagnostics; v0.6 production executes from the ledger directly.
         """
         try:
             indexed = self.registry.indexed_identities()
@@ -1192,10 +1186,10 @@ class ResearchRAGPipeline:
         return self.config.get("indexing", {}).get("ledger", {}) or {}
 
     def _ledger_execution_enabled(self) -> bool:
-        return bool(self._ledger_cfg().get("execute", False))
+        return bool(self._ledger_cfg().get("execute", True))
 
     def _ledger_shadow_enabled(self) -> bool:
-        return bool(self._ledger_cfg().get("shadow", True))
+        return bool(self._ledger_cfg().get("shadow", False))
 
     def _run_ledger_shadow(self, delta_changes: Dict[str, Any]) -> None:
         """Log the ledger reconciler's plan beside the current delta decision.

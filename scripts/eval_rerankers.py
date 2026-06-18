@@ -5,38 +5,28 @@ The chunk-grain decision is settled (recursive 700/100; see docs/PASSAGE_EVAL.md
 This script holds the grain and the gold fixed and sweeps *rerankers*, so you can
 answer operational questions later without re-deriving anything:
 
-  * "gemma-4-12b (dense) vs qwen3.6-35b-a3b (MoE) — speed vs accuracy?"
-  * "is the small e4b reranker good enough, or does a bigger model earn its latency?"
-  * "how would a real cross-encoder (BGE) reranker compare?"
+  * "does raw vector order still make a useful baseline?"
+  * "which HTTP cross-encoder endpoint is fastest/most accurate?"
 
 It builds the collection + embeddings ONCE, then runs each reranker over the same
 probes, reporting passage hit@k / MRR / strict@5 and mean seconds-per-query.
 
 Reranker specs (--rerankers, space-separated):
   none                              raw vector order (baseline)
-  lmstudio:<model>                  production LLMReranker via LM Studio
-                                    e.g. lmstudio:google/gemma-4-12b
-                                         lmstudio:qwen/qwen3.6-35b-a3b
   http://host:port/rerank[#model]   HTTP cross-encoder service (TEI / Infinity /
-                                    vLLM). LM Studio has NO rerank endpoint, so a
-                                    BGE cross-encoder (e.g. BAAI/bge-reranker-v2-m3,
-                                    the natural partner to bge-m3) must run as a
-                                    separate service. See docs/RERANKER_BAKEOFF.md.
+                                    vLLM). v0.6 production uses
+                                    BAAI/bge-reranker-v2-m3 on vLLM.
 
 All compute is local. Gold must already exist (generate it once with
 scripts/eval_passage.py) so a reranker sweep never burns LLM calls regenerating it.
 
-VRAM note (RTX 5090, 32 GB): models above ~31 GB (gemma-4-31b, qwen3.6-35b-a3b at
-~37 GB, the 122b) won't fully fit alongside bge-m3 and will CPU-offload — slow, but
-the bake-off will measure exactly that. Use --autoload to load/unload each model.
+VRAM note: the script assumes candidate cross-encoder services are already running.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
 import time
 import urllib.request
@@ -54,9 +44,6 @@ import eval_passage as ep  # noqa: E402  (shared corpus / collection / reranker 
 from src.embedding.lmstudio import LMStudioEmbedding  # noqa: E402
 from src.passage_eval import PassageProbe, evaluate_passage  # noqa: E402
 from src.retrieval.rerank import NoRerank  # noqa: E402
-
-LMS = os.path.expanduser("~/.lmstudio/bin/lms")
-
 
 class TimingReranker:
     """Wrap any reranker; accumulate rerank() wall-time and call count."""
@@ -114,20 +101,13 @@ class CrossEncoderReranker:
 
 
 def make_backend(spec: str, base_cfg: Dict):
-    """Resolve a reranker spec to (reranker, lmstudio_model_or_None)."""
+    """Resolve a reranker spec."""
     if spec == "none":
-        return NoRerank(base_cfg), None
-    if spec.startswith("lmstudio:"):
-        model = spec.split(":", 1)[1]
-        return ep.build_reranker(base_cfg, model), model
+        return NoRerank(base_cfg)
     if spec.startswith("http://") or spec.startswith("https://"):
         url, model = (spec.rsplit("#", 1) + [None])[:2] if "#" in spec else (spec, None)
-        return CrossEncoderReranker(url, model=model), None
+        return CrossEncoderReranker(url, model=model)
     raise ValueError(f"Unknown reranker spec: {spec!r}")
-
-
-def _lms(*args):
-    subprocess.run([LMS, *args], check=False)
 
 
 def main() -> int:
@@ -156,16 +136,12 @@ def main() -> int:
 
     rows: List[Dict] = []
     for spec in args.rerankers:
-        autoloaded = spec.split(":", 1)[1] if (args.autoload and spec.startswith("lmstudio:")) else None
-        if autoloaded:
-            print(f"loading {autoloaded} …", flush=True)
-            _lms("load", autoloaded, "--yes", "--ttl", "3600")
         ep._RERANK_FAILURES.clear()
         if spec == "none":
             search = ep.make_chunk_search_fn(coll, embedder)
             timer = None
         else:
-            backend, _ = make_backend(spec, base_cfg)
+            backend = make_backend(spec, base_cfg)
             timer = TimingReranker(backend)
             search = ep.make_reranked_search_fn(coll, embedder, timer, args.k_recall)
 
@@ -182,8 +158,6 @@ def main() -> int:
         rows.append(row)
         print(f"  {spec:34} hit@1={row['hit@1']} hit@5={row['hit@5']} mrr={row['mrr']} "
               f"strict@5={row['strict@5']} {row['s_per_query']}s/q fb={row['fallbacks']}", flush=True)
-        if autoloaded:
-            _lms("unload", autoloaded)
 
     rows.sort(key=lambda r: (r["mrr"] or 0, r["hit@5"] or 0), reverse=True)
     print("\n== reranker ranking (mrr, then hit@5) ==")
@@ -208,15 +182,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--variant", default="recursive_700_100", choices=list(ep.CONFIG_VARIANTS),
                    help="Fixed chunk grain to hold while sweeping rerankers.")
     p.add_argument("--rerankers", nargs="+",
-                   default=["none", "lmstudio:google/gemma-4-e4b", "lmstudio:google/gemma-4-12b"],
+                   default=["none", "http://localhost:8005/v1/rerank#BAAI/bge-reranker-v2-m3"],
                    help="Reranker specs (see module docstring).")
     p.add_argument("--k-recall", type=int, default=50, help="Candidates retrieved before rerank.")
     p.add_argument("--n-distractors", type=int, default=100)
     p.add_argument("--target-max-chars", type=int, default=4_000_000)
     p.add_argument("--distractor-max-chars", type=int, default=40_000)
     p.add_argument("--min-chars", type=int, default=3000)
-    p.add_argument("--autoload", action=argparse.BooleanOptionalAction, default=True,
-                   help="lms load each lmstudio model before testing and unload after.")
     p.add_argument("--gold", type=Path, default=REPO_ROOT / "output" / "eval" / "gold_passage_curated.json")
     p.add_argument("--output-json", type=Path, default=REPO_ROOT / "output" / "eval" / "rerank_bakeoff.json")
     return p.parse_args()

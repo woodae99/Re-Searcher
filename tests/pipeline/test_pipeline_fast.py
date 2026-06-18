@@ -19,6 +19,13 @@ if sys.platform == "win32":
 import yaml
 from tqdm import tqdm
 import time
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_PIPELINE_E2E") != "1",
+    reason="legacy/manual pipeline E2E; set RUN_PIPELINE_E2E=1 with live services",
+)
 
 
 def load_config():

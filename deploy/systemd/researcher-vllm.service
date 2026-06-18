@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-Searcher vLLM servers (embedder + reranker)
+PartOf=researcher.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/colin/Dev/Re-Searcher
+# vllm_service.py is idempotent: it (re)creates the embed + rerank containers from
+# config.yaml and waits until both serve. ExecStop does `docker rm -f`, releasing the
+# unified GPU memory — that is what frees the warm footprint on stop.
+ExecStart=/home/colin/Dev/Re-Searcher/.venv/bin/python scripts/vllm_service.py start
+ExecStop=/home/colin/Dev/Re-Searcher/.venv/bin/python scripts/vllm_service.py stop
+# First start may compile/download the reranker model.
+TimeoutStartSec=1200
+
+[Install]
+WantedBy=researcher.target

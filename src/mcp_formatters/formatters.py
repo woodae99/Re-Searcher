@@ -338,7 +338,14 @@ def format_index_status(payload: Dict[str, Any]) -> str:
     parts.extend([
         "",
         "Ledger Drift:",
-        f"  Chunkless text units: {ledger_drift.get('chunkless_unit_count', 0):,}",
+        (
+            "  Chunkless text units: "
+            f"{ledger_drift.get('chunkless_unit_count', 0):,} "
+            f"(expected coverage-null: "
+            f"{ledger_drift.get('expected_chunkless_unit_count', 0):,}; "
+            f"unexpected: "
+            f"{ledger_drift.get('unexpected_chunkless_unit_count', 0):,})"
+        ),
         (
             "  Orphan chunk identities: "
             f"{ledger_drift.get('orphan_identity_count', 0):,} "
@@ -346,20 +353,26 @@ def format_index_status(payload: Dict[str, Any]) -> str:
         ),
     ])
     if ledger_drift.get("ok", True):
-        parts.append("  Ledger Sync: OK (index_units match registry chunks)")
+        parts.append(
+            "  Ledger Sync: OK (no orphan chunks or unexpected chunkless units)"
+        )
     else:
         parts.append(
             "  Ledger Sync: DRIFT DETECTED - run the routine index update "
             "or rebuild the dev registry/collection."
         )
-        chunkless_samples = ledger_drift.get("chunkless_unit_samples") or []
+        chunkless_samples = (
+            ledger_drift.get("unexpected_chunkless_unit_samples")
+            or ledger_drift.get("chunkless_unit_samples")
+            or []
+        )
         orphan_samples = ledger_drift.get("orphan_identity_samples") or []
         if chunkless_samples:
             rendered = ", ".join(
                 str(sample.get("unit_id", "unknown"))
                 for sample in chunkless_samples[:3]
             )
-            parts.append(f"  Chunkless sample: {rendered}")
+            parts.append(f"  Unexpected chunkless sample: {rendered}")
         if orphan_samples:
             rendered = ", ".join(
                 (

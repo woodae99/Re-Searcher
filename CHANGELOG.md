@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-06-18
 
 ### Added
 - **vLLM embedding backend + managed lifecycle** (`src/embedding/vllm.py`,
@@ -17,7 +17,7 @@
   production reranker runtime — scores (query, document) pairs directly through vLLM's
   native `/rerank` (default `BAAI/bge-reranker-v2-m3`), no LLM JSON to parse. Managed by
   the same vLLM lifecycle (`managed_reranker_backend`; `scripts/vllm_service.py` stands up
-  embedder + reranker together for retrieval). The LLM reranker remains available.
+  embedder + reranker together for retrieval). The old LM Studio/LLM JSON reranker is retired.
 - **Asymmetric query instruction** (`embedding.query_instruction`): prepended to queries
   in `embed_query` only (documents embedded raw) — required for Qwen3-Embedding's
   retrieval-quality edge; no-op/empty for symmetric models like bge-m3.
@@ -32,13 +32,11 @@
   neighbour expansion — all deterministic span arithmetic (no LLM judge). Gold is
   generated once via a local LLM with a curation pass that snaps passages to
   sentence boundaries and screens out reference-list / front-matter junk. `--rerank`
-  also scores the production `LLMReranker` path.
+  scores the production cross-encoder reranker path.
 - **Reranker bake-off** (`scripts/eval_rerankers.py`, `docs/RERANKER_BAKEOFF.md`):
   holds grain + gold fixed and sweeps rerankers on speed *and* accuracy
-  (`none` / `lmstudio:<model>` / HTTP cross-encoder). Includes a `CrossEncoderReranker`
-  HTTP client seam for a future BGE rerank service (LM Studio has no rerank
-  endpoint — see the doc for TEI / Infinity / vLLM options and a promotion path to
-  `src/retrieval/rerank.py`).
+  (`none` / HTTP cross-encoder). The v0.6 production path is the vLLM-served
+  cross-encoder in `src/retrieval/rerank.py`.
 - **`scripts/query.py --json`** — the CLI search/survey surface now has a
   machine-readable mode, closing the last CLI↔MCP parity gap. Search emits
   `{query, count, results}` (results via the shared `format_search_results`); survey
@@ -64,6 +62,10 @@
   700/100 wins on passage-retrieval quality through the rerank stage while staying
   lean to read. See `docs/CHUNKING_EVAL.md` and `docs/PASSAGE_EVAL.md`.
   (Apply the same change to the live, gitignored `config.yaml`.)
+- **Production cutover defaults are ledger-first and single-grain only.**
+  `indexing.ledger.execute` defaults to true, ledger shadow mode defaults off,
+  `legacy_router` is rejected by preflight/factory code, and status distinguishes
+  expected no-fulltext coverage-null units from unexpected ledger drift.
 
 ### Fixed
 - **Launcher Python selection is consistent.** `run_mcp.bat`,

@@ -52,7 +52,7 @@ def validate_config(
     Args:
         config: Parsed configuration dictionary
         config_path: Path to the config file (for display)
-        allow_legacy_chunking: If True, allow router_enabled=false
+        allow_legacy_chunking: Deprecated; retained for CLI compatibility only.
         allow_default_config: If True, allow missing chunking block
 
     Returns:
@@ -79,21 +79,18 @@ def validate_config(
     # Check chunking mode/router
     chunking_mode = chunking.get("mode", "v0.6_single_grain")
     router_enabled = chunking.get("router_enabled", False)
-    if chunking_mode not in {"v0.6_single_grain", "legacy_router"}:
+    if chunking_mode != "v0.6_single_grain":
         errors.append(
-            "chunking.mode must be 'v0.6_single_grain' or 'legacy_router'."
+            "chunking.mode must be 'v0.6_single_grain'. "
+            "The legacy hierarchical router was retired for v0.6."
         )
-    if chunking_mode == "legacy_router" and not router_enabled:
-        if not allow_legacy_chunking:
-            errors.append(
-                "chunking.router_enabled is false (or missing). "
-                "legacy_router mode requires the router to produce hierarchical chunks.\n"
-                "  Set router_enabled: true or use --allow-legacy-chunking to proceed."
+    if chunking_mode == "v0.6_single_grain" and not router_enabled:
+        warnings.append(
+            PreflightWarning(
+                "chunking.router_enabled is false; v0.6 still uses the router for "
+                "annotation, markdown, and text routing."
             )
-        else:
-            warnings.append(
-                PreflightWarning("Legacy router mode is set but router is disabled")
-            )
+        )
 
     # Check id_strategy
     id_strategy = chunking.get("id_strategy", "legacy")
@@ -238,7 +235,7 @@ def run_preflight(
     Args:
         config: Parsed configuration dictionary
         config_path: Path to the config file
-        allow_legacy_chunking: If True, allow router_enabled=false
+        allow_legacy_chunking: Deprecated; retained for CLI compatibility only.
         allow_default_config: If True, allow missing chunking block
         quiet: If True, suppress header output (still show errors/warnings)
 

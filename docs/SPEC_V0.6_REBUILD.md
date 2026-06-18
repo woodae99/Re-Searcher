@@ -75,9 +75,9 @@ longer the 2026-06-13 proposal state.
 - W8 systematic-review selection metadata: `item_type`, `doi`, `abstract`,
   `tags`, `venue`, `language`, filters on CLI/MCP list-source surfaces, and
   annotation `has_comment`.
-- W2 single working grain is the **default** (`chunking.mode: v0.6_single_grain`):
-  recursive `mid` only; the legacy hierarchical chunker / `coarse`/`fine` /
-  `parent_id` path is reachable only via the opt-in `mode: legacy_router`.
+- W2 single working grain is the **only production mode** (`chunking.mode:
+  v0.6_single_grain`): recursive `mid` only; the legacy hierarchical chunker /
+  `coarse`/`fine` / `parent_id` navigation path is retired from normal config.
 - W1 extraction seam wired: a quality-gated router (Zotero FT cache → pdfminer,
   deterministic-clean + re-score, Marker/OCR escalation gated off) behind
   `extraction.router`; extraction provenance (`extractor`/`extract_quality`/
@@ -102,16 +102,18 @@ longer the 2026-06-13 proposal state.
   in `CLAUDE.md`).
 
 **Still open before final v0.6**
-- **Ledger cutover is not done.** `indexing.ledger.execute` stays `false` and the
-  legacy `zotero_delta_state.json` / `vault_files` paths remain in place until
-  parity is confirmed on a *real-corpus* run — the unit parity suite passes; the
-  field proof is the chapter-4 mission. Do not flip the flag or retire the sidecar
-  before then.
-- **Extraction router needs real-corpus validation**: the router is on by default
-  (`extraction.router.enabled: true`); confirm its quality gate covers the old
-  large-PDF *partial-fulltext* fallback before the production rebuild.
-- **The production rebuild + chapter-4 process-in-coaching mission acceptance**
-  remain the final gate.
+- **Production environment cutover**: merge to `main`, deploy on Sparky, and create
+  blank live Chroma/SQLite storage outside the repo before the production rebuild.
+- **Live data staging**: place copied Zotero and Obsidian source data in stable
+  outside-repo locations used by both the initial build and periodic delta runs.
+- **Extraction router final acceptance**: the router is on by default
+  (`extraction.router.enabled: true`); retain the mission evidence and production
+  rebuild logs that prove the quality gate covers large-PDF partial-fulltext cases.
+- **Post-mission cleanup is being applied.** Use
+  `docs/SPEC_POST_MISSION_CUTOVER_CLEANUP.md` before production cutover to retire
+  the legacy delta sidecar, remove the legacy chunk router as a live production
+  path, remove the old LM Studio/LLM JSON reranker path, and classify expected
+  chunkless/no-indexed-text units separately from sync drift.
 
 For cold-start implementation details, see
 `docs/V0.6_REMAINING_ACTIONS_HANDOFF.md`.
@@ -510,8 +512,8 @@ the decision moves to the register + a source-agnostic planner, Chroma strictly 
   re-embeds only the changed unit, never the unchanged fulltext (the prior "sub-item precision"
   problem is a *consequence* of the ledger key, not a special case). Metadata-only changes
   (tags/collections) take a Chroma `update`, not a re-embed.
-- **Parity gate**: the reconciler must reproduce today's change set (parent grain) in shadow on the
-  test corpora before granular execution is switched on.
+- **Parity gate**: the reconciler reproduced the legacy change set on the test corpora before
+  granular execution became the production default.
 - **Acceptance**: an update run decides its work without querying Chroma; the Jung-note case skips
   the fulltext re-embed; deletions are detected from ledger-minus-world without `/deleted`; the
   sidecar file is gone. Full spec + phased plan: `docs/SPEC_REGISTER_AS_INDEX_LEDGER.md`.
@@ -563,8 +565,8 @@ The exact cold-start implementation checklist lives in
 - **P5 — W5 durability.** Add shared fsync-durable JSON/state writes. Gate:
   checkpoint/state files survive interruption as previous-valid or next-valid JSON.
 - **P6 — W10 ledger parity suite.** Prove legacy-delta and ledger-execution parity
-  on the full test Zotero + Obsidian corpora before flipping `ledger.execute` or
-  retiring `zotero_delta_state.json` / `vault_files`.
+  on the full test Zotero + Obsidian corpora; after the mission gate, make ledger
+  execution the production default and retire the sidecar from normal runs.
 - **P7 — Production rebuild + cutover (§7) + mission acceptance (§6).**
 
 ## 9. Risks & open questions

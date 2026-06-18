@@ -152,8 +152,8 @@ chunking:
   # - Zotero/fulltext/default text -> recursive mid chunks
   # - Zotero annotations -> atomic chunks
   # - Obsidian markdown -> mid chunks with heading_path
-  # Legacy hierarchy remains available only by setting mode: legacy_router.
-  mode: v0.6_single_grain  # v0.6_single_grain | legacy_router
+  # Legacy hierarchy is retired; production indexing uses this single mode.
+  mode: v0.6_single_grain
   # v0.6 working grain — recursive 700/100, settled by measured retrieval evals.
   # 'recursive' decisively beats 'character' (which only splits on blank lines and
   # so can't break over-long paragraphs); size 700/100 wins on passage-retrieval
@@ -205,16 +205,6 @@ chunking:
     enabled: true
     header_levels: [1, 2, 3]
     max_section_tokens: 900
-  # Legacy/experimental hierarchy settings. These are ignored unless
-  # chunking.mode is legacy_router.
-  huge_docs:
-    enabled: false
-    huge_doc_tokens: 25000
-    levels:
-      coarse: { chunk_size: 2200, chunk_overlap: 200 }
-      mid:    { chunk_size: 700,  chunk_overlap: 100 }   # validated working grain (PASSAGE_EVAL.md)
-      fine:   { chunk_size: 220,  chunk_overlap: 40 }
-
 retrieval:
   k_recall: 50
   mode_default: fast  # fast | strict
@@ -222,7 +212,7 @@ retrieval:
     enabled: true
   rerank:
     enabled: true
-    # none | llm | cross_encoder. v0.6 production runtime is 'cross_encoder' served
+    # none | cross_encoder. v0.6 production runtime is 'cross_encoder' served
     # by vLLM's native /rerank — fast, no LLM JSON to parse. See docs/EMBEDDING_BACKEND.md.
     type: cross_encoder
     # If set, limit reranked list before final k-return slice.
@@ -247,12 +237,6 @@ retrieval:
         hf_cache: "~/.cache/huggingface"
         startup_timeout: 900
         keep_up: false
-    # --- LLM reranker (alternative; LM Studio or OpenAI) ---------------------
-    llm:
-      provider: lmstudio  # lmstudio | openai
-      model: ibm/granite-4-micro
-      max_tokens: 512
-      temperature: 0.0
   diversity:
     enabled: true
     # Grouping key preference for limiting repeats.
@@ -285,20 +269,13 @@ indexing:
   stop_after_batch:
     flag_file: "stop_after_batch.flag"
   delta:
-    enabled: true
-    state_file: "zotero_delta_state.json"
-    # Changed/deleted items have their old chunks removed in batches of this
-    # size before re-indexing. There is no upper limit on keys per run.
+    # Retired for v0.6 production; the register ledger decides all work.
+    enabled: false
     delete_batch_size: 100
   ledger:
-    # Behavior-changing P3 path: execute updates from the register-ledger
-    # work plan instead of the legacy Zotero sidecar / vault snapshot delta.
-    # Kept OFF until shadow parity (below) is confirmed on a real run; flip to
-    # true at the chapter-4 cutover, then retire the sidecar. Matches code default.
-    execute: false
-    # P2 parity gate: compute the register-ledger work plan and log it beside
-    # the current delta path, without letting it drive execution yet.
-    shadow: true
+    # v0.6 production executes updates from the register-ledger work plan.
+    execute: true
+    shadow: false
   # Optional: pipeline embed/store overlap to reduce idle time
   embed_store_pipeline:
     enabled: false

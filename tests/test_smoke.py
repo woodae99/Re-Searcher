@@ -71,8 +71,8 @@ def test_small_run_with_v06_router_produces_mid_chunks():
 
 
 @pytest.mark.unit
-def test_small_run_with_legacy_router_produces_hierarchical_chunks():
-    """Legacy router mode may still produce hierarchical chunks for experiments."""
+def test_legacy_router_mode_does_not_produce_hierarchical_chunks():
+    """Legacy router mode is retired from production chunking."""
     config = {
         "chunking": {
             "mode": "legacy_router",
@@ -96,8 +96,8 @@ def test_small_run_with_legacy_router_produces_hierarchical_chunks():
     chunks = router.chunk_with_metadata("Document content. " * 100, metadata)
     levels_found = {meta.get("chunk_level") for _, meta in chunks}
 
-    assert "coarse" in levels_found
-    assert "fine" in levels_found
+    assert levels_found == {"mid"}
+    assert all("parent_id" not in meta for _, meta in chunks)
 
 
 @pytest.mark.unit

@@ -2,6 +2,8 @@ import pytest
 
 from src.pipeline import ResearchRAGPipeline
 from src.processing.chunker import TextChunker
+from src.processing.oversize_guard import create_oversize_guard
+from src.processing.quality_filter import create_quality_filter_guard
 from src.sources.base import Document
 
 
@@ -21,7 +23,7 @@ class DummyVectorStore:
         for doc_id, text, metadata in zip(ids, texts, metadatas):
             self.records.append((doc_id, text, 1.0, metadata))
 
-    def search(self, query_embedding, k=5):
+    def search(self, query_embedding, k=5, filter=None):
         return self.records[:k]
 
 
@@ -43,6 +45,8 @@ def test_minimal_pipeline_end_to_end():
         },
     }
     pipeline.chunker = TextChunker(pipeline.config)
+    pipeline.oversize_guard = create_oversize_guard(pipeline.config)
+    pipeline.quality_filter = create_quality_filter_guard(pipeline.config)
     pipeline.embedder = DummyEmbedder()
     pipeline.vector_store = DummyVectorStore()
     pipeline.reranker = ReverseReranker()

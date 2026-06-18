@@ -534,10 +534,48 @@ def test_status_reports_ledger_drift(tmp_path):
     assert status["index_unit_count"] == 2
     assert drift["ok"] is False
     assert drift["chunkless_unit_count"] == 1
+    assert drift["unexpected_chunkless_unit_count"] == 1
+    assert drift["expected_chunkless_unit_count"] == 0
     assert drift["chunkless_unit_samples"][0]["unit_id"] == "zotero:Z1:note:MISSING"
+    assert drift["unexpected_chunkless_unit_samples"][0]["unit_id"] == "zotero:Z1:note:MISSING"
     assert drift["orphan_identity_count"] == 1
     assert drift["orphan_chunk_count"] == 1
     assert drift["orphan_identity_samples"][0]["identity_value"] == "Z2"
+
+
+def test_status_classifies_chunkless_attachment_as_expected_coverage_null(tmp_path):
+    registry = SourceRegistry(tmp_path / "r.sqlite")
+    registry.record_chunks(
+        ["n1"],
+        [
+            {
+                "source_type": "zotero_note",
+                "zotero_key": "Z1",
+                "source_id": "zotero-1-note-20",
+                "chunk_level": "atomic",
+                "chunk_index": 0,
+                "note_key": "NOTE1",
+                "title": "Note-backed source",
+            },
+        ],
+    )
+    registry.record_unit_states(
+        [
+            _unit("zotero:Z1:note:NOTE1", "Z1", "note", "v1"),
+            _unit("zotero:Z1:attachment:ATT1", "Z1", "attachment", "v2"),
+        ]
+    )
+
+    drift = registry.status()["ledger_drift"]
+
+    assert drift["ok"] is True
+    assert drift["chunkless_unit_count"] == 1
+    assert drift["expected_chunkless_unit_count"] == 1
+    assert drift["unexpected_chunkless_unit_count"] == 0
+    sample = drift["expected_chunkless_unit_samples"][0]
+    assert sample["unit_id"] == "zotero:Z1:attachment:ATT1"
+    assert sample["child_key"] == "ATT1"
+    assert sample["reason"] == "no_indexed_fulltext_for_attachment"
 
 
 def test_status_reports_clean_ledger(tmp_path):
@@ -570,6 +608,8 @@ def test_status_reports_clean_ledger(tmp_path):
     drift = registry.status()["ledger_drift"]
     assert drift["ok"] is True
     assert drift["chunkless_unit_count"] == 0
+    assert drift["expected_chunkless_unit_count"] == 0
+    assert drift["unexpected_chunkless_unit_count"] == 0
     assert drift["orphan_identity_count"] == 0
 
 

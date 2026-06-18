@@ -5,10 +5,9 @@
 (architecture + phase summary) → this doc (line-level implementation) → `docs/SPEC_W8_REGISTER_METADATA.md`
 (P5). `CLAUDE.md` has repo conventions; honor CLI/MCP parity and registry-sync rules.
 
-This document is now a **live implementation handoff**. P0–P2 are complete; **P3 core execution is
-implemented behind `indexing.ledger.execute`**, with important cleanup/acceptance items still open
-(sidecar retirement, `vault_files` transition, direct integration dry-run). Each phase should remain
-independently shippable. Current focused command:
+This document is now a **historical implementation handoff**. P0–P3 were completed during the
+v0.6 rebuild; post-mission cutover cleanup moves the production default to ledger execution and
+retires the old LLM reranker plus selectable legacy hierarchy. Current focused command:
 `.venv/bin/python -m pytest tests/unit --ignore=tests/unit/test_mcp_server.py -q`.
 
 ---
@@ -16,14 +15,12 @@ independently shippable. Current focused command:
 ## ⮕ CODEX — START HERE (state as of 2026-06-17, commit `5339015`)
 
 **Everything below is on `v0.6-rebuild` and committed.** Run the full check first to confirm a green
-baseline (expect **221 passed**; the **only** acceptable failures are the 7 documented ones in
-`tests/test_rerank_json.py` + `tests/test_resumable_indexing.py`, which need an OpenAI-compatible API
-key — ignore them):
+baseline:
 `.venv/bin/python -m pytest tests/ --ignore=tests/integration --ignore=tests/pipeline -q`
 
 **Done & committed**
 - P0 ledger schema + register methods; P1 adapter `enumerate_state`; P2 `src/reconcile.py` + shadow
-  parity wired into `pipeline.py`; P3 granular execution behind `indexing.ledger.execute`.
+  parity wired into `pipeline.py`; P3 granular execution via `indexing.ledger.execute`.
 - vLLM embedding backend + cross-encoder rerank are now integrated on this branch (was a separate
   branch; merged). Embedder `context_length`/vLLM `max_model_len` = 8192 (must exceed the 7000
   oversize guard — do not lower).
@@ -31,9 +28,8 @@ key — ignore them):
   removed.
 
 **Decisions already made (do not relitigate)**
-- `indexing.ledger.execute` stays **`false`** (legacy delta is primary; the reconciler runs in
-  shadow). The cutover to `true` + sidecar retirement happens **only after** the chapter-4 mission
-  validates shadow parity — that is **not** a Codex task; leave the flag and the sidecar alone.
+- `indexing.ledger.execute` is the v0.6 production default after mission-gate approval. Legacy
+  shadow mode is retained only when explicitly configured for diagnostics.
 - Annotation `color`/`type` capture is **dropped** (single-colour corpus). Only `has_comment` (P5).
 
 **Your tasks, in order: P5 then P4** (P5 is lower-risk and unblocks the chapter-4 metadata needs)
@@ -58,10 +54,16 @@ key — ignore them):
 **When done**: leave the work committed on `v0.6-rebuild` with a clean tree and green suite; Colin
 will return here for a review.
 
-Known test caveats as of 2026-06-17:
+**After the full process-in-coaching mission gate passes**: do not continue
+patching legacy compatibility in this handoff. Move to
+`docs/SPEC_POST_MISSION_CUTOVER_CLEANUP.md`, which specifies the pre-production
+cutover cleanup: ledger execution default-on, sidecar retirement, legacy chunk
+router retirement, old LM Studio/LLM reranker retirement, and status semantics
+for expected chunkless/no-indexed-text units.
+
+Known test caveats:
 - `tests/unit/test_mcp_server.py` times out independently after its first test in this workspace.
-- Older broad-suite caveats still apply for API-key-dependent tests outside `tests/unit`
-  (`tests/test_rerank_json.py`, `tests/test_resumable_indexing.py`).
+- `tests/test_resumable_indexing.py` is an older API-key-dependent broad-suite caveat.
 
 ---
 
@@ -92,8 +94,8 @@ Known test caveats as of 2026-06-17:
 
 **P2 — `src/reconcile.py`**:
 - `WorkPlan`, `reconcile(world, ledger)`, and `build_work_plan(sources, registry)` are implemented.
-- Pipeline shadow logging exists via `indexing.ledger.shadow` (default true in `config.example.yaml`)
-  when the legacy delta path is used.
+- Pipeline shadow logging exists via explicit `indexing.ledger.shadow` when the legacy delta path
+  is used for diagnostics.
 - Verified on a temp copy of the disposable Zotero DB (1787 units): parent metadata edit + new note +
   attachment fingerprint change + top-level deletion produced exactly `creates=1`, `updates=2`,
   `deletes=1`, `unchanged=1784`; ledger touched parents matched SQLite delta modification parents,
@@ -431,10 +433,10 @@ or hosts; everything stays config-driven (W6).
    manifest while gitignoring any copyrighted PDFs.
 2. **ChromaDB location** — the `chromadb` **client library** in the venv is correct (a pip dep);
    keep it. The **server process + persistent data** must live **outside the repo** in production.
-   Dev data currently sits at the gitignored `output/sparky-test/chroma` (fine for dev). Production
-   (W9): run Chroma as a `systemd` service on Sparky with a stable data dir (e.g.
-   `~/.local/share/re-searcher/chroma` or `/var/lib/re-searcher/chroma`), reached via the
-   config-driven `storage.endpoint`. The repo never holds production vectors.
+   Production (W9): run Chroma as a `systemd` service on Sparky with a stable data dir outside
+   the repo. The v0.6 cutover path is
+   `/home/colin/.local/share/re-searcher/chroma/live`; see `docs/OPERATIONS_SPARKY.md`.
+   The repo never holds production vectors.
 3. **Dev→prod cutover** — the acceptance run is the **chapter-4 process-research mission** over the
    Zotero/Obsidian test subset (`docs/SPEC_V0.6_REBUILD.md` §6). On success, retire the dev Chroma
    (scrub or point `storage.collection_name`/`endpoint` at a fresh production instance — blank-build,

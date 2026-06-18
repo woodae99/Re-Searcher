@@ -63,7 +63,7 @@ def test_v06_router_routes_huge_docs_to_mid_not_hierarchical():
 
 
 @pytest.mark.unit
-def test_legacy_router_can_still_route_huge_docs_to_hierarchical():
+def test_legacy_router_mode_is_rejected():
     config = {
         "chunking": {
             "mode": "legacy_router",
@@ -80,13 +80,8 @@ def test_legacy_router_can_still_route_huge_docs_to_hierarchical():
             "defaults": {"chunk_size": 20, "chunk_overlap": 0, "strategy": "recursive"},
         }
     }
-    router = create_chunker(config)
-    metadata = {"source_type": "pdf"}
-    text = "This is a long document that should trigger hierarchical chunking." * 5
-    chunks = router.chunk_with_metadata(text, metadata)
-
-    assert any(chunk_metadata.get("chunk_level") == "coarse" for _, chunk_metadata in chunks)
-    assert any(chunk_metadata.get("chunk_level") == "fine" for _, chunk_metadata in chunks)
+    with pytest.raises(ValueError, match="legacy hierarchical router was retired"):
+        create_chunker(config)
 
 
 @pytest.mark.unit

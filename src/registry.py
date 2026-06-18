@@ -1133,7 +1133,11 @@ class SourceRegistry:
         ).fetchall()
 
         chunkless_samples: List[Dict[str, str]] = []
+        expected_chunkless_samples: List[Dict[str, str]] = []
+        unexpected_chunkless_samples: List[Dict[str, str]] = []
         chunkless_count = 0
+        expected_chunkless_count = 0
+        unexpected_chunkless_count = 0
         for row in unit_rows:
             unit_kind = row["unit_kind"]
             where = ["identity_field = ?", "identity_value = ?"]
@@ -1156,15 +1160,55 @@ class SourceRegistry:
             ).fetchone()
             if not found:
                 chunkless_count += 1
+                source = conn.execute(
+                    """
+                    SELECT title, total_chunks, source_types
+                    FROM sources
+                    WHERE identity_field = ? AND identity_value = ?
+                    """,
+                    (row["identity_field"], row["identity_value"]),
+                ).fetchone()
+                identity_chunks = conn.execute(
+                    """
+                    SELECT attachment_key, note_key, annotation_key, source_type
+                    FROM chunks
+                    WHERE identity_field = ? AND identity_value = ?
+                    LIMIT 20
+                    """,
+                    (row["identity_field"], row["identity_value"]),
+                ).fetchall()
+                expected = False
+                reason = "missing_indexed_chunks"
+                if unit_kind == "attachment" and identity_chunks:
+                    expected = True
+                    attachment_keys = {
+                        str(chunk["attachment_key"] or "")
+                        for chunk in identity_chunks
+                    }
+                    if attachment_keys - {"", child_key}:
+                        reason = "sibling_attachment_indexed"
+                    else:
+                        reason = "no_indexed_fulltext_for_attachment"
+
+                sample = {
+                    "unit_id": row["unit_id"],
+                    "identity_field": row["identity_field"],
+                    "identity_value": row["identity_value"],
+                    "unit_kind": unit_kind,
+                    "child_key": child_key,
+                    "reason": reason,
+                    "title": str(source["title"] if source else ""),
+                }
                 if len(chunkless_samples) < sample_limit:
-                    chunkless_samples.append(
-                        {
-                            "unit_id": row["unit_id"],
-                            "identity_field": row["identity_field"],
-                            "identity_value": row["identity_value"],
-                            "unit_kind": unit_kind,
-                        }
-                    )
+                    chunkless_samples.append(sample)
+                if expected:
+                    expected_chunkless_count += 1
+                    if len(expected_chunkless_samples) < sample_limit:
+                        expected_chunkless_samples.append(sample)
+                else:
+                    unexpected_chunkless_count += 1
+                    if len(unexpected_chunkless_samples) < sample_limit:
+                        unexpected_chunkless_samples.append(sample)
 
         orphan_rows = conn.execute(
             """
@@ -1193,10 +1237,14 @@ class SourceRegistry:
         return {
             "chunkless_unit_count": chunkless_count,
             "chunkless_unit_samples": chunkless_samples,
+            "expected_chunkless_unit_count": expected_chunkless_count,
+            "expected_chunkless_unit_samples": expected_chunkless_samples,
+            "unexpected_chunkless_unit_count": unexpected_chunkless_count,
+            "unexpected_chunkless_unit_samples": unexpected_chunkless_samples,
             "orphan_identity_count": orphan_identity_count,
             "orphan_chunk_count": orphan_chunk_count,
             "orphan_identity_samples": orphan_samples,
-            "ok": chunkless_count == 0 and orphan_identity_count == 0,
+            "ok": unexpected_chunkless_count == 0 and orphan_identity_count == 0,
         }
 
 

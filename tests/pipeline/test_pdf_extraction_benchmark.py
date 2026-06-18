@@ -20,6 +20,13 @@ import yaml
 import time
 import sqlite3
 from pathlib import Path as PathlibPath
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_PIPELINE_E2E") != "1",
+    reason="legacy/manual PDF extraction benchmark; set RUN_PIPELINE_E2E=1 with live services",
+)
 
 
 def load_config():

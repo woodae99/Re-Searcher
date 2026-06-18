@@ -19,6 +19,13 @@ if sys.platform == "win32":
 import yaml
 from tqdm import tqdm
 import time
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_PIPELINE_E2E") != "1",
+    reason="legacy/manual attachment E2E; set RUN_PIPELINE_E2E=1 with live services",
+)
 
 
 def load_config():
@@ -55,7 +62,7 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
     from src.sources.zotero import ZoteroSource
     from src.sources.obsidian import ObsidianSource
     from src.factories.chunker_factory import create_chunker
-    from src.processing.id_utils import attach_parent_ids, stable_chunk_id
+    from src.processing.id_utils import stable_chunk_id
     from src.embedding.lmstudio import LMStudioEmbedding
     from src.storage.chroma import ChromaVectorStore
 
@@ -122,8 +129,6 @@ def test_end_to_end_pipeline(num_docs_zotero=10, num_docs_obsidian=10):
             all_ids.append(chunk_id)
 
     # Attach parent IDs (now document-scoped)
-    attach_parent_ids(all_metadata, all_ids)
-
     chunk_time = time.time() - chunk_start
     print(f"      [OK] Created {len(all_chunks)} chunks from {len(documents)} documents ({chunk_time:.2f}s)")
     

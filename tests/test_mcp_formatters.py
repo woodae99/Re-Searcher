@@ -198,7 +198,9 @@ def test_format_index_status_includes_ledger_drift():
                 "ledger_drift": {
                     "ok": False,
                     "chunkless_unit_count": 1,
-                    "chunkless_unit_samples": [
+                    "expected_chunkless_unit_count": 0,
+                    "unexpected_chunkless_unit_count": 1,
+                    "unexpected_chunkless_unit_samples": [
                         {"unit_id": "zotero:Z1:note:MISSING"}
                     ],
                     "orphan_identity_count": 1,
@@ -213,7 +215,7 @@ def test_format_index_status_includes_ledger_drift():
 
     assert "Index Ledger Units: 3" in text
     assert "Ledger Drift:" in text
-    assert "Chunkless text units: 1" in text
+    assert "Chunkless text units: 1 (expected coverage-null: 0; unexpected: 1)" in text
     assert "Orphan chunk identities: 1 (2 chunks)" in text
     assert "Ledger Sync: DRIFT DETECTED" in text
     assert "zotero:Z1:note:MISSING" in text

@@ -117,13 +117,9 @@ sentence boundaries and screens out reference-list / front-matter passages
 (`_looks_like_refs`), and end-matter depths were dropped (defaults 0.2–0.78). This
 removed the ~6 junk probes that depressed the first run; the curated set is 25
 probes (21 LLM, 4 extractive). **(2) Rerank**: `scripts/eval_passage.py --rerank`
-now also scores the production LLM rerank path (`src/retrieval/rerank.py`
-`LLMReranker`). The intended production reranker `granite-4-micro` is not
-downloaded locally, so `gemma-4-e4b` (7.5B) stands in — a small instruct-grade
-model, a realistic proxy for a deployable reranker (and ~11s/call vs ~44s for the
-12B). Note: these gemma models emit `reasoning_content` *before* the JSON answer,
-so the reranker needs a generous `max_tokens` (2048) or the reasoning starves the
-answer and returns empty content.
+now scores the vLLM cross-encoder rerank path (`src/retrieval/rerank.py`
+`CrossEncoderReranker`). Earlier small-LLM/JSON rerank experiments were retired
+before the v0.6 production cutover.
 
 Curated results (25 probes, 105 sources):
 

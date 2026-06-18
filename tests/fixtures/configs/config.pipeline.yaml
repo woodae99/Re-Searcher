@@ -42,7 +42,7 @@ storage:
 
 # Text chunking configuration
 chunking:
-  mode: legacy_router
+  mode: v0.6_single_grain
   chunk_size: 512
   chunk_overlap: 64
   strategy: "recursive"

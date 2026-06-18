@@ -201,7 +201,7 @@ Search the research library using semantic search.
 
 **Retrieval Controls:**
 - **k_recall** (optional): How many candidates to retrieve before filtering (default: from config, typically 50)
-- **no_rerank** (optional): Set `true` to disable LLM reranking (faster, uses pure vector similarity)
+- **no_rerank** (optional): Set `true` to disable configured cross-encoder reranking (faster, uses pure vector similarity)
 - **no_diversity** (optional): Set `true` to disable deduplication (allows many chunks from same source)
 - **max_per_source** (optional): Max results per source document (auto-enables diversity, e.g., 1 for broad scan, 10 for deep dive)
 
