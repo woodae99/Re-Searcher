@@ -42,11 +42,12 @@ storage:
 
 # Text chunking configuration
 chunking:
+  mode: v0.6_single_grain
   chunk_size: 512
   chunk_overlap: 64
   strategy: "recursive"
 
-  # vNext router config
+  # Router config
   router_enabled: true
   id_strategy: stable_hash
   debug_router: true  # Enable router debug output

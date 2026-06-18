@@ -35,7 +35,7 @@ def build_where_filter(
         zotero_key: Filter by exact Zotero item key
         year_min: Minimum year (inclusive)
         year_max: Maximum year (inclusive)
-        chunk_level: Filter by hierarchical chunk level ('coarse', 'mid', 'fine')
+        chunk_level: Filter by chunk level (v0.6: 'mid'/'atomic'; legacy: 'coarse'/'fine')
         extra_where: Additional Chroma where clauses to merge
 
     Returns:

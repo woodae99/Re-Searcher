@@ -48,6 +48,7 @@ from src.mcp_formatters.formatters import (
     format_hierarchy_info,
     format_source_chunks,
     format_list_sources,
+    format_survey_sources,
     format_index_status,
 )
 
@@ -142,7 +143,7 @@ class ResearchMCPServer:
                     description=(
                         "Search the research library using semantic search across Zotero references and Obsidian notes. "
                         "Returns relevant passages with metadata. "
-                        "Supports hierarchical chunking (coarse/mid/fine), metadata filtering, diversity controls, and reranking. "
+                        "Supports chunk-level filtering, metadata filtering, diversity controls, and reranking. "
                         "Cold-start note: if ChromaDB has been idle or recently started, the first call can take several minutes "
                         "while the database wakes up; later calls are usually much faster."
                     ),
@@ -185,13 +186,11 @@ class ResearchMCPServer:
                             },
                             "chunk_level": {
                                 "type": "string",
-                                "enum": ["coarse", "mid", "fine"],
+                                "enum": ["mid", "atomic", "coarse", "fine"],
                                 "description": (
-                                    "Filter by hierarchical chunk granularity: "
-                                    "'coarse' = large sections with broad context (~1500-2500 chars, good for overview/gist), "
-                                    "'mid' = medium sections with balanced context (~800-1500 chars, good for general queries), "
-                                    "'fine' = small focused segments like paragraphs/headings (good for precise matches but may lack context). "
-                                    "Omit to search all levels (default). Recommend 'coarse' or 'mid' for better context in results."
+                                    "Filter by chunk level. v0.6 production indexes normally contain 'mid' "
+                                    "for text/markdown and 'atomic' for Zotero annotations. 'coarse' and "
+                                    "'fine' are legacy/experimental levels only."
                                 ),
                             },
                             "no_rerank": {
@@ -288,11 +287,65 @@ class ResearchMCPServer:
                     },
                 ),
                 Tool(
+                    name="survey_research_sources",
+                    description=(
+                        "Run a broad v0.6 survey by searching mid chunks, grouping hits by source via the registry, "
+                        "and returning ranked source rows with representative chunk snippets. "
+                        "Use this instead of legacy coarse chunk search for corpus-level candidate discovery."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The survey query text.",
+                            },
+                            "k": {
+                                "type": "integer",
+                                "description": "Number of source rows to return (default: 20).",
+                                "default": 20,
+                                "minimum": 1,
+                                "maximum": 100,
+                            },
+                            "k_recall": {
+                                "type": "integer",
+                                "description": "Number of mid chunk candidates to recall before source aggregation.",
+                                "minimum": 1,
+                                "maximum": 2000,
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["fast", "strict"],
+                                "description": "Retrieval filter strategy; omit to use retrieval.mode_default.",
+                            },
+                            "source_type": {"type": "string"},
+                            "zotero_key": {"type": "string"},
+                            "author": {"type": "string"},
+                            "title_contains": {"type": "string"},
+                            "year_min": {"type": "integer"},
+                            "year_max": {"type": "integer"},
+                            "collection": {"type": "string"},
+                            "item_type": {"type": "string"},
+                            "doi": {"type": "string"},
+                            "language": {"type": "string"},
+                            "tag": {"type": "string"},
+                            "representative_chunks": {
+                                "type": "integer",
+                                "description": "Representative chunks/snippets to include per source (default: 3).",
+                                "default": 3,
+                                "minimum": 0,
+                                "maximum": 10,
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                Tool(
                     name="get_chunk_context",
                     description=(
-                        "Get the parent chunk for a given chunk ID. "
-                        "Use this to expand context when a fine-grained chunk needs more surrounding text. "
-                        "Fine chunks link to mid chunks, mid chunks link to coarse chunks. "
+                        "Get a chunk by ID and, for legacy hierarchical chunks, its parent chunk. "
+                        "In v0.6 single-grain indexes, source navigation comes from get_source_chunks "
+                        "ordered by chunk_index rather than parent_id. "
                         "Cold-start note: if ChromaDB has been idle or recently started, the first call can take several minutes."
                     ),
                     inputSchema={
@@ -391,6 +444,22 @@ class ResearchMCPServer:
                                     "Only Zotero sources carry collections."
                                 ),
                             },
+                            "item_type": {
+                                "type": "string",
+                                "description": "Exact Zotero item type filter, e.g. book, journalArticle, thesis.",
+                            },
+                            "doi": {
+                                "type": "string",
+                                "description": "Case-insensitive DOI substring filter.",
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Exact Zotero language code filter, e.g. en.",
+                            },
+                            "tag": {
+                                "type": "string",
+                                "description": "Exact Zotero tag filter.",
+                            },
                             "limit": {
                                 "type": "integer",
                                 "description": "Maximum sources to return in this page (default 100, max 500).",
@@ -426,6 +495,8 @@ class ResearchMCPServer:
             """Handle tool execution requests."""
             if name == "search_research_library":
                 return await self._search_research_library(arguments)
+            elif name == "survey_research_sources":
+                return await self._survey_research_sources(arguments)
             elif name == "get_chunk_context":
                 return await self._get_chunk_context(arguments)
             elif name == "get_source_chunks":
@@ -494,6 +565,31 @@ class ResearchMCPServer:
 
         try:
             query_call = partial(self.pipeline.query, **query_kwargs)
+            return await asyncio.to_thread(query_call)
+        finally:
+            self._search_semaphore.release()
+
+    async def _run_survey_query(self, **query_kwargs):
+        """Run a blocking source survey without blocking the async MCP loop."""
+        await self._initialize_pipeline()
+
+        timeout = self.search_acquire_timeout_seconds
+        try:
+            if timeout <= 0:
+                await self._search_semaphore.acquire()
+            else:
+                await asyncio.wait_for(
+                    self._search_semaphore.acquire(),
+                    timeout=timeout,
+                )
+        except asyncio.TimeoutError as exc:
+            raise MCPServerBusyError(
+                "research-mcp is still busy with earlier queued search requests. "
+                "Retry later or narrow the survey query."
+            ) from exc
+
+        try:
+            query_call = partial(self.pipeline.survey_sources, **query_kwargs)
             return await asyncio.to_thread(query_call)
         finally:
             self._search_semaphore.release()
@@ -571,7 +667,7 @@ class ResearchMCPServer:
                 response_parts.append(f"Authors: {result['authors']}")
                 response_parts.append(f"Source: {result['source_type']}")
 
-                # Hierarchical context (vNext)
+                # Hierarchical context
                 chunk_level = result.get("chunk_level", "unknown")
                 response_parts.append(f"Chunk Level: {chunk_level}")
 
@@ -611,6 +707,43 @@ class ResearchMCPServer:
             error_info = format_error_response(e)
             error_text = (
                 f"Error executing search: {error_info['error']}\n"
+                f"Message: {error_info['message']}"
+            )
+            return [TextContent(type="text", text=error_text)]
+
+    async def _survey_research_sources(
+        self, arguments: Dict[str, Any]
+    ) -> list[TextContent]:
+        """Run source-level survey retrieval via the shared pipeline method."""
+        try:
+            query = arguments.get("query")
+            if not query:
+                raise ValueError("Query parameter is required")
+
+            payload = await self._run_survey_query(
+                query_text=query,
+                k=arguments.get("k", 20),
+                retrieval_mode=arguments.get("mode"),
+                k_recall_override=arguments.get("k_recall"),
+                source_type=arguments.get("source_type"),
+                zotero_key=arguments.get("zotero_key"),
+                year_min=arguments.get("year_min"),
+                year_max=arguments.get("year_max"),
+                author_contains=arguments.get("author"),
+                title_contains=arguments.get("title_contains"),
+                collection=arguments.get("collection"),
+                item_type=arguments.get("item_type"),
+                doi=arguments.get("doi"),
+                language=arguments.get("language"),
+                tag=arguments.get("tag"),
+                representative_limit=arguments.get("representative_chunks", 3),
+            )
+            return [TextContent(type="text", text=format_survey_sources(payload))]
+
+        except Exception as e:
+            error_info = format_error_response(e)
+            error_text = (
+                f"Error executing source survey: {error_info['error']}\n"
                 f"Message: {error_info['message']}"
             )
             return [TextContent(type="text", text=error_text)]
@@ -787,6 +920,10 @@ class ResearchMCPServer:
                     title_contains=title_contains,
                     author=author,
                     collection=arguments.get("collection"),
+                    item_type=arguments.get("item_type"),
+                    doi=arguments.get("doi"),
+                    language=arguments.get("language"),
+                    tag=arguments.get("tag"),
                     limit=limit,
                     offset=offset,
                 )

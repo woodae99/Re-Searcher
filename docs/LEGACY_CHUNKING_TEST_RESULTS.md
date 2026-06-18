@@ -1,7 +1,7 @@
-# vNext Chunking Strategy Test Results
+# Legacy Chunking Strategy Test Results
 
 **Date**: 2026-01-07
-**Branch**: vnext-features
+**Branch**: legacy-feature-work
 **Collection**: test_pipeline_attachments
 **Total Chunks**: 158,815
 
@@ -114,7 +114,7 @@ Note: Large PDFs (>4000 tokens per test config) trigger HierarchicalChunker.
 
 ## Conclusion
 
-**All critical success criteria passed.** The vNext chunking strategy is working correctly:
+**All critical success criteria passed.** The hierarchical chunking strategy is working correctly:
 
 - Hierarchical chunking triggers for large documents
 - Parent IDs are document-scoped (no cross-document collisions)

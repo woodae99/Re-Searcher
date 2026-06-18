@@ -1,0 +1,24 @@
+{
+  "description": "Tiny v0.6 Zotero corpus manifest for harness and fixture development. Real Sparky runs should point at a synced Zotero collection.",
+  "collection": "test_zotero",
+  "items": [
+    {
+      "key": "CLEAN001",
+      "kind": "journalArticle",
+      "fixture_role": "clean journal PDF",
+      "expected_fulltext": true
+    },
+    {
+      "key": "NOISY001",
+      "kind": "journalArticle",
+      "fixture_role": "known noisy PDF: line hyphenation, ligature spacing, running headers",
+      "expected_fulltext": true
+    },
+    {
+      "key": "META001",
+      "kind": "book",
+      "fixture_role": "metadata-only/no-fulltext coverage boundary",
+      "expected_fulltext": false
+    }
+  ]
+}

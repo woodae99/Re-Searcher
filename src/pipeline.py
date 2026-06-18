@@ -4,6 +4,7 @@ import json
 import hashlib
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -17,18 +18,22 @@ from .factories.chunker_factory import create_chunker
 from .factories.embedding_factory import create_embedder
 from .factories.reranker_factory import create_reranker
 from .indexing import DocumentStatus, IndexingProgress
-from .processing.id_utils import attach_parent_ids, stable_chunk_id
+from .processing.id_utils import stable_chunk_id
 from .processing.oversize_guard import create_oversize_guard
 from .processing.quality_filter import create_quality_filter_guard
 from .progress import IndexingStage, ProgressDisplay, create_progress_display
+from .reconcile import WorkPlan, build_work_plan
 from .registry import SourceRegistry, registry_path_for
 from .retrieval.diversity import apply_diversity
 from .retrieval.expand import attach_parent_context
 from .retrieval.filters import apply_post_filters, build_where_filter
+from .retrieval.survey import aggregate_hits_by_source
+from .run_reporting import RunReporter
 from .sources.base import ProgressCallback
 from .sources.obsidian import ObsidianSource
 from .sources.zotero import ZoteroSource
 from .storage.chroma import ChromaVectorStore
+from .durable_write import write_json_durable
 
 
 class ResearchRAGPipeline:
@@ -48,6 +53,7 @@ class ResearchRAGPipeline:
         # Output directory for metadata and live control files.
         self.output_dir = Path(self.config.get("output_folder", "./output"))
         self.output_dir.mkdir(exist_ok=True)
+        self.reporter = RunReporter.from_config(self.config, self.output_dir)
 
         dashboard_cfg = self.config.get("indexing", {}).get("dashboard", {}) or {}
         snapshot_file = None
@@ -67,8 +73,15 @@ class ResearchRAGPipeline:
         # Initialize components
         self.sources = self._initialize_sources()
         self.chunker = create_chunker(self.config)
+        self.chunking_mode = self.config.get("chunking", {}).get(
+            "mode", "v0.6_single_grain"
+        )
         self.oversize_guard = create_oversize_guard(self.config)
-        self.quality_filter = create_quality_filter_guard(self.config)
+        self.quality_filter = create_quality_filter_guard(
+            self.config, reporter=self.reporter
+        )
+        if hasattr(self.oversize_guard, "set_reporter"):
+            self.oversize_guard.set_reporter(self.reporter)
         self.embedder = create_embedder(self.config)
         self.reranker = create_reranker(self.config)
         self.vector_store = ChromaVectorStore(self.config)
@@ -82,6 +95,9 @@ class ResearchRAGPipeline:
             collection_slug = "research_library"
         progress_file = self.output_dir / f"indexing_progress.{collection_slug}.json"
         self.progress = IndexingProgress(progress_file)
+        self._overall_total_chunks = 0
+        self._overall_embedded = 0
+        self._overall_stored = 0
 
         # Source registry: SQLite mirror of source/chunk identity, updated in
         # the same code paths as vector-store writes so enumeration surfaces
@@ -107,6 +123,68 @@ class ResearchRAGPipeline:
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
 
+    def _report_event(
+        self,
+        *,
+        stage: str,
+        severity: str,
+        remediation: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+        text_length: Optional[int] = None,
+        token_estimate: Optional[int] = None,
+        exception: Optional[BaseException] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        reporter = getattr(self, "reporter", None)
+        if reporter is None:
+            return
+        reporter.record(
+            stage=stage,
+            severity=severity,
+            remediation=remediation,
+            message=message,
+            metadata=metadata,
+            document_id=document_id,
+            chunk_id=chunk_id,
+            text_length=text_length,
+            token_estimate=token_estimate,
+            exception=exception,
+            extra=extra,
+        )
+
+    def _report_exception(
+        self,
+        *,
+        stage: str,
+        remediation: str,
+        message: str,
+        exception: BaseException,
+        metadata: Optional[Dict[str, Any]] = None,
+        document_id: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+        text_length: Optional[int] = None,
+        token_estimate: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        reporter = getattr(self, "reporter", None)
+        if reporter is None:
+            return
+        reporter.record_exception(
+            stage=stage,
+            remediation=remediation,
+            message=message,
+            exception=exception,
+            metadata=metadata,
+            document_id=document_id,
+            chunk_id=chunk_id,
+            text_length=text_length,
+            token_estimate=token_estimate,
+            extra=extra,
+        )
+
     def _create_source_progress_callback(self, source_name: str) -> ProgressCallback:
         """Create a progress callback for a data source."""
 
@@ -126,6 +204,14 @@ class ResearchRAGPipeline:
 
             elif event_type == "item_error":
                 self.progress_display.update_source(source_name, processed=1, errors=1)
+                self._report_event(
+                    stage="source_fetch",
+                    severity="error",
+                    remediation="source_data",
+                    message=f"{source_name} item fetch failed",
+                    metadata=event,
+                    extra=event,
+                )
 
             elif event_type == "attachment_start":
                 file_name = event.get("file_name", "")
@@ -146,6 +232,36 @@ class ResearchRAGPipeline:
             elif event_type == "attachment_error":
                 error = event.get("error", "unknown error")
                 self.progress_display.set_activity(f"Attachment error: {error}")
+                self._report_event(
+                    stage="extraction",
+                    severity="error",
+                    remediation="extraction_quality",
+                    message=f"{source_name} attachment extraction failed",
+                    metadata=event,
+                    extra=event,
+                )
+
+            elif event_type in {"extraction_reject", "extraction_escalate"}:
+                self._report_event(
+                    stage="extraction_quality_gate",
+                    severity="error" if event_type == "extraction_reject" else "warn",
+                    remediation="extraction_quality",
+                    message=f"{source_name} extraction {event.get('action', 'failed')}",
+                    metadata=event,
+                    text_length=event.get("text_length"),
+                    extra=event,
+                )
+
+            elif event_type == "extraction_warning":
+                self._report_event(
+                    stage="extraction_quality_gate",
+                    severity="warn",
+                    remediation="extraction_quality",
+                    message=f"{source_name} extraction warning",
+                    metadata=event,
+                    text_length=event.get("text_length"),
+                    extra=event,
+                )
 
         return callback
 
@@ -158,14 +274,14 @@ class ResearchRAGPipeline:
         zotero = ZoteroSource(self.config, progress_callback=zotero_callback)
         if zotero.is_enabled() and zotero.validate_config():
             sources.append(zotero)
-            print("[OK] Zotero source enabled")
+            print("[OK] Zotero source enabled", file=sys.stderr)
 
         # Obsidian source
         obsidian_callback = self._create_source_progress_callback("Obsidian")
         obsidian = ObsidianSource(self.config, progress_callback=obsidian_callback)
         if obsidian.is_enabled() and obsidian.validate_config():
             sources.append(obsidian)
-            print("[OK] Obsidian source enabled")
+            print("[OK] Obsidian source enabled", file=sys.stderr)
 
         if not sources:
             print("[WARNING] No data sources enabled!")
@@ -203,7 +319,14 @@ class ResearchRAGPipeline:
                 # Resume mode should prioritize checkpoint continuity over delta
                 # re-discovery, which can otherwise fan out to broad "changed"
                 # sets when delta state is missing/stale.
+                if self._ledger_execution_enabled():
+                    print("[INFO] Resume mode: re-planning from the ledger and continuing.")
+                    self._run_ledger_work_plan()
+                    return
                 print("[INFO] Resume mode: skipping delta change discovery and continuing from checkpoint.")
+            elif self._ledger_execution_enabled():
+                self._run_ledger_work_plan()
+                return
             elif self._delta_enabled():
                 delta_changes = self._collect_zotero_delta_changes()
                 changed_zotero_keys = delta_changes.get("changed_item_keys", [])
@@ -217,6 +340,7 @@ class ResearchRAGPipeline:
                         0,
                     ),
                 }
+                self._run_ledger_shadow(delta_changes)
                 if changed_zotero_keys:
                     print(f"[INFO] Delta mode: {len(changed_zotero_keys)} changed Zotero items detected.")
                 else:
@@ -323,6 +447,7 @@ class ResearchRAGPipeline:
                     self._save_source_hash()
                     self._persist_vault_state(obsidian_delta)
                     self._refresh_registry()
+                    self._seed_ledger_from_world()
                     print("[INFO] No documents to re-index; deletions (if any) have been applied.")
                 else:
                     print("[WARNING] No documents to index!")
@@ -385,6 +510,9 @@ class ResearchRAGPipeline:
             # registry aggregates in step with this run's writes.
             self._persist_vault_state(obsidian_delta)
             self._refresh_registry()
+            # Mirror the indexed world into the ledger so ledger.shadow parity
+            # is meaningful on the next run (legacy path doesn't self-record).
+            self._seed_ledger_from_world()
 
             # Stage 4: Complete
             self.progress_display.set_stage(IndexingStage.COMPLETE, 4, 4)
@@ -399,6 +527,9 @@ class ResearchRAGPipeline:
         finally:
             # Persist quality-filter diagnostics when enabled.
             self.quality_filter.write_report()
+            reporter = getattr(self, "reporter", None)
+            if reporter is not None:
+                reporter.write_summary()
             # Always stop progress display
             self.progress_display.stop()
 
@@ -476,6 +607,16 @@ class ResearchRAGPipeline:
                             total_batches,
                         )
                     except Exception as e:
+                        self._report_batch_failure(
+                            "embedding",
+                            "embedder_limit",
+                            "Embedding/store pipeline failed",
+                            e,
+                            pending_docs,
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                        )
                         for doc in pending_docs:
                             self.progress.set_document_status(
                                 doc.doc_id,
@@ -497,6 +638,16 @@ class ResearchRAGPipeline:
                     try:
                         embeddings = self._generate_embeddings(chunks)
                     except Exception as e:
+                        self._report_batch_failure(
+                            "embedding",
+                            "embedder_limit",
+                            "Embedding failed",
+                            e,
+                            pending_docs,
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                        )
                         for doc in pending_docs:
                             self.progress.set_document_status(
                                 doc.doc_id,
@@ -520,6 +671,16 @@ class ResearchRAGPipeline:
                     try:
                         self._store_batch(chunks, embeddings, chunk_metadatas, chunk_ids)
                     except Exception as e:
+                        self._report_batch_failure(
+                            "storage",
+                            "vector_store",
+                            "Vector-store write failed",
+                            e,
+                            pending_docs,
+                            chunks,
+                            chunk_metadatas,
+                            chunk_ids,
+                        )
                         for doc in pending_docs:
                             self.progress.set_document_status(
                                 doc.doc_id,
@@ -538,6 +699,13 @@ class ResearchRAGPipeline:
                     )
 
             except Exception as e:
+                self._report_batch_failure(
+                    "chunking",
+                    "code_bug",
+                    "Batch processing failed",
+                    e,
+                    pending_docs,
+                )
                 for doc in pending_docs:
                     self.progress.set_document_status(
                         doc.doc_id,
@@ -546,6 +714,46 @@ class ResearchRAGPipeline:
                     )
 
         return True
+
+    def _report_batch_failure(
+        self,
+        stage: str,
+        remediation: str,
+        message: str,
+        exception: BaseException,
+        docs: List[Any],
+        chunks: Optional[List[str]] = None,
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None,
+    ) -> None:
+        chunks = chunks or []
+        metadatas = metadatas or []
+        ids = ids or []
+        if chunks and metadatas:
+            for idx, (text, metadata) in enumerate(zip(chunks, metadatas)):
+                self._report_exception(
+                    stage=stage,
+                    remediation=remediation,
+                    message=message,
+                    exception=exception,
+                    metadata=metadata,
+                    document_id=metadata.get("source_id"),
+                    chunk_id=ids[idx] if idx < len(ids) else None,
+                    text_length=len(text),
+                    token_estimate=len(text) // 4,
+                )
+            return
+
+        for doc in docs:
+            self._report_exception(
+                stage=stage,
+                remediation=remediation,
+                message=message,
+                exception=exception,
+                metadata=getattr(doc, "metadata", {}),
+                document_id=getattr(doc, "doc_id", None),
+                text_length=len(getattr(doc, "content", "") or ""),
+            )
 
     def _consume_stop_request(self) -> bool:
         """Return True when a stop-after-batch request is present and consume it."""
@@ -611,6 +819,13 @@ class ResearchRAGPipeline:
             except Exception as e:
                 # Log error but continue with other sources
                 self.progress_display.set_activity(f"Error fetching from {source_name}: {e}")
+                self._report_exception(
+                    stage="source_fetch",
+                    remediation="source_data",
+                    message=f"{source_name} fetch failed",
+                    exception=e,
+                    extra={"source": source_name},
+                )
                 if isinstance(source, ZoteroSource) and zotero_strict:
                     raise
 
@@ -637,6 +852,16 @@ class ResearchRAGPipeline:
 
             except Exception as e:
                 print(f"  [WARNING] Error chunking document {doc.doc_id}: {e}")
+                self._report_exception(
+                    stage="chunking",
+                    remediation="chunking",
+                    message="Document chunking failed",
+                    exception=e,
+                    metadata=doc.metadata,
+                    document_id=doc.doc_id,
+                    text_length=len(doc.content or ""),
+                    token_estimate=len(doc.content or "") // 4,
+                )
 
         # Step 2: Apply oversize guard (CRITICAL - runs after all chunking, before IDs)
         all_chunk_data = self.oversize_guard.process(all_chunk_data)
@@ -686,9 +911,6 @@ class ResearchRAGPipeline:
             all_metadatas,
             all_ids,
         )
-
-        # Step 5: Attach parent IDs
-        attach_parent_ids(all_metadatas, all_ids)
 
         return all_chunks, all_metadatas, all_ids
 
@@ -891,6 +1113,16 @@ class ResearchRAGPipeline:
                 f"[WARN] Registry update failed; registry may drift from the vector "
                 f"store until 'python scripts/build_registry.py' is re-run. Error: {e}"
             )
+            for idx, metadata in enumerate(metadatas):
+                self._report_exception(
+                    stage="registry_write",
+                    remediation="registry",
+                    message="Registry chunk mirror failed after vector-store write",
+                    exception=e,
+                    metadata=metadata,
+                    document_id=metadata.get("source_id"),
+                    chunk_id=ids[idx] if idx < len(ids) else None,
+                )
 
     def _refresh_registry(self):
         """Rebuild registry source aggregates after a run's writes/deletes."""
@@ -905,12 +1137,539 @@ class ResearchRAGPipeline:
             )
         except Exception as e:
             print(f"[WARN] Registry refresh failed: {e}")
+            self._report_exception(
+                stage="registry_refresh",
+                remediation="registry",
+                message="Registry aggregate refresh failed",
+                exception=e,
+            )
+
+    def _seed_ledger_from_world(self) -> None:
+        """Mirror current source state into the ledger for indexed identities.
+
+        The ledger execution path records units as it runs; the legacy delta path
+        does not. Without this, a legacy-mode run leaves `index_units` empty, so
+        `ledger.shadow` reconciles against an empty ledger and reports the whole
+        corpus as 'create' — useless for parity. Recording the current
+        enumerate_state for identities that have chunks makes shadow parity
+        meaningful on the next run. Call after `_refresh_registry()` so the
+        indexed-identity set is current. This exists only for old shadow-mode
+        diagnostics; v0.6 production executes from the ledger directly.
+        """
+        try:
+            indexed = self.registry.indexed_identities()
+            units = [
+                unit
+                for source in self.sources
+                if source.is_enabled()
+                for unit in source.enumerate_state().values()
+                if (unit.identity_field, unit.identity_value) in indexed
+            ]
+            self._record_ledger_unit_states(units)
+            print(f"[INFO] Ledger mirror updated for {len(units)} indexed units.")
+        except Exception as e:
+            print(f"[WARN] Ledger seed-from-world failed: {e}")
+            self._report_exception(
+                stage="ledger_seed",
+                remediation="ledger",
+                message="Ledger seed-from-world failed",
+                exception=e,
+            )
 
     def _delta_cfg(self) -> Dict[str, Any]:
         return self.config.get("indexing", {}).get("delta", {}) or {}
 
     def _delta_enabled(self) -> bool:
         return bool(self._delta_cfg().get("enabled", False))
+
+    def _ledger_cfg(self) -> Dict[str, Any]:
+        return self.config.get("indexing", {}).get("ledger", {}) or {}
+
+    def _ledger_execution_enabled(self) -> bool:
+        return bool(self._ledger_cfg().get("execute", True))
+
+    def _ledger_shadow_enabled(self) -> bool:
+        return bool(self._ledger_cfg().get("shadow", False))
+
+    def _run_ledger_shadow(self, delta_changes: Dict[str, Any]) -> None:
+        """Log the ledger reconciler's plan beside the current delta decision.
+
+        P2 is a parity gate: this computes the new planner's answer but never
+        lets it drive deletes, fetches, embeds, or watermarks.
+        """
+        if not self._ledger_shadow_enabled():
+            return
+
+        try:
+            plan = build_work_plan(self.sources, self.registry)
+            print(
+                "[INFO] Ledger shadow: "
+                f"{len(plan.creates)} creates, {len(plan.updates)} updates, "
+                f"{len(plan.deletes)} deletes, {plan.unchanged} unchanged units."
+            )
+
+            ledger_zotero_touched = {
+                value
+                for field, value in plan.touched_identities()
+                if field == "zotero_key"
+            }
+            ledger_zotero_deletes = {
+                parent
+                for parent in (
+                    self._zotero_parent_from_unit_id(unit_id)
+                    for unit_id in plan.deletes
+                )
+                if parent
+            }
+            delta_zotero_keys = set(delta_changes.get("changed_item_keys") or [])
+            comparable_delta_keys = delta_zotero_keys - ledger_zotero_deletes
+
+            missing = sorted(comparable_delta_keys - ledger_zotero_touched)
+            extra = sorted(ledger_zotero_touched - comparable_delta_keys)
+            if missing or extra:
+                print(
+                    "[WARN] Ledger shadow parity divergence: "
+                    f"delta_only={self._sample_list(missing)}, "
+                    f"ledger_only={self._sample_list(extra)}"
+                )
+            elif delta_zotero_keys or ledger_zotero_touched:
+                print(
+                    "[INFO] Ledger shadow parity: Zotero modify/create parent set "
+                    "matches current delta path."
+                )
+
+            if ledger_zotero_deletes:
+                print(
+                    "[INFO] Ledger shadow deletions: "
+                    f"{len(ledger_zotero_deletes)} Zotero parent(s) absent from world "
+                    f"(sample={self._sample_list(sorted(ledger_zotero_deletes))})."
+                )
+        except Exception as e:
+            print(f"[WARN] Ledger shadow reconciliation failed: {e}")
+            self._report_exception(
+                stage="ledger_reconciliation",
+                remediation="ledger",
+                message="Ledger shadow reconciliation failed",
+                exception=e,
+            )
+
+    @staticmethod
+    def _zotero_parent_from_unit_id(unit_id: str) -> Optional[str]:
+        parts = str(unit_id).split(":")
+        if len(parts) >= 3 and parts[0] == "zotero":
+            return parts[1]
+        return None
+
+    @staticmethod
+    def _sample_list(values: List[str], limit: int = 10) -> List[str]:
+        if len(values) <= limit:
+            return values
+        return [*values[:limit], f"...(+{len(values) - limit} more)"]
+
+    def _run_ledger_work_plan(self) -> None:
+        """Execute an incremental update from the registry-ledger work plan."""
+        plan = build_work_plan(self.sources, self.registry)
+        print(
+            "[INFO] Ledger mode: "
+            f"{len(plan.creates)} creates, {len(plan.updates)} updates, "
+            f"{len(plan.deletes)} deletes, {plan.unchanged} unchanged units."
+        )
+
+        if plan.is_empty():
+            self._save_source_hash()
+            self._refresh_registry()
+            print("[INFO] Ledger mode: no changes detected. Use --force to re-index anyway.")
+            return
+
+        self._execute_ledger_deletes(plan)
+        documents, units_by_id = self._fetch_ledger_documents(plan)
+
+        if documents:
+            self.progress.forget_many([doc.doc_id for doc in documents])
+            self.progress.set_total_documents(len(documents))
+            self._overall_total_chunks = 0
+            self._overall_embedded = 0
+            self._overall_stored = 0
+
+            self.progress_display.set_stage(IndexingStage.CHUNKING, 3, 4)
+            self.progress_display.set_activity(
+                f"Processing {len(documents)} ledger-planned documents in batches..."
+            )
+            completed_run = self._process_batches(documents)
+            if not completed_run:
+                self._refresh_registry()
+                print(
+                    "[INFO] Ledger indexing paused after completing the current batch. "
+                    "Run the same command again to resume."
+                )
+                return
+
+            self._record_ledger_units_for_documents(documents, units_by_id)
+        else:
+            print("[INFO] Ledger mode: no text documents need embedding.")
+
+        self._apply_ledger_metadata_updates(plan)
+        self._save_source_hash()
+        self._refresh_registry()
+
+        self.progress_display.set_stage(IndexingStage.COMPLETE, 4, 4)
+        self.progress_display.set_activity("Ledger indexing complete!")
+        stats = self.vector_store.get_collection_stats()
+        print(f"\nCollection: {stats.get('collection_name')}")
+        print(f"Total documents: {stats.get('document_count')}")
+        print(f"Endpoint: {stats.get('endpoint')}")
+
+    def _execute_ledger_deletes(self, plan: WorkPlan) -> None:
+        """Apply delete-before-replace operations required by the work plan."""
+        zotero_delete_groups = self._group_zotero_deletes(plan.deletes)
+        zotero_changed_groups = self._group_zotero_states([*plan.creates, *plan.updates])
+
+        for relative_path in self._obsidian_delete_paths(plan):
+            self._delete_obsidian_sources([relative_path], removing=True)
+
+        for relative_path in self._obsidian_update_paths(plan):
+            self._delete_obsidian_sources([relative_path])
+
+        full_deleted_parents = {
+            parent
+            for parent, group in zotero_delete_groups.items()
+            if group.get("parent_meta")
+        }
+        for parent_key in sorted(full_deleted_parents):
+            self._delete_existing_zotero_chunks([parent_key])
+
+        for parent_key, group in zotero_delete_groups.items():
+            if parent_key in full_deleted_parents:
+                continue
+            for attachment_key in sorted(group.get("attachment", set())):
+                self._delete_zotero_attachment_chunks(parent_key, attachment_key)
+            if group.get("note") or group.get("annotation"):
+                self._delete_zotero_note_annotation_chunks(parent_key)
+
+        for parent_key, group in zotero_changed_groups.items():
+            if parent_key in full_deleted_parents:
+                continue
+            for attachment_key in sorted(group.get("attachment", set())):
+                self._delete_zotero_attachment_chunks(parent_key, attachment_key)
+            if group.get("note") or group.get("annotation"):
+                self._delete_zotero_note_annotation_chunks(parent_key)
+
+        deleted_unit_ids = [
+            unit_id
+            for unit_id in plan.deletes
+            if not (
+                unit_id.startswith("zotero:")
+                and self._zotero_parent_from_unit_id(unit_id) in full_deleted_parents
+            )
+        ]
+        try:
+            self.registry.delete_units(deleted_unit_ids)
+        except Exception as e:
+            print(f"[WARN] Ledger delete-unit cleanup failed: {e}")
+            self._report_exception(
+                stage="ledger_write",
+                remediation="ledger",
+                message="Ledger delete-unit cleanup failed",
+                exception=e,
+                extra={"unit_ids": deleted_unit_ids[:20]},
+            )
+
+    def _fetch_ledger_documents(self, plan: WorkPlan) -> tuple[List[Any], Dict[str, Any]]:
+        """Fetch only documents needed by the ledger work plan."""
+        documents: List[Any] = []
+        units_by_id = {unit.unit_id: unit for unit in (*plan.creates, *plan.updates)}
+
+        obsidian_paths = self._obsidian_create_update_paths(plan)
+        if obsidian_paths:
+            source = self._get_obsidian_source()
+            if source is not None:
+                documents.extend(source.fetch_documents(relative_paths=obsidian_paths))
+
+        zotero_source = self._get_zotero_source()
+        if zotero_source is not None:
+            changed_groups = self._group_zotero_states([*plan.creates, *plan.updates])
+            delete_groups = self._group_zotero_deletes(plan.deletes)
+            for parent_key in sorted(set(changed_groups) | set(delete_groups)):
+                if delete_groups.get(parent_key, {}).get("parent_meta"):
+                    continue
+                group = changed_groups.get(parent_key, {})
+                deleted = delete_groups.get(parent_key, {})
+
+                attachment_keys = set(group.get("attachment", set()))
+                if attachment_keys:
+                    documents.extend(
+                        zotero_source.fetch_item_documents(
+                            parent_key,
+                            kinds={"attachment"},
+                            attachment_keys=attachment_keys,
+                        )
+                    )
+
+                if (
+                    group.get("note")
+                    or group.get("annotation")
+                    or deleted.get("note")
+                    or deleted.get("annotation")
+                ):
+                    documents.extend(
+                        zotero_source.fetch_item_documents(
+                            parent_key,
+                            kinds={"note", "annotation"},
+                        )
+                    )
+
+        deduped = list({doc.doc_id: doc for doc in documents}.values())
+        return deduped, units_by_id
+
+    def _record_ledger_units_for_documents(
+        self,
+        documents: List[Any],
+        units_by_id: Dict[str, Any],
+    ) -> None:
+        unit_ids = {
+            unit_id
+            for doc in documents
+            for unit_id in [self._unit_id_for_document(doc)]
+            if unit_id in units_by_id
+        }
+        self._record_ledger_unit_states([units_by_id[unit_id] for unit_id in sorted(unit_ids)])
+
+    def _apply_ledger_metadata_updates(self, plan: WorkPlan) -> None:
+        """Refresh source metadata for parent_meta units without embedding."""
+        zotero_source = self._get_zotero_source()
+        if zotero_source is None:
+            return
+
+        deleted_parents = {
+            parent
+            for parent, group in self._group_zotero_deletes(plan.deletes).items()
+            if group.get("parent_meta")
+        }
+        parent_meta_units = [
+            unit
+            for unit in (*plan.creates, *plan.updates)
+            if unit.identity_field == "zotero_key"
+            and unit.unit_kind == "parent_meta"
+            and unit.identity_value not in deleted_parents
+        ]
+        for unit in parent_meta_units:
+            fresh = self._fetch_zotero_metadata_base(zotero_source, unit.identity_value)
+            if fresh is None:
+                continue
+            records = self.registry.chunk_records_for_source("zotero_key", unit.identity_value)
+            ids = [record["chunk_id"] for record in records]
+            if ids:
+                stored = self.vector_store.get_by_ids(ids)
+                existing_by_id = {doc_id: metadata for doc_id, _text, metadata in stored}
+                metadatas = [
+                    self._merge_source_metadata(existing_by_id.get(chunk_id, {}), fresh)
+                    for chunk_id in ids
+                ]
+                self.vector_store.update_metadata(ids, metadatas)
+                self.registry.record_chunks(ids, metadatas)
+            self._record_ledger_unit_states([unit])
+
+    def _fetch_zotero_metadata_base(
+        self, source: ZoteroSource, item_key: str
+    ) -> Optional[Dict[str, Any]]:
+        conn = source._get_db_connection()
+        if not conn:
+            return None
+        try:
+            rows = source._get_items_by_keys(conn, [item_key])
+            if not rows:
+                return None
+            return source._get_item_metadata(conn, rows[0]["itemID"])
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _merge_source_metadata(
+        existing: Dict[str, Any],
+        fresh_source_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        chunk_specific = {
+            "source_type",
+            "source_id",
+            "chunk_level",
+            "chunk_index",
+            "chunk_id_variant",
+            "attachment_id",
+            "attachment_key",
+            "note_id",
+            "note_key",
+            "annotation_id",
+            "annotation_key",
+            "file_name",
+            "file_path",
+            "content_type",
+            "text_source",
+            "fulltext_available",
+            "fulltext_partial_fallback",
+            "page",
+        }
+        merged = dict(existing or {})
+        for key, value in fresh_source_metadata.items():
+            if key not in chunk_specific:
+                merged[key] = value
+        return merged
+
+    def _record_ledger_unit_states(self, units: List[Any]) -> None:
+        if not units:
+            return
+        indexed_at = (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        rows = [
+            {
+                "unit_id": unit.unit_id,
+                "identity_field": unit.identity_field,
+                "identity_value": unit.identity_value,
+                "unit_kind": unit.unit_kind,
+                "source_fingerprint": unit.fingerprint,
+                "indexed_at": indexed_at,
+            }
+            for unit in units
+        ]
+        try:
+            self.registry.record_unit_states(rows)
+        except Exception as e:
+            print(f"[WARN] Ledger unit-state update failed: {e}")
+            self._report_exception(
+                stage="ledger_write",
+                remediation="ledger",
+                message="Ledger unit-state update failed",
+                exception=e,
+                extra={"unit_ids": [row["unit_id"] for row in rows[:20]]},
+            )
+
+    def _delete_zotero_attachment_chunks(
+        self, parent_key: str, attachment_key: str
+    ) -> None:
+        where = {
+            "$and": [
+                {"zotero_key": parent_key},
+                {"source_type": "zotero_fulltext"},
+                {"attachment_key": attachment_key},
+            ]
+        }
+        self.vector_store.delete_where(where)
+        self.registry.delete_chunks_matching(
+            "zotero_key",
+            parent_key,
+            source_types=["zotero_fulltext"],
+            attachment_key=attachment_key,
+        )
+
+    def _delete_zotero_note_annotation_chunks(self, parent_key: str) -> None:
+        source_types = ["zotero_note", "zotero_annotation"]
+        self.vector_store.delete_where(
+            {
+                "$and": [
+                    {"zotero_key": parent_key},
+                    {"source_type": {"$in": source_types}},
+                ]
+            }
+        )
+        self.registry.delete_chunks_matching(
+            "zotero_key",
+            parent_key,
+            source_types=source_types,
+        )
+
+    def _obsidian_create_update_paths(self, plan: WorkPlan) -> List[str]:
+        return sorted(
+            unit.identity_value[len("obsidian-") :]
+            for unit in (*plan.creates, *plan.updates)
+            if unit.unit_kind == "vault_file"
+            and unit.identity_field == "source_id"
+            and unit.identity_value.startswith("obsidian-")
+        )
+
+    def _obsidian_update_paths(self, plan: WorkPlan) -> List[str]:
+        return sorted(
+            unit.identity_value[len("obsidian-") :]
+            for unit in plan.updates
+            if unit.unit_kind == "vault_file"
+            and unit.identity_field == "source_id"
+            and unit.identity_value.startswith("obsidian-")
+        )
+
+    def _obsidian_delete_paths(self, plan: WorkPlan) -> List[str]:
+        prefix = "obsidian:"
+        return sorted(
+            unit_id[len(prefix) :]
+            for unit_id in plan.deletes
+            if unit_id.startswith(prefix)
+        )
+
+    def _group_zotero_states(self, units: List[Any]) -> Dict[str, Dict[str, set[str]]]:
+        groups: Dict[str, Dict[str, set[str]]] = {}
+        for unit in units:
+            if unit.identity_field != "zotero_key":
+                continue
+            group = groups.setdefault(
+                unit.identity_value,
+                {"parent_meta": set(), "attachment": set(), "note": set(), "annotation": set()},
+            )
+            if unit.unit_kind == "parent_meta":
+                group["parent_meta"].add(unit.unit_id)
+                continue
+            child_key = self._child_key_from_unit_id(unit.unit_id)
+            if child_key and unit.unit_kind in group:
+                group[unit.unit_kind].add(child_key)
+        return groups
+
+    def _group_zotero_deletes(self, unit_ids: List[str]) -> Dict[str, Dict[str, set[str]]]:
+        groups: Dict[str, Dict[str, set[str]]] = {}
+        for unit_id in unit_ids:
+            parsed = self._parse_zotero_unit_id(unit_id)
+            if parsed is None:
+                continue
+            parent_key, kind, child_key = parsed
+            group = groups.setdefault(
+                parent_key,
+                {"parent_meta": set(), "attachment": set(), "note": set(), "annotation": set()},
+            )
+            if kind == "parent_meta":
+                group["parent_meta"].add(unit_id)
+            elif child_key and kind in group:
+                group[kind].add(child_key)
+        return groups
+
+    @staticmethod
+    def _parse_zotero_unit_id(unit_id: str) -> Optional[tuple[str, str, Optional[str]]]:
+        parts = str(unit_id).split(":")
+        if len(parts) == 3 and parts[0] == "zotero" and parts[2] == "meta":
+            return parts[1], "parent_meta", None
+        if len(parts) == 4 and parts[0] == "zotero":
+            return parts[1], parts[2], parts[3]
+        return None
+
+    @staticmethod
+    def _child_key_from_unit_id(unit_id: str) -> Optional[str]:
+        parts = str(unit_id).split(":")
+        if len(parts) == 4:
+            return parts[3]
+        return None
+
+    @staticmethod
+    def _unit_id_for_document(doc: Any) -> Optional[str]:
+        metadata = doc.metadata or {}
+        source_type = metadata.get("source_type")
+        zotero_key = metadata.get("zotero_key")
+        if source_type == "zotero_note" and zotero_key and metadata.get("note_key"):
+            return f"zotero:{zotero_key}:note:{metadata['note_key']}"
+        if source_type == "zotero_fulltext" and zotero_key and metadata.get("attachment_key"):
+            return f"zotero:{zotero_key}:attachment:{metadata['attachment_key']}"
+        if source_type == "zotero_annotation" and zotero_key and metadata.get("annotation_key"):
+            return f"zotero:{zotero_key}:annotation:{metadata['annotation_key']}"
+        if source_type == "obsidian" and metadata.get("relative_path"):
+            return f"obsidian:{metadata['relative_path']}"
+        return None
 
     def _delta_state_path(self) -> Path:
         cfg = self._delta_cfg()
@@ -983,10 +1742,11 @@ class ResearchRAGPipeline:
             "last_sqlite_date_modified": sqlite_date_modified or "",
             "last_sqlite_effective_modified": sqlite_date_modified or "",
             "last_sqlite_date_deleted": sqlite_date_deleted or "",
-            "last_sqlite_attachment_storage_mod_time": int(sqlite_attachment_storage_mod_time or 0),
+            "last_sqlite_attachment_storage_mod_time": int(
+                sqlite_attachment_storage_mod_time or 0
+            ),
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        write_json_durable(path, payload, indent=2)
 
     def _get_zotero_source(self) -> Optional[ZoteroSource]:
         for source in self.sources:
@@ -1231,9 +1991,9 @@ class ResearchRAGPipeline:
         return any(previous.get(key) != value for key, value in current.items())
 
     def _save_source_hash(self):
-        """Save current per-source hashes."""
+        """Save current per-source hashes (durable)."""
         hash_file = self.output_dir / "source_hash.txt"
-        hash_file.write_text(json.dumps(self._compute_source_hashes(), indent=2))
+        write_json_durable(hash_file, self._compute_source_hashes(), indent=2)
 
     def _reset_index_state(self):
         """Reset progress and storage for a full re-index."""
@@ -1298,7 +2058,7 @@ class ResearchRAGPipeline:
             zotero_key: Filter by specific Zotero item key
             year_min: Filter results published on or after this year
             year_max: Filter results published on or before this year
-            chunk_level: Filter by chunk granularity (coarse/mid/fine for context control)
+            chunk_level: Filter by chunk level (v0.6: mid/atomic; legacy: coarse/fine)
             author_contains: Filter results where author field contains this string
             title_contains: Filter results where title field contains this string
             where: Advanced Chroma where clause for custom filtering
@@ -1306,7 +2066,7 @@ class ResearchRAGPipeline:
         Returns:
             List of search results as (doc_id, text, score, metadata) tuples
         """
-        print(f"\nQuery: {query_text}\n")
+        print(f"\nQuery: {query_text}\n", file=sys.stderr)
         t_total_start = time.perf_counter()
         timings: Dict[str, float] = {}
 
@@ -1428,6 +2188,129 @@ class ResearchRAGPipeline:
             print(
                 "[TIMING] "
                 f"mode={mode} "
-                + " ".join(f"{k}={v:.1f}" for k, v in timings.items())
+                + " ".join(f"{k}={v:.1f}" for k, v in timings.items()),
+                file=sys.stderr,
             )
         return results
+
+    def survey_sources(
+        self,
+        query_text: str,
+        k: int = 20,
+        *,
+        retrieval_mode: Optional[str] = None,
+        k_recall_override: Optional[int] = None,
+        source_type: Optional[str] = None,
+        zotero_key: Optional[str] = None,
+        year_min: Optional[int] = None,
+        year_max: Optional[int] = None,
+        chunk_level: Optional[str] = None,
+        author_contains: Optional[str] = None,
+        title_contains: Optional[str] = None,
+        collection: Optional[str] = None,
+        item_type: Optional[str] = None,
+        doi: Optional[str] = None,
+        language: Optional[str] = None,
+        tag: Optional[str] = None,
+        representative_limit: int = 3,
+        where: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run a broad survey by aggregating chunk hits into source rows."""
+        print(f"\nSurvey query: {query_text}\n", file=sys.stderr)
+        t_total_start = time.perf_counter()
+        timings: Dict[str, float] = {}
+
+        retrieval_config = self.config.get("retrieval", {})
+        survey_config = retrieval_config.get("survey", {}) or {}
+        k_recall_cfg = survey_config.get("k_recall", retrieval_config.get("k_recall", 50))
+        k_recall = int(k_recall_override) if k_recall_override is not None else int(k_recall_cfg)
+        survey_chunk_level = chunk_level or survey_config.get("chunk_level", "mid")
+
+        mode_default = str(retrieval_config.get("mode_default", "fast")).lower()
+        mode = str(retrieval_mode or mode_default).lower()
+        if mode not in {"fast", "strict"}:
+            mode = "fast"
+
+        t_embed_start = time.perf_counter()
+        query_embedding = self.embedder.embed_query(query_text)
+        timings["embed_ms"] = (time.perf_counter() - t_embed_start) * 1000.0
+
+        where_filter = build_where_filter(
+            source_type=source_type,
+            zotero_key=zotero_key,
+            chunk_level=survey_chunk_level,
+            extra_where=where,
+        )
+        if mode == "strict":
+            where_filter = build_where_filter(
+                source_type=source_type,
+                zotero_key=zotero_key,
+                year_min=year_min,
+                year_max=year_max,
+                chunk_level=survey_chunk_level,
+                extra_where=where,
+            )
+
+        t_vector_start = time.perf_counter()
+        results = self.vector_store.search(query_embedding, k=k_recall, filter=where_filter)
+        timings["vector_ms"] = (time.perf_counter() - t_vector_start) * 1000.0
+
+        t_post_filter_start = time.perf_counter()
+        if (
+            author_contains
+            or title_contains
+            or (mode == "fast" and (year_min is not None or year_max is not None))
+        ):
+            results = apply_post_filters(
+                results,
+                year_min=(year_min if mode == "fast" else None),
+                year_max=(year_max if mode == "fast" else None),
+                author_contains=author_contains,
+                title_contains=title_contains,
+            )
+        timings["postfilter_ms"] = (time.perf_counter() - t_post_filter_start) * 1000.0
+
+        t_aggregate_start = time.perf_counter()
+        payload = aggregate_hits_by_source(
+            results,
+            self.registry,
+            limit=k,
+            representative_limit=representative_limit,
+            source_type=source_type,
+            title_contains=title_contains,
+            author=author_contains,
+            collection=collection,
+            item_type=item_type,
+            doi=doi,
+            language=language,
+            tag=tag,
+        )
+        timings["aggregate_ms"] = (time.perf_counter() - t_aggregate_start) * 1000.0
+        timings["total_ms"] = (time.perf_counter() - t_total_start) * 1000.0
+
+        payload["query"] = query_text
+        payload["filters"] = {
+            "source_type": source_type,
+            "zotero_key": zotero_key,
+            "year_min": year_min,
+            "year_max": year_max,
+            "chunk_level": survey_chunk_level,
+            "author": author_contains,
+            "title_contains": title_contains,
+            "collection": collection,
+            "item_type": item_type,
+            "doi": doi,
+            "language": language,
+            "tag": tag,
+        }
+        payload["recall"] = {"k_recall": k_recall, "mode": mode}
+
+        telemetry_cfg = retrieval_config.get("telemetry", {})
+        if telemetry_cfg.get("enabled", True):
+            print(
+                "[TIMING] "
+                f"mode={mode} survey=true "
+                + " ".join(f"{key}={value:.1f}" for key, value in timings.items()),
+                file=sys.stderr,
+            )
+        return payload

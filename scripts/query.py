@@ -2,6 +2,7 @@
 """CLI script for querying the research library."""
 
 import argparse
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -16,6 +17,7 @@ if sys.platform == "win32":
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.mcp_formatters import format_search_results
 from src.pipeline import ResearchRAGPipeline
 
 
@@ -50,6 +52,68 @@ def print_results(results, show_full_text=False):
         else:
             preview = textwrap.shorten(text, width=500, placeholder="...")
             print(preview)
+
+        print(f"\n{'-' * 80}\n")
+
+
+def print_survey_results(payload):
+    """Print source-level survey results."""
+    sources = payload.get("sources", [])
+    if not sources:
+        print("No source-level survey results found.")
+        return
+
+    print(f"\n{'=' * 80}")
+    print(f"Found {payload.get('total_sources', len(sources))} source matches")
+    recall = payload.get("recall", {}) or {}
+    print(
+        "Survey: "
+        f"k_recall={recall.get('k_recall', 'unknown')}, "
+        f"mode={recall.get('mode', 'unknown')}"
+    )
+    print(f"{'=' * 80}\n")
+
+    for rank, source in enumerate(sources, 1):
+        print(
+            f"#{rank} - Best Score: {source.get('best_score', 0.0):.4f} "
+            f"({source.get('hit_count', 0)} hits)"
+        )
+        print(
+            f"Identity: {source.get('identity_field', 'unknown')}="
+            f"{source.get('identity_value', 'unknown')}"
+        )
+        print(f"Title: {source.get('title', 'Untitled')}")
+        print(f"Authors: {source.get('authors', 'Unknown')}")
+        if source.get("year"):
+            print(f"Year: {source['year']}")
+        if source.get("item_type"):
+            print(f"Item Type: {source['item_type']}")
+        if source.get("venue"):
+            print(f"Venue: {source['venue']}")
+        if source.get("doi"):
+            print(f"DOI: {source['doi']}")
+        if source.get("language"):
+            print(f"Language: {source['language']}")
+        if source.get("tags"):
+            print(f"Tags: {source['tags']}")
+        if source.get("collections"):
+            print(f"Collections: {source['collections']}")
+        if source.get("abstract"):
+            print(f"Abstract: {textwrap.shorten(source['abstract'], width=500, placeholder='...')}")
+        if source.get("backlink"):
+            print(f"Link: {source['backlink']}")
+
+        representatives = source.get("representative_chunks", []) or []
+        if representatives:
+            print("\nRepresentative chunks:")
+            for chunk in representatives:
+                print(
+                    f"  - {chunk.get('chunk_id')} "
+                    f"(score={chunk.get('score', 0.0):.4f}, "
+                    f"level={chunk.get('chunk_level')}, "
+                    f"index={chunk.get('chunk_index')})"
+                )
+                print(f"    {chunk.get('snippet', '')}")
 
         print(f"\n{'-' * 80}\n")
 
@@ -317,6 +381,29 @@ def main():
         help="Show full text of results instead of truncated preview. Useful for detailed analysis.",
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the raw result payload as JSON instead of formatted text "
+            "(machine surface; mirrors the MCP search/survey tool output). "
+            "Works with one-shot queries, with or without --survey."
+        ),
+    )
+    parser.add_argument(
+        "--survey",
+        action="store_true",
+        help=(
+            "Return source-level survey rows by aggregating recalled mid chunks. "
+            "This is the v0.6 broad-survey replacement for coarse chunk search."
+        ),
+    )
+    parser.add_argument(
+        "--representative-chunks",
+        type=int,
+        default=3,
+        help="Number of representative chunk snippets to show per source in --survey mode.",
+    )
+    parser.add_argument(
         "--no-rerank",
         action="store_true",
         help=(
@@ -345,12 +432,11 @@ def main():
     parser.add_argument(
         "--chunk-level",
         type=str,
-        choices=["coarse", "mid", "fine"],
+        choices=["mid", "atomic", "coarse", "fine"],
         default=None,
         help=(
-            "Filter by hierarchical chunk granularity level. COARSE: large sections "
-            "(~1500-2500 chars). MID: medium sections (~800-1500 chars). FINE: small focused "
-            "segments (~paragraph-sized)."
+            "Filter by chunk level. v0.6 production uses MID for text/markdown and "
+            "ATOMIC for Zotero annotations; COARSE/FINE are legacy/experimental."
         ),
     )
     parser.add_argument(
@@ -395,6 +481,36 @@ def main():
         default=None,
         help="Restrict to publications up to this year (inclusive).",
     )
+    parser.add_argument(
+        "--collection",
+        type=str,
+        default=None,
+        help="Filter survey source rows by Zotero collection name substring.",
+    )
+    parser.add_argument(
+        "--item-type",
+        type=str,
+        default=None,
+        help="Filter survey source rows by exact Zotero item type, e.g. book or journalArticle.",
+    )
+    parser.add_argument(
+        "--doi",
+        type=str,
+        default=None,
+        help="Filter survey source rows by DOI substring.",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default=None,
+        help="Filter survey source rows by exact Zotero language code, e.g. en.",
+    )
+    parser.add_argument(
+        "--tag",
+        type=str,
+        default=None,
+        help="Filter survey source rows by exact Zotero tag.",
+    )
 
     args = parser.parse_args()
 
@@ -412,23 +528,58 @@ def main():
 
         if args.query:
             query_text = " ".join(args.query)
-            results = pipeline.query(
-                query_text,
-                k=args.k,
-                retrieval_mode=args.mode,
-                rerank_enabled=(False if args.no_rerank else None),
-                diversity_enabled=(False if args.no_diversity else None),
-                diversity_max_per_key=args.max_per_source,
-                k_recall_override=args.k_recall,
-                chunk_level=args.chunk_level,
-                source_type=args.source_type,
-                zotero_key=args.zotero_key,
-                author_contains=args.author,
-                title_contains=args.title_contains,
-                year_min=args.year_min,
-                year_max=args.year_max,
-            )
-            print_results(results, show_full_text=args.full)
+            if args.survey:
+                payload = pipeline.survey_sources(
+                    query_text,
+                    k=args.k,
+                    retrieval_mode=args.mode,
+                    k_recall_override=args.k_recall,
+                    chunk_level=args.chunk_level,
+                    source_type=args.source_type,
+                    zotero_key=args.zotero_key,
+                    author_contains=args.author,
+                    title_contains=args.title_contains,
+                    year_min=args.year_min,
+                    year_max=args.year_max,
+                    collection=args.collection,
+                    item_type=args.item_type,
+                    doi=args.doi,
+                    language=args.language,
+                    tag=args.tag,
+                    representative_limit=args.representative_chunks,
+                )
+                if args.json:
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+                else:
+                    print_survey_results(payload)
+            else:
+                results = pipeline.query(
+                    query_text,
+                    k=args.k,
+                    retrieval_mode=args.mode,
+                    rerank_enabled=(False if args.no_rerank else None),
+                    diversity_enabled=(False if args.no_diversity else None),
+                    diversity_max_per_key=args.max_per_source,
+                    k_recall_override=args.k_recall,
+                    chunk_level=args.chunk_level,
+                    source_type=args.source_type,
+                    zotero_key=args.zotero_key,
+                    author_contains=args.author,
+                    title_contains=args.title_contains,
+                    year_min=args.year_min,
+                    year_max=args.year_max,
+                )
+                if args.json:
+                    # Reuse the shared MCP formatter so the CLI machine surface
+                    # matches search_research_library by construction.
+                    payload = {
+                        "query": query_text,
+                        "count": len(results),
+                        "results": format_search_results(results),
+                    }
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+                else:
+                    print_results(results, show_full_text=args.full)
         else:
             interactive_mode(pipeline)
 

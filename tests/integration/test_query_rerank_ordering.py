@@ -9,7 +9,7 @@ class DummyEmbedder:
 
 
 class DummyVectorStore:
-    def search(self, query_embedding, k=5):
+    def search(self, query_embedding, k=5, filter=None):
         return [
             ("id-1", "first", 0.9, {}),
             ("id-2", "second", 0.8, {}),

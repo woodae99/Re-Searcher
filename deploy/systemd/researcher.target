@@ -1,0 +1,11 @@
+[Unit]
+Description=Re-Searcher (whole system: Chroma + vLLM embed/rerank + MCP + tailnet)
+# One handle for the lot. `start` pulls in the Wants (ordered by each unit's
+# After=); `stop`/`restart` propagate via each unit's PartOf=researcher.target.
+Wants=researcher-chroma.service researcher-vllm.service researcher-mcp.service researcher-serve.service
+After=researcher-chroma.service researcher-vllm.service researcher-mcp.service researcher-serve.service
+
+[Install]
+# Enables optional boot autostart via `systemctl --user enable researcher.target`.
+# Leave unenabled for purely manual on/off.
+WantedBy=default.target

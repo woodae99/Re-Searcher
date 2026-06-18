@@ -102,6 +102,10 @@ def _registry_with_sources(tmp_path):
                 "source_id": "zotero-1-note-9",
                 "title": "Alpha Coaching",
                 "authors": "Whitehead",
+                "item_type": "book",
+                "DOI": "10.1234/alpha",
+                "tags": ["Process", "Theory"],
+                "language": "en",
                 "chunk_level": "mid",
                 "chunk_index": 0,
             },
@@ -339,6 +343,23 @@ def test_list_sources_empty_registry_returns_guidance(tmp_path):
 
         assert "build_registry.py" in result[0].text
         assert "checkpointed" in result[0].text
+
+    asyncio.run(run_test())
+
+
+def test_list_sources_passes_selection_metadata_filters(tmp_path):
+    async def run_test():
+        registry = _registry_with_sources(tmp_path)
+        server = _server_with_collection(_FakeCollection([]), registry=registry)
+
+        result = await server._list_sources(
+            {"item_type": "book", "language": "en", "tag": "Theory", "doi": "alpha"}
+        )
+
+        assert "Identity: zotero_key=Z1" in result[0].text
+        assert "Item Type: book" in result[0].text
+        assert "DOI: 10.1234/alpha" in result[0].text
+        assert "obsidian-B.md" not in result[0].text
 
     asyncio.run(run_test())
 

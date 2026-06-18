@@ -1,6 +1,71 @@
 # Changelog
 
-## Unreleased
+## 0.6.0 - 2026-06-18
+
+### Added
+- **vLLM embedding backend + managed lifecycle** (`src/embedding/vllm.py`,
+  `src/embedding/vllm_server.py`, `scripts/vllm_service.py`, `docs/EMBEDDING_BACKEND.md`):
+  v0.6 production embedder is Qwen3-Embedding-0.6B served by vLLM (~6× LM Studio
+  throughput; see `docs/EMBEDDER_BAKEOFF.md`). `VLLMEmbedding` reuses the
+  OpenAI-compatible client; `VLLMServer` + `managed_embedding_backend(config)` give a
+  config-driven stand-up → process → stand-down lifecycle so vLLM never has to be
+  hand-driven. Bulk jobs (`scripts/index.py`, `scripts/reindex.py`) auto start/stop the
+  container; `scripts/vllm_service.py {start,stop,status}` runs a persistent server for
+  interactive retrieval. Selectable via `embedding.provider: vllm`; LM Studio retained.
+- **Cross-encoder reranker via vLLM `/rerank`** (`CrossEncoderReranker` in
+  `src/retrieval/rerank.py`, `reranker_factory` `type: cross_encoder`): the v0.6
+  production reranker runtime — scores (query, document) pairs directly through vLLM's
+  native `/rerank` (default `BAAI/bge-reranker-v2-m3`), no LLM JSON to parse. Managed by
+  the same vLLM lifecycle (`managed_reranker_backend`; `scripts/vllm_service.py` stands up
+  embedder + reranker together for retrieval). The old LM Studio/LLM JSON reranker is retired.
+- **Asymmetric query instruction** (`embedding.query_instruction`): prepended to queries
+  in `embed_query` only (documents embedded raw) — required for Qwen3-Embedding's
+  retrieval-quality edge; no-op/empty for symmetric models like bge-m3.
+- **Embedder bake-off** (`scripts/eval_embedders.py`, `docs/EMBEDDER_BAKEOFF.md`):
+  compares embedders on retrieval quality + cost (throughput, projected store size) with
+  family-correct prompt prefixes; established Qwen3-Embedding-0.6B > bge-m3 at equal storage.
+- **Passage-level chunking eval** (`src/passage_eval.py`, `scripts/eval_passage.py`,
+  `docs/PASSAGE_EVAL.md`): sharpens the v0.6 chunk-*size* decision past the
+  source-level eval's saturation. Scores passage retrieval (`passage_hit@k`,
+  `passage_mrr`, strict ≥½-span variant) against real target texts + a large
+  distractor pool, plus the completeness/density trade-off under read-time
+  neighbour expansion — all deterministic span arithmetic (no LLM judge). Gold is
+  generated once via a local LLM with a curation pass that snaps passages to
+  sentence boundaries and screens out reference-list / front-matter junk. `--rerank`
+  scores the production cross-encoder reranker path.
+- **Reranker bake-off** (`scripts/eval_rerankers.py`, `docs/RERANKER_BAKEOFF.md`):
+  holds grain + gold fixed and sweeps rerankers on speed *and* accuracy
+  (`none` / HTTP cross-encoder). The v0.6 production path is the vLLM-served
+  cross-encoder in `src/retrieval/rerank.py`.
+- **`scripts/query.py --json`** — the CLI search/survey surface now has a
+  machine-readable mode, closing the last CLI↔MCP parity gap. Search emits
+  `{query, count, results}` (results via the shared `format_search_results`); survey
+  emits the `survey_sources` payload — the same shapes the MCP `search_research_library`
+  / `survey_research_sources` tools return, so parity holds by construction. Works on
+  one-shot queries with or without `--survey`. (`scripts/sources.py` already had `--json`.)
+- **Mission-surface validation suite** (`tests/integration/test_mission_surface_parity.py`):
+  22 live-stack tests derived from the process-in-coaching mission spec — proves CLI/MCP
+  availability + equivalence, single-grain retrieval (mid only, no `parent_id`),
+  register-as-control-plane filtering + extraction provenance, the §5 screening
+  enumeration (all mid chunks, deterministic stop), and survey/pinned-source retrieval.
+  Service-guarded so it skips cleanly when the live stack is down.
+
+### Changed
+- **Status/diagnostics moved to stderr; stdout is the data channel.** The `[OK]`
+  Chroma-connect and Zotero/Obsidian source banners (`src/storage/chroma.py`,
+  `src/pipeline.py`) and the per-query `Query:`/`Survey query:`/`[TIMING]` lines now
+  print to **stderr**. `--json` stdout is therefore pristine JSON that consumers parse
+  directly — no leading-banner slicing. Humans still see the diagnostics on the terminal.
+- **Chunking defaults → `recursive` 700/100** in `config.example.yaml` (top-level
+  and `chunking.defaults`), replacing the stale `character`/2048 default. Settled
+  by measured retrieval evals: `recursive` decisively beats `character`, and
+  700/100 wins on passage-retrieval quality through the rerank stage while staying
+  lean to read. See `docs/CHUNKING_EVAL.md` and `docs/PASSAGE_EVAL.md`.
+  (Apply the same change to the live, gitignored `config.yaml`.)
+- **Production cutover defaults are ledger-first and single-grain only.**
+  `indexing.ledger.execute` defaults to true, ledger shadow mode defaults off,
+  `legacy_router` is rejected by preflight/factory code, and status distinguishes
+  expected no-fulltext coverage-null units from unexpected ledger drift.
 
 ### Fixed
 - **Launcher Python selection is consistent.** `run_mcp.bat`,
@@ -8,8 +73,10 @@
   three different conventions (system Python hardcoded / `.venv` hardcoded /
   `.venv`-preferred); they now all prefer the project `.venv` and fall back to
   system Python 3.13, matching `routine_update`/`warmup`. The repo `.venv` had
-  drifted empty — repopulate from `requirements.txt` (chromadb pinned to the
-  running server's 1.3.0). See `docs/SPEC_VNEXT.md` for the planned rebuild.
+  drifted empty — repopulate from `requirements.txt`. For v0.6/Sparky,
+  Chroma is pinned to 1.5.9 via `requirements.txt` and
+  `constraints-sparky.txt`; see `docs/SPEC_V0.6_REBUILD.md` for the planned
+  rebuild.
 
 ## 0.5.0
 

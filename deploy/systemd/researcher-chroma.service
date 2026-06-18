@@ -1,0 +1,14 @@
+[Unit]
+Description=Re-Searcher ChromaDB (vector store)
+PartOf=researcher.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/colin/Dev/Re-Searcher
+Environment=RESEARCHER_CHROMA_PATH=/home/colin/.local/share/re-searcher/chroma/live
+ExecStart=/home/colin/Dev/Re-Searcher/.venv/bin/chroma run --path ${RESEARCHER_CHROMA_PATH} --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=researcher.target

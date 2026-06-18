@@ -197,14 +197,11 @@ Search the research library using semantic search.
 - **mode** (optional): Retrieval filter strategy - `"fast"` or `"strict"`
   - `fast`: Broad vector recall followed by post-filtering (usually better for large corpora)
   - `strict`: Apply compatible metadata filters in Chroma before retrieval (useful for exact scoped searches)
-- **chunk_level** (optional): Filter by chunk granularity - `"coarse"`, `"mid"`, or `"fine"`
-  - `coarse`: Large sections with broad context (~1500-2500 chars, best for overview)
-  - `mid`: Medium sections with balanced context (~800-1500 chars)
-  - `fine`: Small segments like paragraphs/headings (precise but may lack context)
+- **chunk_level** (optional): Filter by chunk level. v0.6 production uses `"mid"` for text/markdown and `"atomic"` for Zotero annotations; `"coarse"`/`"fine"` are legacy/experimental.
 
 **Retrieval Controls:**
 - **k_recall** (optional): How many candidates to retrieve before filtering (default: from config, typically 50)
-- **no_rerank** (optional): Set `true` to disable LLM reranking (faster, uses pure vector similarity)
+- **no_rerank** (optional): Set `true` to disable configured cross-encoder reranking (faster, uses pure vector similarity)
 - **no_diversity** (optional): Set `true` to disable deduplication (allows many chunks from same source)
 - **max_per_source** (optional): Max results per source document (auto-enables diversity, e.g., 1 for broad scan, 10 for deep dive)
 
@@ -216,43 +213,54 @@ Search the research library using semantic search.
 - **year_min** (optional): Minimum publication year (inclusive)
 - **year_max** (optional): Maximum publication year (inclusive)
 
-**Returns:** Results with hierarchical metadata including:
-- Chunk level (coarse/mid/fine)
-- Parent chunk ID (for context expansion)
+**Returns:** Results with chunk metadata including:
+- Chunk level (`mid` for text/markdown, `atomic` for Zotero annotations in v0.6)
 - Section headings (for Obsidian notes)
 - Standard metadata (title, authors, DOI, backlinks)
 
 **Usage Examples:**
 ```json
-// Broad overview across sources
-{"query": "dialectic in coaching", "k": 5, "chunk_level": "coarse", "max_per_source": 1}
+// Broad overview across sources: prefer survey_research_sources
+{"query": "dialectic in coaching", "k": 10}
 
 // Deep dive into specific author
 {"query": "process philosophy", "k": 10, "author": "Whitehead", "chunk_level": "mid", "max_per_source": 5}
 
 // Recent research only
-{"query": "coaching psychology", "year_min": 2020, "chunk_level": "coarse"}
+{"query": "coaching psychology", "year_min": 2020, "chunk_level": "mid"}
 
 // Exact scoped metadata filtering in Chroma
 {"query": "coaching psychology", "mode": "strict", "source_type": "zotero_fulltext", "year_min": 2020}
 ```
 
+### survey_research_sources
+
+Run a broad v0.6 survey by searching `mid` chunks, grouping hits by source via
+the registry, and returning source rows with hit counts, best score, selection
+metadata, and representative chunk IDs/snippets. Use this instead of legacy
+coarse chunk search for candidate discovery.
+
+**Example:**
+```json
+{"query": "dialectic in coaching", "k": 10, "k_recall": 100, "item_type": "book"}
+```
+
 ### get_chunk_context
 
-Fetch a chunk and its parent for expanded context. Use this when a fine-grained search result needs more surrounding text.
+Fetch a chunk by ID. In legacy hierarchical indexes, this can also fetch a parent chunk.
+In v0.6 single-grain indexes, use `get_source_chunks` to enumerate neighbouring chunks
+from the same source in `chunk_index` order.
 
 **Parameters:**
 - **chunk_id** (required): The ID of the chunk (from search results)
-- **include_parent** (optional): Include parent chunk text (default: true)
+- **include_parent** (optional): Include parent chunk text for legacy hierarchical chunks (default: true)
 
-**Returns:** The chunk text plus its parent chunk, enabling hierarchical context expansion:
-- Fine chunks → Mid chunks → Coarse chunks
+**Returns:** The chunk text plus parent context when legacy `parent_id` metadata exists.
 
 **Example workflow:**
-1. Search returns a fine-grained result
-2. Call `get_chunk_context` with the chunk_id
-3. Get the parent (mid-level) chunk for more context
-4. If needed, call again with parent's parent_id for coarse-level context
+1. Search returns a relevant result
+2. Call `get_source_chunks` with the source identity from the hit
+3. Read nearby `mid` chunks in `chunk_index` order for context
 
 ### get_source_chunks
 
@@ -330,16 +338,26 @@ trusting enumeration results.
 
 ## CLI parity
 
-Every enumeration tool has a CLI equivalent with identical logic and output
-formatting (`scripts/sources.py`):
+Every tool has a CLI equivalent with identical logic and output. Enumeration tools
+live in `scripts/sources.py`; search and survey live in `scripts/query.py`:
 
 ```bash
 python scripts/sources.py list --source-type zotero_fulltext --title-contains coaching
 python scripts/sources.py chunks --zotero-key XMN6HI9Y --chunk-level mid --no-text
 python scripts/sources.py status
+python scripts/query.py "how is process used in coaching" --zotero-key XMN6HI9Y --no-rerank --json
+python scripts/query.py "process becoming flux" --survey --max-per-source 1 --json
 ```
 
-Add `--json` to any subcommand for machine-readable output.
+Add `--json` to any `sources.py` subcommand or to `query.py` for machine-readable
+output. The CLI `--json` payloads are built from the same `src/mcp_formatters`
+the MCP tools use, so they match the corresponding tool output by construction
+(`search_research_library` ↔ `query.py --json`, `survey_research_sources` ↔
+`query.py --survey --json`).
+
+**stdout is the data channel.** With `--json`, stdout carries only JSON — all
+status/diagnostic lines (`[OK]` connect/source banners, `Query:`/`[TIMING]`) go to
+stderr. Parse stdout directly; no banner-slicing needed.
 
 ## Maintenance
 
@@ -462,9 +480,9 @@ The MCP server follows these principles for maintainability:
    - Formatters tested independently
    - Mock-friendly design
 
-## Hierarchical Chunking (vNext)
+## Hierarchical Chunking
 
-The MCP server supports the vNext hierarchical chunking strategy:
+The MCP server supports the hierarchical chunking strategy:
 
 ### Chunk Levels
 

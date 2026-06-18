@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.pipeline import ResearchRAGPipeline
 from src.preflight import run_preflight, check_services
+from src.embedding.vllm_server import managed_embedding_backend
 
 
 def resolve_stop_flag_path(config: dict) -> Path:
@@ -47,7 +48,7 @@ def main():
     parser.add_argument(
         "--allow-legacy-chunking",
         action="store_true",
-        help="Allow running with router_enabled=false (legacy chunking)",
+        help="Deprecated no-op; legacy hierarchical chunking is retired in v0.6.",
     )
     parser.add_argument(
         "--allow-default-config",
@@ -195,9 +196,11 @@ def main():
         sys.exit(0)
 
     try:
-        # Initialize and run pipeline
-        pipeline = ResearchRAGPipeline(config_path, progress_mode=progress_mode)
-        pipeline.run(force_reindex=args.force)
+        # Stand up the managed embedding backend (vLLM) for the duration of the run,
+        # then tear it down. No-op unless provider==vllm with managed lifecycle.
+        with managed_embedding_backend(config):
+            pipeline = ResearchRAGPipeline(config_path, progress_mode=progress_mode)
+            pipeline.run(force_reindex=args.force)
 
     except KeyboardInterrupt:
         print("\n\n[WARN] Indexing interrupted by user")

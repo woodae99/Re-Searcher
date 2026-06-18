@@ -1,4 +1,10 @@
-# Chunking vNext
+# Legacy Chunking Plan
+
+This document describes the pre-v0.6 hierarchical router. The v0.6 production
+default is `chunking.mode: v0.6_single_grain`, which emits `mid` text/markdown
+chunks and `atomic` Zotero annotation chunks. Set `chunking.mode: legacy_router`
+only for experiments or legacy tests that intentionally need `coarse`/`fine`
+chunks and `parent_id` navigation.
 
 ## Design statement
 
@@ -57,7 +63,7 @@ See `config.example.yaml` for the full configuration:
 
 ## Verification Test Plan
 
-Use this plan to verify the vNext chunking strategy after making changes.
+Use this plan to verify the hierarchical chunking strategy after making changes.
 
 ### Prerequisites
 
@@ -71,6 +77,7 @@ The test config at `tests/fixtures/configs/config.pipeline.yaml` should have:
 
 ```yaml
 chunking:
+  mode: legacy_router
   router_enabled: true
   id_strategy: stable_hash
   debug_router: true  # Enable router debug output

@@ -1,5 +1,5 @@
 # ── Core (Vector Store & Embeddings) -------------------------------------
-chromadb>=0.4.0
+chromadb==1.5.9  # Pin client/server for the v0.6 clean rebuild
 openai>=1.0.0
 
 # ── Legacy support (for backward compatibility) ---------------------------
@@ -30,6 +30,12 @@ rich>=13.0.0
 python-dotenv>=1.0.0
 
 # ── PDF & doc extraction --------------------------------------------------
+# v0.6 extraction route (see docs/EXTRACTION_QUALITY_GATE.md): Zotero FT cache +
+# pdfminer cover ~99% of the corpus; Marker+OCR is the rare escalate backstop.
+# Docling and pymupdf4llm were evaluated and dropped — Docling was only
+# pdfminer-grade (whitespace noise) and pymupdf4llm failed scans without OCR.
+# They can be re-added behind the extractor seam if a future fixture class needs them.
+marker-pdf==1.10.2
 PyMuPDF>=1.23.0
 python-docx>=1.0.0
 html2text>=2020.1.16

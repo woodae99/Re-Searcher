@@ -1,0 +1,5 @@
+# Sparky/v0.6 guard: Chroma client and server must stay on the same
+# fresh-build version. The old production server was 1.3.x; do not use it
+# for the clean rebuild.
+chromadb==1.5.9
+

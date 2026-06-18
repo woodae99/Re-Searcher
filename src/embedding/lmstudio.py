@@ -28,6 +28,10 @@ class LMStudioEmbedding(EmbeddingProvider):
             or embedding_config.get("model")
             or "text-embedding-bge-m3"
         )
+        # Optional asymmetric query instruction (e.g. Qwen3-Embedding, which expects
+        # "Instruct: ...\nQuery:" on queries and raw text on documents). Prepended in
+        # embed_query only — never to documents in embed_texts. No-op when unset.
+        self.query_instruction = embedding_config.get("query_instruction", "") or ""
         self.batch_size = int(lmstudio_config.get("batch_size", embedding_config.get("batch_size", 32)))
         self.batch_size = max(1, self.batch_size)
         self.max_concurrent_requests = int(
@@ -153,9 +157,10 @@ class LMStudioEmbedding(EmbeddingProvider):
             Embedding vector
         """
         try:
+            text = f"{self.query_instruction}{query}" if self.query_instruction else query
             response = self.client.embeddings.create(
                 model=self.model,
-                input=[query],
+                input=[text],
             )
 
             embedding = response.data[0].embedding

@@ -10,6 +10,7 @@ from pathlib import Path
 from src.indexing import DocumentStatus, IndexingProgress
 from src.pipeline import ResearchRAGPipeline
 from src.registry import SourceRegistry
+from src.sources.base import UnitState
 from src.sources.obsidian import ObsidianSource
 from src.sources import zotero as zotero_module
 from src.sources.zotero import ZoteroSource
@@ -48,6 +49,45 @@ def _make_vault(tmp_path, files):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     return vault
+
+
+class _FakeLedgerSource:
+    """Minimal source exposing enumerate_state for ledger-seed tests."""
+
+    def __init__(self, units):
+        self._units = units
+
+    def is_enabled(self):
+        return True
+
+    def enumerate_state(self):
+        return {u.unit_id: u for u in self._units}
+
+
+def test_seed_ledger_from_world_records_only_indexed_identities(tmp_path):
+    pipeline = _make_pipeline(tmp_path)
+
+    # Z1 has chunks (indexed); Z2 has none (e.g. failed/empty).
+    pipeline.registry.record_chunks(
+        ["c1"],
+        [{"source_type": "zotero_fulltext", "zotero_key": "Z1",
+          "source_id": "zotero-Z1-attachment-1", "chunk_level": "mid", "chunk_index": 0}],
+    )
+    pipeline.registry.refresh_sources()
+
+    pipeline.sources = [
+        _FakeLedgerSource([
+            UnitState("zotero:Z1:meta", "zotero_key", "Z1", "parent_meta", "mod:1"),
+            UnitState("zotero:Z1:attachment:A1", "zotero_key", "Z1", "attachment", "hash:x"),
+            UnitState("zotero:Z2:meta", "zotero_key", "Z2", "parent_meta", "mod:1"),
+        ])
+    ]
+
+    pipeline._seed_ledger_from_world()
+
+    states = pipeline.registry.get_unit_states()
+    # Z1 units (incl. parent_meta) recorded; the unindexed Z2 unit is not.
+    assert set(states) == {"zotero:Z1:meta", "zotero:Z1:attachment:A1"}
 
 
 # ---------------------------------------------------------------- deletes
@@ -288,17 +328,52 @@ def _zotero_fixture_db(tmp_path):
         CREATE TABLE items (itemID INTEGER PRIMARY KEY, itemTypeID INTEGER,
                             dateAdded TEXT, dateModified TEXT, key TEXT);
         CREATE TABLE deletedItems (itemID INTEGER PRIMARY KEY, dateDeleted TEXT);
-        CREATE TABLE itemAttachments (itemID INTEGER PRIMARY KEY, parentItemID INTEGER);
-        CREATE TABLE itemNotes (itemID INTEGER PRIMARY KEY, parentItemID INTEGER);
+        CREATE TABLE itemAttachments (itemID INTEGER PRIMARY KEY, parentItemID INTEGER,
+                                      path TEXT, contentType TEXT);
+        CREATE TABLE itemNotes (itemID INTEGER PRIMARY KEY, parentItemID INTEGER, note TEXT);
         CREATE TABLE itemAnnotations (itemID INTEGER PRIMARY KEY, parentItemID INTEGER,
                                       text TEXT, comment TEXT, sortIndex TEXT, pageLabel TEXT);
+        CREATE TABLE itemData (itemID INTEGER, fieldID INTEGER, valueID INTEGER);
+        CREATE TABLE itemDataValues (valueID INTEGER PRIMARY KEY, value TEXT);
+        CREATE TABLE fields (fieldID INTEGER PRIMARY KEY, fieldName TEXT);
+        CREATE TABLE itemCreators (itemID INTEGER, creatorID INTEGER, orderIndex INTEGER);
+        CREATE TABLE creators (creatorID INTEGER PRIMARY KEY, firstName TEXT, lastName TEXT);
+        CREATE TABLE itemTags (itemID INTEGER, tagID INTEGER);
+        CREATE TABLE tags (tagID INTEGER PRIMARY KEY, name TEXT);
+        CREATE TABLE collectionItems (collectionID INTEGER, itemID INTEGER);
+        CREATE TABLE collections (collectionID INTEGER PRIMARY KEY, collectionName TEXT);
         INSERT INTO itemTypes VALUES (1, 'book'), (2, 'attachment'), (3, 'annotation'), (4, 'note');
         -- top item 10 (PARENT) with attachment 20 (ATTACH) carrying annotation 30
         INSERT INTO items VALUES (10, 1, '', '2026-01-01 00:00:00', 'PARENT');
         INSERT INTO items VALUES (20, 2, '', '2026-01-01 00:00:00', 'ATTACH');
         INSERT INTO items VALUES (30, 3, '', '2026-01-01 00:00:00', 'ANNOT');
-        INSERT INTO itemAttachments VALUES (20, 10);
+        INSERT INTO items VALUES (40, 4, '', '2026-01-01 00:00:00', 'NOTEKEY');
+        INSERT INTO fields VALUES
+            (1, 'title'),
+            (2, 'DOI'),
+            (3, 'abstractNote'),
+            (4, 'publicationTitle'),
+            (5, 'language'),
+            (6, 'date');
+        INSERT INTO itemDataValues VALUES
+            (1, 'The Parent Book'),
+            (2, '10.1234/example'),
+            (3, 'A useful abstract.'),
+            (4, 'Coaching Studies'),
+            (5, 'en'),
+            (6, '2026');
+        INSERT INTO itemData VALUES
+            (10, 1, 1),
+            (10, 2, 2),
+            (10, 3, 3),
+            (10, 4, 4),
+            (10, 5, 5),
+            (10, 6, 6);
+        INSERT INTO tags VALUES (1, 'Process');
+        INSERT INTO itemTags VALUES (10, 1);
+        INSERT INTO itemAttachments VALUES (20, 10, 'storage:test.pdf', 'application/pdf');
         INSERT INTO itemAnnotations VALUES (30, 20, 'highlighted text', 'my comment', '0001', '12');
+        INSERT INTO itemNotes VALUES (40, 10, '<p>note text</p>');
         """
     )
     conn.commit()
@@ -336,8 +411,38 @@ def test_annotations_attributed_to_parent_item_key(tmp_path):
     doc = docs[0]
     assert doc.metadata["zotero_key"] == "PARENT"  # NOT the attachment's key
     assert doc.metadata["source_type"] == "zotero_annotation"
+    assert doc.metadata["annotation_key"] == "ANNOT"
+    assert doc.metadata["has_comment"] is True
     assert "highlighted text" in doc.content
     assert doc.doc_id == "zotero-10-annotation-30"
+
+
+def test_item_metadata_includes_selection_fields(tmp_path):
+    db_path = _zotero_fixture_db(tmp_path)
+    source = ZoteroSource({"zotero": {"enabled": True, "data_directory": str(db_path.parent)}})
+    conn = source._get_db_connection()
+    try:
+        metadata = source._get_item_metadata(conn, 10)
+    finally:
+        conn.close()
+
+    assert metadata["item_type"] == "book"
+    assert metadata["DOI"] == "10.1234/example"
+    assert metadata["abstractNote"] == "A useful abstract."
+    assert metadata["publicationTitle"] == "Coaching Studies"
+    assert metadata["language"] == "en"
+    assert metadata["tags"] == ["Process"]
+
+
+def test_partial_zotero_fetch_selects_notes_and_child_keys(tmp_path):
+    db_path = _zotero_fixture_db(tmp_path)
+    source = ZoteroSource({"zotero": {"enabled": True, "data_directory": str(db_path.parent)}})
+    docs = list(source.fetch_item_documents("PARENT", kinds={"note"}))
+
+    assert len(docs) == 1
+    assert docs[0].metadata["source_type"] == "zotero_note"
+    assert docs[0].metadata["note_key"] == "NOTEKEY"
+    assert "note text" in docs[0].content
 
 
 # ------------------------------------------------------------- bulk helpers

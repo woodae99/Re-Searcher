@@ -24,13 +24,15 @@ Re-Searcher indexes your research library (Zotero + Obsidian + local files), sto
 
 ### 1) Install
 
-This repo is managed with **Poetry** (Python **3.11+**):
+For v0.6/Sparky development, use **uv** with Python **3.12**:
 
 ```bash
-poetry install
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt -c constraints-sparky.txt
 ```
 
-(Alternative legacy install is available via `requirements.txt`, but Poetry is the canonical path.)
+The older Poetry metadata is retained for now, but the Sparky path is the one to keep current.
 
 ### 2) Configure
 

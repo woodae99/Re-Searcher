@@ -13,21 +13,21 @@ The guiding principle is:
 **Use when:** you want coverage across the literature (e.g. "coaching is a social process").
 
 **Steps**
-1) Run a broad semantic query with a moderately large recall:
+1) Run a source-level survey query with a moderately large recall:
    - set `retrieval.k_recall` high enough to cast the net (e.g. 50–200)
-   - return a smaller top‑k (e.g. 10)
-   - use `--chunk-level coarse` for substantive context (~1500-2500 chars)
-   - use `--max-per-source 1` to enforce diversity across sources
+   - return a smaller source list (e.g. 10)
+   - use `--survey` so recalled `mid` chunks are grouped/ranked by source
+   - inspect representative chunk IDs/snippets for traceable evidence
 2) Skim the returned sources (titles/authors/source_type) and shortlist.
 3) Re-query using additional terms from the best hits (names, keywords, related theories).
 
 **Example:**
 ```bash
 python scripts/query.py "coaching as a social process" -k 10 \
-  --chunk-level coarse --max-per-source 1
+  --survey --k-recall 100
 ```
 
-**Success looks like:** diversity of sources, substantive chunks not just headings, not 10 chunks from the same paper.
+**Success looks like:** ranked source candidates, hit counts/best scores, and representative chunks you can trace back to evidence.
 
 ---
 
@@ -37,9 +37,9 @@ python scripts/query.py "coaching as a social process" -k 10 \
 
 **Key parameters:**
 - Chunk granularity:
-  - `--chunk-level coarse` for overview/broad explanations
-  - `--chunk-level mid` for balanced context
-  - `--chunk-level fine` for precise definitions (may lack context)
+  - `--chunk-level mid` for v0.6 text/markdown evidence
+  - `--chunk-level atomic` for Zotero annotations
+  - `coarse`/`fine` are legacy/experimental levels only
 - Diversity control:
   - `--no-diversity` (allow many chunks from the same source)
   - `--max-per-source 10` (controlled depth, get multiple chunks per source)

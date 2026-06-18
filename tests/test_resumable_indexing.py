@@ -190,7 +190,7 @@ class TestResumableIndexing:
             assert pipeline.progress is not None
             assert pipeline.batch_size == 5
             pipeline.progress.set_total_documents(1)
-            assert (temp_output_dir / "indexing_progress.json").exists()
+            assert (temp_output_dir / "indexing_progress.research_library.json").exists()
 
     def test_batch_processing_with_mock(self, test_config_path, temp_output_dir):
         """Test batch processing with mocked components."""

@@ -1,7 +1,27 @@
 """Abstract base class for data sources."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, Optional
+
+
+@dataclass(frozen=True)
+class UnitState:
+    """Current state of one indexable unit, as reported by a source adapter.
+
+    A "unit" is the smallest thing that can change independently (a Zotero
+    note/attachment/annotation, an item's own metadata, an Obsidian file).
+    The ``fingerprint`` is an opaque string the register compares but never
+    parses — it lets detection (here) stay source-coupled while the
+    reconciliation decision stays source-agnostic. See
+    docs/SPEC_REGISTER_AS_INDEX_LEDGER.md.
+    """
+
+    unit_id: str
+    identity_field: str
+    identity_value: str
+    unit_kind: str
+    fingerprint: str
 
 
 class Document:
@@ -70,3 +90,12 @@ class DataSource(ABC):
     def validate_config(self) -> bool:
         """Validate the configuration for this source."""
         return True
+
+    def enumerate_state(self) -> Dict[str, "UnitState"]:
+        """Enumerate this source's current indexable units → {unit_id: UnitState}.
+
+        Read-only and cheap; the reconciliation planner diffs this against the
+        register's recorded fingerprints to decide what needs (re)processing.
+        Sources that don't yet implement it report no units (an empty diff).
+        """
+        return {}

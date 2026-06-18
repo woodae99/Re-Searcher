@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple
 
 from src.processing.chunker import TextChunker
 from src.processing.chunkers.atomic import AtomicChunker
-from src.processing.chunkers.hierarchical import HierarchicalChunker
 from src.processing.chunkers.markdown import MarkdownChunker
 
 logger = logging.getLogger(__name__)
@@ -19,6 +18,7 @@ class ChunkerRouter:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         chunking_config = config.get("chunking", {})
+        self.mode = chunking_config.get("mode", "v0.6_single_grain")
         self.defaults = chunking_config.get("defaults", chunking_config)
         self.huge_docs_config = chunking_config.get("huge_docs", {})
         self.markdown_enabled = chunking_config.get("markdown", {}).get("enabled", True)
@@ -29,7 +29,6 @@ class ChunkerRouter:
 
         self.atomic_chunker = AtomicChunker()
         self.markdown_chunker = MarkdownChunker(config)
-        self.hierarchical_chunker = HierarchicalChunker(config)
         self.default_chunker = TextChunker({"chunking": self.defaults})
 
     def chunk_with_metadata(
@@ -52,9 +51,6 @@ class ChunkerRouter:
         elif self.markdown_enabled and self._is_markdown(metadata, text):
             selected = "MarkdownChunker"
             result = self.markdown_chunker.chunk_with_metadata(text, metadata)
-        elif self._is_huge_document(text):
-            selected = "HierarchicalChunker"
-            result = self.hierarchical_chunker.chunk_with_metadata(text, metadata)
         else:
             selected = "TextChunker"
             result = self.default_chunker.chunk_with_metadata(text, metadata)

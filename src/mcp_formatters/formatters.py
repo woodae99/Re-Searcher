@@ -38,7 +38,7 @@ def format_search_results(
         result["authors"] = metadata.get("authors", "Unknown")
         result["source_type"] = metadata.get("source_type", "unknown")
 
-        # Hierarchical chunking metadata (vNext)
+        # Hierarchical chunking metadata
         result["chunk_level"] = metadata.get("chunk_level", "unknown")
         if "parent_id" in metadata:
             result["parent_id"] = metadata["parent_id"]
@@ -85,6 +85,13 @@ def _freshness_value(metadata: Dict[str, Any]) -> str:
         or metadata.get("source_hash")
         or "unknown"
     )
+
+
+def _truncate_field(value: Any, limit: int = 240) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 3].rstrip()}..."
 
 
 def format_source_chunks(payload: Dict[str, Any]) -> str:
@@ -180,7 +187,25 @@ def format_list_sources(payload: Dict[str, Any]) -> str:
         parts.append(f"Title: {source.get('title', 'Untitled')}")
         parts.append(f"Authors: {source.get('authors', 'Unknown')}")
         parts.append(f"Year: {source.get('year', 'unknown') or 'unknown'}")
+        if source.get("item_type"):
+            parts.append(f"Item Type: {source['item_type']}")
         parts.append(f"Source Type: {source.get('source_type', 'unknown')}")
+        if source.get("venue"):
+            parts.append(f"Venue: {source['venue']}")
+        if source.get("doi"):
+            parts.append(f"DOI: {source['doi']}")
+        if source.get("language"):
+            parts.append(f"Language: {source['language']}")
+        if source.get("tags"):
+            parts.append(f"Tags: {source['tags']}")
+        if source.get("abstract"):
+            parts.append(f"Abstract: {_truncate_field(source['abstract'])}")
+        if source.get("extractor"):
+            parts.append(f"Extractor: {source['extractor']}")
+        if source.get("extract_quality"):
+            parts.append(f"Extract Quality: {source['extract_quality']}")
+        if source.get("extract_action"):
+            parts.append(f"Extract Action: {source['extract_action']}")
         parts.append(f"Total Chunks: {source.get('total_chunks', 0)}")
         parts.append(
             "Chunk Counts: "
@@ -199,9 +224,93 @@ def format_list_sources(payload: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def format_survey_sources(payload: Dict[str, Any]) -> str:
+    """Format source-level survey results for MCP response text."""
+    sources = payload.get("sources", [])
+    page = payload.get("page", {}) or {}
+    recall = payload.get("recall", {}) or {}
+    parts = [
+        "=== Source Survey ===",
+        f"Query: {payload.get('query', '')}",
+        f"Total Matching Sources: {payload.get('total_sources', 0)}",
+        (
+            "Page: "
+            f"limit={page.get('limit', 0)}, "
+            f"returned={page.get('returned', len(sources))}"
+        ),
+        (
+            "Recall: "
+            f"k_recall={recall.get('k_recall', 'unknown')}, "
+            f"mode={recall.get('mode', 'unknown')}"
+        ),
+    ]
+
+    active_filters = {
+        key: value for key, value in (payload.get("filters", {}) or {}).items() if value
+    }
+    if active_filters:
+        parts.append(f"Filters: {active_filters}")
+
+    if not sources:
+        parts.append("\nNo source survey results found.")
+        return "\n".join(parts)
+
+    for idx, source in enumerate(sources, 1):
+        parts.append(f"\n--- Source #{idx} ---")
+        parts.append(
+            f"Identity: {source.get('identity_field', 'unknown')}={source.get('identity_value', 'unknown')}"
+        )
+        parts.append(
+            f"Best Score: {float(source.get('best_score', 0.0)):.4f}; "
+            f"Hits: {source.get('hit_count', 0)}"
+        )
+        parts.append(f"Title: {source.get('title', 'Untitled')}")
+        parts.append(f"Authors: {source.get('authors', 'Unknown')}")
+        if source.get("year"):
+            parts.append(f"Year: {source['year']}")
+        if source.get("item_type"):
+            parts.append(f"Item Type: {source['item_type']}")
+        if source.get("venue"):
+            parts.append(f"Venue: {source['venue']}")
+        if source.get("doi"):
+            parts.append(f"DOI: {source['doi']}")
+        if source.get("language"):
+            parts.append(f"Language: {source['language']}")
+        if source.get("tags"):
+            parts.append(f"Tags: {source['tags']}")
+        if source.get("abstract"):
+            parts.append(f"Abstract: {_truncate_field(source['abstract'])}")
+        if source.get("extractor"):
+            parts.append(f"Extractor: {source['extractor']}")
+        if source.get("extract_quality"):
+            parts.append(f"Extract Quality: {source['extract_quality']}")
+        if source.get("extract_action"):
+            parts.append(f"Extract Action: {source['extract_action']}")
+        if source.get("collections"):
+            parts.append(f"Collections: {source['collections']}")
+        if source.get("backlink"):
+            parts.append(f"Link: {source['backlink']}")
+
+        representatives = source.get("representative_chunks", []) or []
+        if representatives:
+            parts.append("Representative Chunks:")
+            for chunk in representatives:
+                parts.append(
+                    f"- {chunk.get('chunk_id')} "
+                    f"(score={float(chunk.get('score', 0.0)):.4f}, "
+                    f"level={chunk.get('chunk_level', '')}, "
+                    f"index={chunk.get('chunk_index')})"
+                )
+                if chunk.get("snippet"):
+                    parts.append(f"  {chunk['snippet']}")
+
+    return "\n".join(parts)
+
+
 def format_index_status(payload: Dict[str, Any]) -> str:
     """Format index health status for MCP response text."""
     registry = payload.get("registry", {}) or {}
+    ledger_drift = registry.get("ledger_drift", {}) or {}
     drift = payload.get("drift", 0)
 
     parts = [
@@ -213,6 +322,7 @@ def format_index_status(payload: Dict[str, Any]) -> str:
         f"Chroma Chunks: {payload.get('chroma_chunk_count', 0):,}",
         f"Registry Chunks: {registry.get('chunk_count', 0):,}",
         f"Registry Sources: {registry.get('source_count', 0):,}",
+        f"Index Ledger Units: {registry.get('index_unit_count', 0):,}",
         f"Drift (chroma - registry): {drift:+,}",
     ]
 
@@ -224,6 +334,54 @@ def format_index_status(payload: Dict[str, Any]) -> str:
             "Run 'python scripts/build_registry.py' to rebuild/verify, "
             "or re-run the routine index update."
         )
+
+    parts.extend([
+        "",
+        "Ledger Drift:",
+        (
+            "  Chunkless text units: "
+            f"{ledger_drift.get('chunkless_unit_count', 0):,} "
+            f"(expected coverage-null: "
+            f"{ledger_drift.get('expected_chunkless_unit_count', 0):,}; "
+            f"unexpected: "
+            f"{ledger_drift.get('unexpected_chunkless_unit_count', 0):,})"
+        ),
+        (
+            "  Orphan chunk identities: "
+            f"{ledger_drift.get('orphan_identity_count', 0):,} "
+            f"({ledger_drift.get('orphan_chunk_count', 0):,} chunks)"
+        ),
+    ])
+    if ledger_drift.get("ok", True):
+        parts.append(
+            "  Ledger Sync: OK (no orphan chunks or unexpected chunkless units)"
+        )
+    else:
+        parts.append(
+            "  Ledger Sync: DRIFT DETECTED - run the routine index update "
+            "or rebuild the dev registry/collection."
+        )
+        chunkless_samples = (
+            ledger_drift.get("unexpected_chunkless_unit_samples")
+            or ledger_drift.get("chunkless_unit_samples")
+            or []
+        )
+        orphan_samples = ledger_drift.get("orphan_identity_samples") or []
+        if chunkless_samples:
+            rendered = ", ".join(
+                str(sample.get("unit_id", "unknown"))
+                for sample in chunkless_samples[:3]
+            )
+            parts.append(f"  Unexpected chunkless sample: {rendered}")
+        if orphan_samples:
+            rendered = ", ".join(
+                (
+                    f"{sample.get('identity_field', 'identity')}="
+                    f"{sample.get('identity_value', 'unknown')}"
+                )
+                for sample in orphan_samples[:3]
+            )
+            parts.append(f"  Orphan sample: {rendered}")
 
     parts.extend([
         "",

@@ -1,5 +1,6 @@
 """ChromaDB vector storage backend."""
 
+import sys
 from typing import Any, Dict, List, Tuple
 
 import chromadb
@@ -69,10 +70,12 @@ class ChromaVectorStore(VectorStore):
             metadata={"hnsw:space": self.chroma_distance},
         )
         count = collection.count()
+        # Status/diagnostic line → stderr, so machine-readable command output
+        # (e.g. query.py/sources.py --json) keeps stdout clean.
         if count > 0:
-            print(f"[OK] Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)")
+            print(f"[OK] Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)", file=sys.stderr)
         else:
-            print(f"[OK] Created/connected to ChromaDB collection: {self.collection_name}")
+            print(f"[OK] Created/connected to ChromaDB collection: {self.collection_name}", file=sys.stderr)
         return collection
 
     def add_documents(
@@ -98,20 +101,7 @@ class ChromaVectorStore(VectorStore):
         if ids is None:
             ids = [f"doc_{i}" for i in range(len(texts))]
 
-        # ChromaDB requires metadata values to be strings, ints, floats, or bools
-        # Convert lists and other types to strings
-        sanitized_metadatas = []
-        for metadata in metadatas:
-            sanitized = {}
-            for key, value in metadata.items():
-                if isinstance(value, (str, int, float, bool)):
-                    sanitized[key] = value
-                elif isinstance(value, list):
-                    # Convert lists to comma-separated strings
-                    sanitized[key] = ", ".join(str(v) for v in value)
-                else:
-                    sanitized[key] = str(value)
-            sanitized_metadatas.append(sanitized)
+        sanitized_metadatas = self._sanitize_metadatas(metadatas)
 
         try:
             self.collection.upsert(
@@ -213,11 +203,54 @@ class ChromaVectorStore(VectorStore):
 
     def delete_where(self, where: Dict[str, Any]) -> None:
         """Delete documents matching a Chroma where filter."""
+        normalized_where = self._normalize_where(where)
         try:
-            self.collection.delete(where=where)
+            self.collection.delete(where=normalized_where)
         except Exception as e:
-            print(f"[ERROR] Error deleting documents by filter {where}: {e}")
+            print(f"[ERROR] Error deleting documents by filter {normalized_where}: {e}")
             raise
+
+    def update_metadata(self, ids: List[str], metadatas: List[Dict[str, Any]]) -> None:
+        """Update metadata for existing documents without changing text/embeddings."""
+        if not ids:
+            return
+        try:
+            self.collection.update(
+                ids=ids,
+                metadatas=self._sanitize_metadatas(metadatas),
+            )
+        except Exception as e:
+            print(f"[ERROR] Error updating ChromaDB metadata: {e}")
+            raise
+
+    @staticmethod
+    def _sanitize_metadatas(metadatas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert metadata values to Chroma-supported scalar types."""
+        sanitized_metadatas = []
+        for metadata in metadatas:
+            sanitized = {}
+            for key, value in (metadata or {}).items():
+                if isinstance(value, (str, int, float, bool)):
+                    sanitized[key] = value
+                elif isinstance(value, list):
+                    sanitized[key] = ", ".join(str(v) for v in value)
+                elif value is None:
+                    sanitized[key] = ""
+                else:
+                    sanitized[key] = str(value)
+            sanitized_metadatas.append(sanitized)
+        return sanitized_metadatas
+
+    @staticmethod
+    def _normalize_where(where: Dict[str, Any]) -> Dict[str, Any]:
+        """Wrap multi-field equality filters in Chroma's required $and form."""
+        if not where or "$and" in where or "$or" in where:
+            return where
+        if len(where) <= 1:
+            return where
+        if any(isinstance(value, dict) for value in where.values()):
+            return where
+        return {"$and": [{key: value} for key, value in where.items()]}
 
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the collection."""

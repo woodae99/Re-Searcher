@@ -65,24 +65,50 @@ local_files:
 
 # Embedding model configuration
 embedding:
-  # Provider: 'lmstudio' or 'openai'
-  provider: lmstudio
-  # LM Studio endpoint (OpenAI-compatible API)
-  endpoint: "http://localhost:1234/v1"
-  # Model name for LM Studio
-  model: "text-embedding-bge-m3"
-  # Batch size for embedding requests
+  # Provider: 'vllm' (production), 'lmstudio' (interactive/graphical), or 'openai'.
+  # v0.6 production backend is vLLM serving Qwen3-Embedding-0.6B — ~6x LM Studio's
+  # embedding throughput. See docs/EMBEDDER_BAKEOFF.md and docs/EMBEDDING_BACKEND.md.
+  provider: vllm
+  # Model identifier (vLLM loads from HuggingFace; LM Studio uses its catalog id).
+  model: "Qwen/Qwen3-Embedding-0.6B"
+  # Asymmetric query instruction. Qwen3-Embedding expects this on QUERIES only;
+  # documents are embedded raw. Required to realise Qwen3's retrieval-quality edge.
+  # Leave empty ("") for symmetric embedders like bge-m3.
+  query_instruction: "Instruct: Given a research question, retrieve passages that answer it\nQuery:"
+  # Batch size for embedding requests (vLLM batches efficiently; 128 is a good default).
   batch_size: 128
-  # Maximum parallel embedding API requests
-  max_concurrent_requests: 2
-  # Timeout for API requests (seconds)
-  timeout: 30
-  # Model context length (for oversize guard calculations)
-  context_length: 8192  # BGE-M3 context window
-  # Provider-specific settings (preferred)
+  # Maximum parallel embedding API requests.
+  max_concurrent_requests: 8
+  # Timeout for API requests (seconds).
+  timeout: 120
+  # Model context length. MUST exceed chunking.max_tokens_per_chunk (the oversize
+  # guard) — Markdown chunks (conversation logs / tables with no paragraph breaks) can
+  # be large, and a batch with ANY over-context chunk fails entirely (fail-loud embed).
+  # On vLLM a larger window costs little (token-batched); on llama.cpp it's slower.
+  context_length: 8192
+  # --- vLLM backend (OpenAI-compatible) + managed lifecycle -------------------
+  vllm:
+    base_url: "http://localhost:8002/v1"
+    model: "Qwen/Qwen3-Embedding-0.6B"
+    # Managed lifecycle: bulk jobs (index/reindex) auto stand-up/stand-down the
+    # container; `scripts/vllm_service.py start` runs a persistent one for retrieval.
+    managed:
+      enabled: true
+      image: "vllm/vllm-openai:v0.20.0"
+      container_name: "researcher-vllm-embed"
+      port: 8002
+      gpus: "all"
+      runner: "pooling"           # vLLM's embedding/pooling runner
+      max_model_len: 8192         # must exceed chunking.max_tokens_per_chunk (7000)
+      gpu_memory_utilization: 0.3
+      hf_cache: "~/.cache/huggingface"
+      startup_timeout: 900        # first run downloads weights + compiles
+      keep_up: false              # bulk jobs tear down; the service command keeps up
+      extra_args: []              # any additional `vllm serve` flags
+  # --- LM Studio (interactive/graphical alternative) --------------------------
   lmstudio:
     base_url: "http://localhost:1234/v1"
-    model: "text-embedding-model-name"
+    model: "text-embedding-bge-m3"
     batch_size: 128
     max_concurrent_requests: 2
     timeout_seconds: 120
@@ -111,16 +137,36 @@ extraction:
   workers: auto
   # Execution mode: 'thread' (recommended) or 'process'
   mode: thread
+  router:
+    # v0.6 PDF/fulltext seam. Zotero FT cache is tried first, then pdfminer.
+    # Candidate text is quality-scored; recoverable noise is deterministically
+    # cleaned and re-scored; unresolved failures are recorded as provenance.
+    enabled: true
+    pdfminer_timeout_seconds: 60
+    # Marker/OCR remains an opt-in expensive escalation backstop.
+    marker_enabled: false
 
 # Text chunking configuration
 chunking:
+  # v0.6 production mode: a single retrieval grain in Chroma.
+  # - Zotero/fulltext/default text -> recursive mid chunks
+  # - Zotero annotations -> atomic chunks
+  # - Obsidian markdown -> mid chunks with heading_path
+  # Legacy hierarchy is retired; production indexing uses this single mode.
+  mode: v0.6_single_grain
+  # v0.6 working grain — recursive 700/100, settled by measured retrieval evals.
+  # 'recursive' decisively beats 'character' (which only splits on blank lines and
+  # so can't break over-long paragraphs); size 700/100 wins on passage-retrieval
+  # quality through the production rerank stage while staying lean to read.
+  # See docs/CHUNKING_EVAL.md (source-level) and docs/PASSAGE_EVAL.md (passage+rerank).
   # Chunk size in characters
-  chunk_size: 2048
+  chunk_size: 700
   # Overlap between chunks
-  chunk_overlap: 256
-  # Chunking strategy: 'character', 'token', or 'semantic'
-  strategy: character
-  # New router configuration (vNext)
+  chunk_overlap: 100
+  # Chunking strategy: 'character' | 'recursive' | 'token' | 'semantic'
+  strategy: recursive
+  # Router configuration. In v0.6_single_grain mode, this router never routes
+  # huge documents to the legacy hierarchical chunker.
   router_enabled: true
   id_strategy: stable_hash  # stable_hash | legacy
   # Oversize guard settings (prevents embedder truncation)
@@ -151,22 +197,14 @@ chunking:
       enabled: true
       top_n: 50
       output_path: "runs/{RUN_ID}/quality_report.json"
-  defaults:
+  defaults:                # used by the flat TextChunker (e.g. Zotero PDF fulltext)
     strategy: recursive
-    chunk_size: 2048
-    chunk_overlap: 256
+    chunk_size: 700        # v0.6 working grain — see docs/PASSAGE_EVAL.md
+    chunk_overlap: 100
   markdown:
     enabled: true
     header_levels: [1, 2, 3]
     max_section_tokens: 900
-  huge_docs:
-    enabled: true
-    huge_doc_tokens: 25000
-    levels:
-      coarse: { chunk_size: 2200, chunk_overlap: 200 }
-      mid:    { chunk_size: 700,  chunk_overlap: 100 }
-      fine:   { chunk_size: 220,  chunk_overlap: 40 }
-
 retrieval:
   k_recall: 50
   mode_default: fast  # fast | strict
@@ -174,18 +212,31 @@ retrieval:
     enabled: true
   rerank:
     enabled: true
-    type: llm  # none | llm | cross_encoder
+    # none | cross_encoder. v0.6 production runtime is 'cross_encoder' served
+    # by vLLM's native /rerank — fast, no LLM JSON to parse. See docs/EMBEDDING_BACKEND.md.
+    type: cross_encoder
     # If set, limit reranked list before final k-return slice.
     top_n: 8
-    # Bound reranker input to avoid context blowups / truncation
+    # Bound reranker input (applies to both reranker types).
     max_candidates: 30
     max_chars_per_candidate: 1200
-    llm:
-      provider: lmstudio  # lmstudio | openai
-      # Must be set when rerank.enabled=true
-      model: ibm/granite-4-micro
-      max_tokens: 512
-      temperature: 0.0
+    # --- cross-encoder reranker via vLLM /rerank (production) ----------------
+    cross_encoder:
+      base_url: "http://localhost:8005/v1"
+      model: "BAAI/bge-reranker-v2-m3"   # or Qwen3-Reranker-0.6B (matched to the embedder)
+      timeout_seconds: 60
+      managed:                            # own vLLM container, same lifecycle pattern
+        enabled: true
+        image: "vllm/vllm-openai:v0.20.0"
+        container_name: "researcher-vllm-rerank"
+        port: 8005
+        gpus: "all"
+        runner: "pooling"                 # cross-encoders are pooling/scoring models
+        max_model_len: 1024
+        gpu_memory_utilization: 0.25
+        hf_cache: "~/.cache/huggingface"
+        startup_timeout: 900
+        keep_up: false
   diversity:
     enabled: true
     # Grouping key preference for limiting repeats.
@@ -200,6 +251,13 @@ retrieval:
 output_folder: ./output
 log_progress: true
 
+# Structured per-run event stream for long indexing jobs. Events are written to
+# <output_folder>/runs/<run_id>/events.jsonl, with a compact summary at the end.
+run_reporting:
+  enabled: true
+  events_file: "events.jsonl"
+  summary_file: "summary.json"
+
 # Indexing configuration
 indexing:
   # Documents per batch for resumable indexing
@@ -211,11 +269,13 @@ indexing:
   stop_after_batch:
     flag_file: "stop_after_batch.flag"
   delta:
-    enabled: true
-    state_file: "zotero_delta_state.json"
-    # Changed/deleted items have their old chunks removed in batches of this
-    # size before re-indexing. There is no upper limit on keys per run.
+    # Retired for v0.6 production; the register ledger decides all work.
+    enabled: false
     delete_batch_size: 100
+  ledger:
+    # v0.6 production executes updates from the register-ledger work plan.
+    execute: true
+    shadow: false
   # Optional: pipeline embed/store overlap to reduce idle time
   embed_store_pipeline:
     enabled: false

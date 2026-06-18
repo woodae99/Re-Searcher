@@ -21,18 +21,20 @@ retrieval:
   k_recall: 50
   rerank:
     enabled: true
-    type: llm
+    type: cross_encoder
     top_n: 8
-    llm:
-      provider: lmstudio
-      model: null
-      max_tokens: 256
-      temperature: 0.0
+    max_candidates: 30
+    max_chars_per_candidate: 1200
+    cross_encoder:
+      base_url: "http://localhost:8005/v1"
+      model: "BAAI/bge-reranker-v2-m3"
+      timeout_seconds: 60
   expand:
     include_parent: true
     max_parents: 1
 ```
 
-## Switching providers
+## Production backend
 
-The reranker currently supports LM Studio via its OpenAI-compatible chat endpoint. Additional providers can be added behind the reranker factory without touching the pipeline.
+v0.6 production uses a vLLM-served cross-encoder via `/v1/rerank`.
+The old LM Studio / small-LLM JSON reranker path has been retired.

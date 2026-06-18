@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-Searcher tailnet exposure (tailscale serve) + warmup
+PartOf=researcher.target
+After=researcher-mcp.service
+Requires=researcher-mcp.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/colin/Dev/Re-Searcher
+# Proxy the tailnet port to the loopback MCP server (userspace tailscale can't bind
+# the 100.x IP directly), then run one query to absorb the cold-start latency.
+ExecStart=/home/colin/Dev/Re-Searcher/scripts/researcher_svc.sh serve-up
+ExecStartPost=/home/colin/Dev/Re-Searcher/scripts/researcher_svc.sh warmup
+ExecStop=/home/colin/Dev/Re-Searcher/scripts/researcher_svc.sh serve-down
+
+[Install]
+WantedBy=researcher.target

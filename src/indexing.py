@@ -6,6 +6,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from .durable_write import write_json_durable
+
 
 class DocumentStatus(Enum):
     """Status of a document in the indexing pipeline."""
@@ -200,14 +202,10 @@ class IndexingProgress:
             print("[PROGRESS] No documents yet")
 
     def _save(self):
-        """Save progress to JSON file."""
+        """Save progress to JSON file (durable, crash-safe)."""
         self.data["updated_at"] = datetime.now().isoformat()
-        tmp_file = self.progress_file.with_suffix(self.progress_file.suffix + ".tmp")
         try:
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, indent=2)
-                f.flush()
-            tmp_file.replace(self.progress_file)
+            write_json_durable(self.progress_file, self.data, indent=2)
         except PermissionError:
             # Some environments block temp sidecar writes in certain dirs.
             # Fall back to direct write rather than failing indexing progress.
