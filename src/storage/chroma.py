@@ -1,5 +1,6 @@
 """ChromaDB vector storage backend."""
 
+import sys
 from typing import Any, Dict, List, Tuple
 
 import chromadb
@@ -69,10 +70,12 @@ class ChromaVectorStore(VectorStore):
             metadata={"hnsw:space": self.chroma_distance},
         )
         count = collection.count()
+        # Status/diagnostic line → stderr, so machine-readable command output
+        # (e.g. query.py/sources.py --json) keeps stdout clean.
         if count > 0:
-            print(f"[OK] Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)")
+            print(f"[OK] Connected to existing ChromaDB collection: {self.collection_name} ({count} documents)", file=sys.stderr)
         else:
-            print(f"[OK] Created/connected to ChromaDB collection: {self.collection_name}")
+            print(f"[OK] Created/connected to ChromaDB collection: {self.collection_name}", file=sys.stderr)
         return collection
 
     def add_documents(

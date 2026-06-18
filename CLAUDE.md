@@ -70,8 +70,16 @@ environment; they are unrelated to most changes.
 
 - **Thin MCP wrapper**: tool handlers delegate to the pipeline/registry; no business
   logic in `mcp_server.py`. Output formatting lives in `src/mcp_formatters/`.
-- **CLI/MCP parity**: every enumeration capability exists on both surfaces and runs
-  the same code. New tools get a `scripts/sources.py` subcommand.
+- **CLI/MCP parity**: every capability exists on both surfaces and runs the same code.
+  Enumeration tools get a `scripts/sources.py` subcommand; search/survey live in
+  `scripts/query.py`. Machine output is identical too — `--json` on both `sources.py`
+  and `query.py` emits payloads built from the shared `src/mcp_formatters` the MCP
+  tools use, so CLI↔MCP parity holds by construction, not by a second serializer.
+- **stdout is the data channel**: a `--json` command must emit only JSON on stdout.
+  All status/diagnostic lines (`[OK]` connect/source banners, `Query:`/`[TIMING]`)
+  go to **stderr** (see `src/storage/chroma.py`, `src/pipeline.py`). Consumers parse
+  stdout directly — no "skip to the first `{`" slicing. `tests/integration/test_mission_surface_parity.py`
+  enforces this and fails if a status line leaks onto stdout.
 - **Source identity rule** (single definition in `src/registry.py`): Zotero-derived
   chunks group by `zotero_key`; everything else by `source_id`
   (`obsidian-<relative_path>` for vault notes).

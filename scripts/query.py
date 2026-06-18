@@ -2,6 +2,7 @@
 """CLI script for querying the research library."""
 
 import argparse
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -16,6 +17,7 @@ if sys.platform == "win32":
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.mcp_formatters import format_search_results
 from src.pipeline import ResearchRAGPipeline
 
 
@@ -379,6 +381,15 @@ def main():
         help="Show full text of results instead of truncated preview. Useful for detailed analysis.",
     )
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "Emit the raw result payload as JSON instead of formatted text "
+            "(machine surface; mirrors the MCP search/survey tool output). "
+            "Works with one-shot queries, with or without --survey."
+        ),
+    )
+    parser.add_argument(
         "--survey",
         action="store_true",
         help=(
@@ -537,7 +548,10 @@ def main():
                     tag=args.tag,
                     representative_limit=args.representative_chunks,
                 )
-                print_survey_results(payload)
+                if args.json:
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+                else:
+                    print_survey_results(payload)
             else:
                 results = pipeline.query(
                     query_text,
@@ -555,7 +569,17 @@ def main():
                     year_min=args.year_min,
                     year_max=args.year_max,
                 )
-                print_results(results, show_full_text=args.full)
+                if args.json:
+                    # Reuse the shared MCP formatter so the CLI machine surface
+                    # matches search_research_library by construction.
+                    payload = {
+                        "query": query_text,
+                        "count": len(results),
+                        "results": format_search_results(results),
+                    }
+                    print(json.dumps(payload, indent=2, ensure_ascii=False))
+                else:
+                    print_results(results, show_full_text=args.full)
         else:
             interactive_mode(pipeline)
 

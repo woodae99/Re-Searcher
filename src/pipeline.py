@@ -4,6 +4,7 @@ import json
 import hashlib
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -270,14 +271,14 @@ class ResearchRAGPipeline:
         zotero = ZoteroSource(self.config, progress_callback=zotero_callback)
         if zotero.is_enabled() and zotero.validate_config():
             sources.append(zotero)
-            print("[OK] Zotero source enabled")
+            print("[OK] Zotero source enabled", file=sys.stderr)
 
         # Obsidian source
         obsidian_callback = self._create_source_progress_callback("Obsidian")
         obsidian = ObsidianSource(self.config, progress_callback=obsidian_callback)
         if obsidian.is_enabled() and obsidian.validate_config():
             sources.append(obsidian)
-            print("[OK] Obsidian source enabled")
+            print("[OK] Obsidian source enabled", file=sys.stderr)
 
         if not sources:
             print("[WARNING] No data sources enabled!")
@@ -2071,7 +2072,7 @@ class ResearchRAGPipeline:
         Returns:
             List of search results as (doc_id, text, score, metadata) tuples
         """
-        print(f"\nQuery: {query_text}\n")
+        print(f"\nQuery: {query_text}\n", file=sys.stderr)
         t_total_start = time.perf_counter()
         timings: Dict[str, float] = {}
 
@@ -2193,7 +2194,8 @@ class ResearchRAGPipeline:
             print(
                 "[TIMING] "
                 f"mode={mode} "
-                + " ".join(f"{k}={v:.1f}" for k, v in timings.items())
+                + " ".join(f"{k}={v:.1f}" for k, v in timings.items()),
+                file=sys.stderr,
             )
         return results
 
@@ -2220,7 +2222,7 @@ class ResearchRAGPipeline:
         where: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run a broad survey by aggregating chunk hits into source rows."""
-        print(f"\nSurvey query: {query_text}\n")
+        print(f"\nSurvey query: {query_text}\n", file=sys.stderr)
         t_total_start = time.perf_counter()
         timings: Dict[str, float] = {}
 
@@ -2314,6 +2316,7 @@ class ResearchRAGPipeline:
             print(
                 "[TIMING] "
                 f"mode={mode} survey=true "
-                + " ".join(f"{key}={value:.1f}" for key, value in timings.items())
+                + " ".join(f"{key}={value:.1f}" for key, value in timings.items()),
+                file=sys.stderr,
             )
         return payload

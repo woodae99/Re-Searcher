@@ -39,8 +39,25 @@
   HTTP client seam for a future BGE rerank service (LM Studio has no rerank
   endpoint — see the doc for TEI / Infinity / vLLM options and a promotion path to
   `src/retrieval/rerank.py`).
+- **`scripts/query.py --json`** — the CLI search/survey surface now has a
+  machine-readable mode, closing the last CLI↔MCP parity gap. Search emits
+  `{query, count, results}` (results via the shared `format_search_results`); survey
+  emits the `survey_sources` payload — the same shapes the MCP `search_research_library`
+  / `survey_research_sources` tools return, so parity holds by construction. Works on
+  one-shot queries with or without `--survey`. (`scripts/sources.py` already had `--json`.)
+- **Mission-surface validation suite** (`tests/integration/test_mission_surface_parity.py`):
+  22 live-stack tests derived from the process-in-coaching mission spec — proves CLI/MCP
+  availability + equivalence, single-grain retrieval (mid only, no `parent_id`),
+  register-as-control-plane filtering + extraction provenance, the §5 screening
+  enumeration (all mid chunks, deterministic stop), and survey/pinned-source retrieval.
+  Service-guarded so it skips cleanly when the live stack is down.
 
 ### Changed
+- **Status/diagnostics moved to stderr; stdout is the data channel.** The `[OK]`
+  Chroma-connect and Zotero/Obsidian source banners (`src/storage/chroma.py`,
+  `src/pipeline.py`) and the per-query `Query:`/`Survey query:`/`[TIMING]` lines now
+  print to **stderr**. `--json` stdout is therefore pristine JSON that consumers parse
+  directly — no leading-banner slicing. Humans still see the diagnostics on the terminal.
 - **Chunking defaults → `recursive` 700/100** in `config.example.yaml` (top-level
   and `chunking.defaults`), replacing the stale `character`/2048 default. Settled
   by measured retrieval evals: `recursive` decisively beats `character`, and

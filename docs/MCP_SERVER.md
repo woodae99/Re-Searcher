@@ -338,16 +338,26 @@ trusting enumeration results.
 
 ## CLI parity
 
-Every enumeration tool has a CLI equivalent with identical logic and output
-formatting (`scripts/sources.py`):
+Every tool has a CLI equivalent with identical logic and output. Enumeration tools
+live in `scripts/sources.py`; search and survey live in `scripts/query.py`:
 
 ```bash
 python scripts/sources.py list --source-type zotero_fulltext --title-contains coaching
 python scripts/sources.py chunks --zotero-key XMN6HI9Y --chunk-level mid --no-text
 python scripts/sources.py status
+python scripts/query.py "how is process used in coaching" --zotero-key XMN6HI9Y --no-rerank --json
+python scripts/query.py "process becoming flux" --survey --max-per-source 1 --json
 ```
 
-Add `--json` to any subcommand for machine-readable output.
+Add `--json` to any `sources.py` subcommand or to `query.py` for machine-readable
+output. The CLI `--json` payloads are built from the same `src/mcp_formatters`
+the MCP tools use, so they match the corresponding tool output by construction
+(`search_research_library` ↔ `query.py --json`, `survey_research_sources` ↔
+`query.py --survey --json`).
+
+**stdout is the data channel.** With `--json`, stdout carries only JSON — all
+status/diagnostic lines (`[OK]` connect/source banners, `Query:`/`[TIMING]`) go to
+stderr. Parse stdout directly; no banner-slicing needed.
 
 ## Maintenance
 

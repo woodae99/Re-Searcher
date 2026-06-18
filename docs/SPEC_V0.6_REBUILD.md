@@ -54,7 +54,7 @@ fix all of the above in v0.6 with a **clean rebuild against empty databases** fo
 production going forward. Cleaning the existing DB is throwaway work and is not done unless
 mission pressure forces it before v0.6 lands.
 
-## 1a. Current implementation status (2026-06-17)
+## 1a. Current implementation status (2026-06-18)
 
 This spec has evolved through evidence and implementation. The current branch is no
 longer the 2026-06-13 proposal state.
@@ -87,6 +87,19 @@ longer the 2026-06-13 proposal state.
 - Structured run/failure reporting (`src/run_reporting.py`) over extraction/chunk/embed/store.
 - Ledger parity suite (`tests/unit/test_ledger_parity.py`): planner + end-to-end
   parity vs the legacy delta path, granularity guarantees, and crash/resume convergence.
+- **Live-stack surface validation on Sparky (2026-06-18).** The full test build runs
+  on Sparky (`spark-9440`): Chroma (native, :8000) + vLLM embed (`researcher-vllm-embed`,
+  :8002), collection `research_test_v06` = 175,354 chunks / 592 sources / 1,284 ledger
+  units. Chroma↔registry parity exact (drift +0); ledger 11 chunkless text units
+  (no-fulltext attachments = the mission's "no indexed full text → flag" class) and
+  0 orphan chunks. CLI and MCP confirmed available, functionally equivalent, and
+  exploiting the two-plane architecture (register filtering + provenance, single-grain
+  mid retrieval, survey-by-source, deterministic screening enumeration) by
+  `tests/integration/test_mission_surface_parity.py` (22 mission-derived tests).
+- **CLI machine-surface parity complete.** `scripts/query.py --json` closes the last
+  gap: CLI search/survey emit the same `src/mcp_formatters` payloads as the MCP tools.
+  Status/diagnostics route to stderr so `--json` stdout is pristine (convention recorded
+  in `CLAUDE.md`).
 
 **Still open before final v0.6**
 - **Ledger cutover is not done.** `indexing.ledger.execute` stays `false` and the
